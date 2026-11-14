@@ -10,10 +10,10 @@ gofumpt:
 	@test -x "$(GOFUMPT)" || GOBIN="$(GOBIN)" go install mvdan.cc/gofumpt@latest
 
 fmt: gofumpt
-	$(GOFUMPT) -w ./cmd ./internal
+	$(GOFUMPT) -w ./cmd ./internal ./test
 
 fmt-check: gofumpt
-	@out=`"$(GOFUMPT)" -l ./cmd ./internal`; \
+	@out=`"$(GOFUMPT)" -l ./cmd ./internal ./test`; \
 	if [ -n "$$out" ]; then \
 		echo "files are not gofumpt-clean:"; \
 		echo "$$out"; \
