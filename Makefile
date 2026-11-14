@@ -45,10 +45,10 @@ release-docker:
 		-v factory-gocache:/root/.cache/go-build \
 		-e CGO_ENABLED=0 \
 		"$(DOCKER_GOIMG)" sh -ec '\
-			GOOS=linux GOARCH=amd64 go build -o dist/factory-linux-amd64 ./cmd/factory && \
-			GOOS=linux GOARCH=arm64 go build -o dist/factory-linux-arm64 ./cmd/factory && \
-			GOOS=linux GOARCH=amd64 go build -o dist/foreman-linux-amd64 ./cmd/foreman && \
-			GOOS=linux GOARCH=arm64 go build -o dist/foreman-linux-arm64 ./cmd/foreman'
+			GOOS=linux GOARCH=amd64 go build -buildvcs=false -o dist/factory-linux-amd64 ./cmd/factory && \
+			GOOS=linux GOARCH=arm64 go build -buildvcs=false -o dist/factory-linux-arm64 ./cmd/factory && \
+			GOOS=linux GOARCH=amd64 go build -buildvcs=false -o dist/foreman-linux-amd64 ./cmd/foreman && \
+			GOOS=linux GOARCH=arm64 go build -buildvcs=false -o dist/foreman-linux-arm64 ./cmd/foreman'
 	-docker run --rm -v "$(CURDIR):/src" -w /src "$(DOCKER_GOIMG)" \
 		chown -R $$(id -u):$$(id -g) dist
 
