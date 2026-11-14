@@ -185,7 +185,8 @@ func TestSpecValidate(t *testing.T) {
 	}{
 		{"ok constructor defaults", nil, false},
 		{"ok with requires", func(s *JobSpec) { s.Requires = []string{"gpu", "docker"} }, false},
-		{"ok empty tier means default", func(s *JobSpec) { s.Tier = "" }, false},
+		{"ok empty tier means the cheap default", func(s *JobSpec) { s.Tier = "" }, false},
+		{"ok flash tier", func(s *JobSpec) { s.Tier = TierFlash }, false},
 		{"ok explicit default tier", func(s *JobSpec) { s.Tier = TierDefault }, false},
 		{"ok hardest tier", func(s *JobSpec) { s.Tier = TierHardest }, false},
 		{"reject unknown tier", func(s *JobSpec) { s.Tier = "turbo" }, true},

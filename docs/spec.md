@@ -219,7 +219,7 @@ a different, fixed curve.)
   "payload": {},
   "result_schema": {},
   "requires": ["gpu"],
-  "tier": "default",
+  "tier": "flash",
   "timeout_s": 300,
   "priority": 5,
   "budget": {
@@ -233,7 +233,8 @@ a different, fixed curve.)
 ```
 
 Defaults shown; `priority` 1-9, 9 highest (#3). `tier` selects the
-worker's model tier (#28): `default` (or absent) or `hardest`; see §6.5.
+worker's model tier (#28, #29): `flash` (or absent - the cost-biased
+default), `default`, or `hardest`; see §6.5.
 
 ### 5.2 JobResult (#3)
 
@@ -343,25 +344,30 @@ created today; above the config cap (default $20/day) the factory refuses new
 `create_job` with error `spend_cap_exceeded`; reset by config bump or env
 `FACTORY_SPEND_OVERRIDE=1`.
 
-Model tiering (#13, #28): the factory standardizes on GLM and optimizes
-for cost - `internal/models` pins the per-role defaults, every role is
+Model tiering (#13, #28, #29): the factory standardizes on GLM via
+OpenRouter (one provider, one credential) and optimizes for cost -
+`internal/models` pins the per-role defaults, every role is
 env-overridable, and swapping a role's model stays a config change only:
 
 | Role | Pinned default | Env override |
 | --- | --- | --- |
-| factory planner | `openrouter/z-ai/glm-5.3-flash` | `FACTORY_PLANNER_MODEL` |
-| foreman brain | `openrouter/z-ai/glm-5.3-flash` | `FACTORY_FOREMAN_BRAIN_MODEL` |
-| worker (default tier) | `openrouter/z-ai/glm-5.2` | `FACTORY_WORKER_MODEL` |
-| worker (`tier: "hardest"`, §5.1) | `ollama-cloud/glm-5.3` | `FACTORY_WORKER_HARDEST_MODEL` |
+| factory planner | `openrouter/z-ai/glm-5.2` | `FACTORY_PLANNER_MODEL` |
+| foreman brain | `openrouter/z-ai/glm-5.2` | `FACTORY_FOREMAN_BRAIN_MODEL` |
+| worker, `tier: "flash"` (and no-tier jobs) | `openrouter/z-ai/glm-5.3-flash` | `FACTORY_WORKER_FLASH_MODEL` |
+| worker, `tier: "default"` | `openrouter/z-ai/glm-5.2` | `FACTORY_WORKER_MODEL` |
+| worker, `tier: "hardest"` | `openrouter/z-ai/glm-5.3` | `FACTORY_WORKER_HARDEST_MODEL` |
 
-GLM 5.3 Flash carries the conversational overhead roles; workers default
-to GLM 5.2; the strongest GLM 5.3 runs only jobs explicitly marked
-`tier: "hardest"` (§5.1, flows through `create_job`, `POST /v1/jobs`,
-schedules, and the `job.request` envelope). Model strings are injected via
-the generated child config (§8.4). Reporting (v1 amendment, #13):
-`GET /v1/spend?day=` returns daily totals `{total_usd, jobs}` - jobs do
-not yet carry a role tag, so per-role totals `{planner, foreman_brain,
-worker}` are deferred until they do.
+The brains run at least GLM 5.2 (#29). Dispatching agents (the factory
+planner's `create_job`, the foreman brain's `spawn_worker`) choose among
+the three worker tiers and BIAS TOWARDS SAVING MONEY (#29): pick the
+cheapest tier that can do the job - flash for routine work, escalate to
+GLM 5.2 or 5.3 only when the task needs it. A job that carries no tier
+runs flash (the cost-biased default). The tier rides JobSpec (§5.1)
+through `create_job`, `POST /v1/jobs`, schedules, and the job create UI.
+Model strings are injected via the generated child config (§8.4).
+Reporting (v1 amendment, #13): `GET /v1/spend?day=` returns daily totals
+`{total_usd, jobs}` - jobs do not yet carry a role tag, so per-role
+totals `{planner, foreman_brain, worker}` are deferred until they do.
 
 ### 6.6 LLM context cap (#7)
 
@@ -623,7 +629,8 @@ the agent actually sees.
   enforcement path.
 - Model strings per role come from the tiering config (§6.5), injected via
   the generated config's `model` field (worker jobs select their tier per
-  §5.1/§6.5: `default` -> GLM 5.2, `hardest` -> GLM 5.3).
+  §5.1/§6.5: flash -> GLM 5.3 Flash, default -> GLM 5.2, hardest ->
+  GLM 5.3).
 - opencode must be on PATH - the foreman's responsibility (#5; #12 detects
   it at startup).
 
@@ -695,9 +702,11 @@ Tools (exact):
 - `inbox_next(wait_seconds=0)` - oldest unacked envelope.
 - `inbox_ack(ids)`.
 - `post_to_factory(type, payload)` - envelope to the parent inbox.
-- `spawn_worker(task, result_schema?, timeout_s?, budget?)` - creates a local
+- `spawn_worker(task, result_schema?, tier?, timeout_s?, budget?)` - creates a local
   JobSpec, enqueues it to the harness, returns `job_id` immediately (never
-  blocks).
+  blocks). `tier` picks the worker model (§5.1, §6.5): flash (GLM 5.3
+  Flash, cheapest, also the no-tier default), default (GLM 5.2), hardest
+  (GLM 5.3) - bias towards the cheapest tier that can do the job (#29).
 - `answer_worker(job_id, answer)` - posts `job.answer` to the job inbox.
 
 Brain session mechanics: the foreman runtime spawns opencode with
@@ -719,8 +728,10 @@ Tools (exact):
   (summaries only, per #7).
 - `create_job(task, requires?, result_schema?, tier?, timeout_s?, priority?,
   schedule_cron?)` - ad hoc dispatch via the Matcher interface; `tier`
-  selects the worker's model tier (§5.1, §6.5: `default` -> GLM 5.2,
-  `hardest` -> GLM 5.3); with `schedule_cron`, also creates a schedule via
+  selects the worker's model tier (§5.1, §6.5: flash -> GLM 5.3 Flash,
+  the cheapest and the no-tier default; default -> GLM 5.2; hardest ->
+  GLM 5.3) - bias towards the cheapest tier that can do the job (#29);
+  with `schedule_cron`, also creates a schedule via
   the #8 API (§6.8). Refused with error `spend_cap_exceeded` when the
   daily spend breaker is open (#13).
 - `read_result(job_id)` - full result payload; the ONLY path by which full

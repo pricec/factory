@@ -52,8 +52,12 @@ type Config struct {
 	// BrainModel is the opencode model string for brain sessions;
 	// "" -> the pinned GLM tiering default (spec §6.5).
 	BrainModel string
-	// WorkerModel is the opencode model string for worker sessions;
-	// "" -> the pinned GLM tiering default (spec §6.5).
+	// WorkerFlashModel is the worker's cheap tier (spec §5.1
+	// `tier: "flash"`, also the no-tier default);
+	// "" -> the pinned GLM 5.3 Flash default (spec §6.5).
+	WorkerFlashModel string
+	// WorkerModel is the worker's middle tier (spec §5.1
+	// `tier: "default"`); "" -> the pinned GLM 5.2 default.
 	WorkerModel string
 	// WorkerHardestModel is the model for `tier: "hardest"` jobs (spec
 	// §5.1, §6.5); "" -> the pinned GLM 5.3 default.
@@ -130,7 +134,8 @@ func New(cfg Config) (*App, error) {
 	// Model tiering (spec §6.5): unset fields fall back to the pinned
 	// GLM defaults; callers override via env (cmd/foreman).
 	a.cfg.BrainModel = models.Resolve(a.cfg.BrainModel, models.ForemanBrainDefault)
-	a.cfg.WorkerModel = models.Resolve(a.cfg.WorkerModel, models.WorkerDefault)
+	a.cfg.WorkerFlashModel = models.Resolve(a.cfg.WorkerFlashModel, models.WorkerFlash)
+	a.cfg.WorkerModel = models.Resolve(a.cfg.WorkerModel, models.WorkerStandard)
 	a.cfg.WorkerHardestModel = models.Resolve(a.cfg.WorkerHardestModel, models.WorkerHardest)
 
 	// Stores: open both or none.

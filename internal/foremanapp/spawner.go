@@ -83,12 +83,15 @@ func (a *App) postJobEvent(ctx context.Context, jobID, event string) error {
 // the persisted spec path, the loopback ResultURL and MCPURL (see
 // localBaseURL - workers are local in-process children), the per-job token,
 // DataDir as the per-job root, and the model from the job's tier (spec
-// §6.5): default jobs run the GLM 5.2 worker tier, `tier: "hardest"`
-// jobs run GLM 5.3.
+// §6.5): flash (and no-tier jobs - the cost-biased default) run GLM 5.3
+// Flash, `tier: "default"` runs GLM 5.2, `tier: "hardest"` runs GLM 5.3.
 func (a *App) defaultHarnessConfig(spec wire.JobSpec, bearer string) workerharness.Config {
 	base := localBaseURL(a.cfg.Addr)
-	model := a.cfg.WorkerModel
-	if spec.Tier == wire.TierHardest {
+	model := a.cfg.WorkerFlashModel
+	switch spec.Tier {
+	case wire.TierDefault:
+		model = a.cfg.WorkerModel
+	case wire.TierHardest:
 		model = a.cfg.WorkerHardestModel
 	}
 	return workerharness.Config{

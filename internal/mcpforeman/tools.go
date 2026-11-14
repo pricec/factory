@@ -36,10 +36,13 @@ type postToFactoryArgs struct {
 
 // spawnWorkerArgs is spawn_worker's argument set (spec §9.3).
 // result_schema must stay within the wire subset (spec §5.3); budget
-// fields left at zero fall back to the pinned defaults (spec §5.1).
+// fields left at zero fall back to the pinned defaults (spec §5.1);
+// tier picks the worker model (spec §6.5) - empty means flash, the
+// cost-biased default.
 type spawnWorkerArgs struct {
 	Task         string `json:"task"`
 	ResultSchema any    `json:"result_schema,omitempty"`
+	Tier         string `json:"tier,omitempty"`
 	TimeoutS     *int   `json:"timeout_s,omitempty"`
 	Budget       any    `json:"budget,omitempty"`
 }
@@ -130,6 +133,7 @@ func spawnWorkerTool(cfg Config) mcp.ToolHandlerFor[spawnWorkerArgs, any] {
 			}
 			spec.ResultSchema = b
 		}
+		spec.Tier = in.Tier
 		if in.TimeoutS != nil {
 			spec.TimeoutS = *in.TimeoutS
 		}

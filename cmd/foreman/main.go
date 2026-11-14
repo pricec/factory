@@ -39,6 +39,7 @@ func main() {
 		AdvertiseURL:       *advertise,
 		PairingToken:       *pairingToken,
 		BrainModel:         os.Getenv("FACTORY_FOREMAN_BRAIN_MODEL"),
+		WorkerFlashModel:   os.Getenv("FACTORY_WORKER_FLASH_MODEL"),
 		WorkerModel:        os.Getenv("FACTORY_WORKER_MODEL"),
 		WorkerHardestModel: os.Getenv("FACTORY_WORKER_HARDEST_MODEL"),
 	})

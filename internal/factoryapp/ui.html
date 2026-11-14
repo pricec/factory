@@ -143,7 +143,7 @@
         <textarea id="job-task" placeholder="what should the worker do?"></textarea>
         <div class="row">
           <div><label>requires (comma-separated)</label><input id="job-requires" placeholder="gpu, bigmem"></div>
-          <div><label>tier</label><select id="job-tier"><option value="">default (GLM 5.2)</option><option value="hardest">hardest (GLM 5.3)</option></select></div>
+          <div><label>tier</label><select id="job-tier"><option value="">flash — GLM 5.3 Flash (cheapest, default)</option><option value="default">default — GLM 5.2</option><option value="hardest">hardest — GLM 5.3</option></select></div>
           <div><label>timeout_s</label><input id="job-timeout" type="number" min="1" placeholder="300"></div>
           <div><label>priority 1-9</label><input id="job-priority" type="number" min="1" max="9" placeholder="5"></div>
         </div>

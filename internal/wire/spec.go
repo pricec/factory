@@ -18,14 +18,17 @@ const (
 )
 
 // Job tiers (§5.1, §6.5): the model tier a job runs at. Empty means
-// TierDefault; "hardest" routes the worker onto the strongest model.
+// TierFlash - the cost-biased default (spec §6.5: dispatchers bias
+// towards saving money); `default` is the middle tier and `hardest` the
+// strongest.
 const (
+	TierFlash   = "flash"
 	TierDefault = "default"
 	TierHardest = "hardest"
 )
 
 // Tiers is every allowed tier value (§5.1).
-var Tiers = []string{TierDefault, TierHardest}
+var Tiers = []string{TierFlash, TierDefault, TierHardest}
 
 // Budget bounds a job's prompt size, output size, and spend (§5.1).
 type Budget struct {
@@ -127,7 +130,7 @@ func (s *JobSpec) validate(requireID bool) error {
 		}
 	}
 	switch s.Tier {
-	case "", TierDefault, TierHardest:
+	case "", TierFlash, TierDefault, TierHardest:
 	default:
 		return fmt.Errorf("tier: must be one of %v, got %q", Tiers, s.Tier)
 	}

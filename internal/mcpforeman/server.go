@@ -65,7 +65,7 @@ func Handler(cfg Config) (http.Handler, error) {
 	}, postToFactoryTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "spawn_worker",
-		Description: "Queue a local worker job; returns its job_id.",
+		Description: "Queue a local worker job; returns its job_id. tier: flash (GLM 5.3 Flash, cheapest - default), default (GLM 5.2), hardest (GLM 5.3). Pick the cheapest tier that can do the job.",
 	}, spawnWorkerTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "answer_worker",
