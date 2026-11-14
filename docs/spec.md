@@ -481,25 +481,32 @@ no shared state.
 - Invocation: `opencode run "<prompt>"`; must be non-interactive. Verify exact
   flags against `opencode --help` during implementation.
 - MCP injection: `OPENCODE_CONFIG` env pointing at a generated config with
-  remote MCP:
+  remote MCP (verified against the opencode V2 config shape, opencode 1.18
+  docs/mcp-servers - servers nest under `mcp.servers`; headers supported;
+  token referenced via `{env:WORKER_TOKEN}` substitution so it never lands
+  in the file at rest; the harness guarantees `WORKER_TOKEN` is present in
+  the child env):
 
 ```json
 {
   "mcp": {
-    "inbox": {
-      "type": "remote",
-      "url": "WORKER_MCP_URL",
-      "headers": { "Authorization": "Bearer WORKER_TOKEN" }
+    "servers": {
+      "inbox": {
+        "type": "remote",
+        "url": "WORKER_MCP_URL",
+        "oauth": false,
+        "headers": { "Authorization": "Bearer {env:WORKER_TOKEN}" }
+      }
     }
   }
 }
 ```
 
-- Pending implementation verification (#5): confirm remote-MCP + headers
-  support against current opencode docs; if headers are unsupported, fall
-  back to token-in-URL and record the outcome in this section.
-- The generated config also sets model `max_tokens` =
-  `budget.max_output_tokens` (#5; #13 proxy 2).
+- max_tokens: the opencode 1.18 config schema exposes no per-request
+  max-output-tokens setting, so the pin "config sets model max_tokens =
+  budget.max_output_tokens" is withdrawn; #13 proxy 2 is deferred - wall
+  clock (proxy 3) and post-hoc usage accounting (proxy 4) remain the
+  enforcement path.
 - Model strings per role come from the tiering config (#13).
 - opencode must be on PATH - the foreman's responsibility (#5; #12 detects
   it at startup).
