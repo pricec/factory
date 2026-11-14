@@ -116,6 +116,10 @@ func TestRunChildEnvironmentAndArgs(t *testing.T) {
 	spec, specPath := writeSpec(t, dir, nil)
 	binDir := fakeOpencode(t, `pwd > pwd.txt
 cat opencode.json > cfg.txt
+printf '%s' "$2" > arg2.txt
+printf '%s' "$3" > arg3.txt
+printf '%s' "$4" > arg4.txt
+printf '%s' "$5" > arg5.txt
 printf '%s' "$3" > prompt.txt
 printf 'all good'`)
 	rec := &recordingPost{}
@@ -129,6 +133,10 @@ printf 'all good'`)
 	if info, err := os.Stat(jobDir); err != nil || !info.IsDir() {
 		t.Errorf("job dir %s missing: %v", jobDir, err)
 	}
+	// No model pinned: run --standalone <prompt>.
+	assertArg(t, jobDir, 2, "--standalone")
+	assertArg(t, jobDir, 3, buildPrompt(spec))
+	assertArg(t, jobDir, 4, "")
 	// macOS resolves /var to /private/var in getcwd(); compare the resolved form.
 	wantPwd, err := filepath.EvalSymlinks(jobDir)
 	if err != nil {
@@ -171,6 +179,46 @@ printf 'all good'`)
 	if res.Summary != "all good" || res.JobID != spec.ID {
 		t.Errorf("result = %+v, want job %s summary %q", res, spec.ID, "all good")
 	}
+}
+
+// assertArg reads the fake opencode's arg<N>.txt (one argument per
+// positional file) and compares it with want.
+func assertArg(t *testing.T, jobDir string, n int, want string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(jobDir, fmt.Sprintf("arg%d.txt", n)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != want {
+		t.Errorf("arg%d = %q, want %q", n, got, want)
+	}
+}
+
+// TestRunPinsModelViaMFlag: the pinned model rides the -m flag - V2
+// drops #variant suffixes from the config's model field, so reasoning
+// tiers like glm-5.3-flash#max only reach the child via the CLI flag.
+func TestRunPinsModelViaMFlag(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	spec, specPath := writeSpec(t, dir, nil)
+	binDir := fakeOpencode(t, `printf '%s' "$2" > arg2.txt
+printf '%s' "$3" > arg3.txt
+printf '%s' "$4" > arg4.txt
+printf '%s' "$5" > arg5.txt
+printf 'ok'`)
+	rec := &recordingPost{}
+	cfg := testConfig(t, specPath, binDir, rec.post)
+	cfg.Model = "openrouter/z-ai/glm-5.3-flash#max"
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run() = %v, want nil", err)
+	}
+	jobDir := filepath.Join(cfg.WorkDir, jobsDirName, spec.ID)
+	assertArg(t, jobDir, 2, "--standalone")
+	assertArg(t, jobDir, 3, "-m")
+	assertArg(t, jobDir, 4, "openrouter/z-ai/glm-5.3-flash#max")
+	assertArg(t, jobDir, 5, buildPrompt(spec))
 }
 
 func TestRunExitCodeMapping(t *testing.T) {

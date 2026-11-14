@@ -187,7 +187,20 @@ func jobTimeout(cfg Config, spec wire.JobSpec) time.Duration {
 	return time.Duration(spec.TimeoutS) * time.Second
 }
 
-// execChild runs `opencode run --standalone <prompt>` with cwd jobDir
+// runArgs builds the `opencode run` argument vector: --standalone (spec
+// §8.4) and, when a model is pinned, `-m <model>` - reasoning-effort
+// variants like `...#max` do NOT survive the generated config's `model`
+// field (V2 drops the #variant there), so the flag is the only reliable
+// injection point.
+func runArgs(cfg Config, prompt string) []string {
+	args := []string{"run", "--standalone"}
+	if cfg.Model != "" {
+		args = append(args, "-m", cfg.Model)
+	}
+	return append(args, prompt)
+}
+
+// execChild runs `opencode run --standalone [-m model] <prompt>` with cwd jobDir
 // (§8.4): the generated opencode.json there is the V2 project config the
 // child discovers from its working directory, and --standalone boots a
 // private server inside the child process - the shared background service
@@ -203,7 +216,7 @@ func execChild(ctx context.Context, cfg Config, timeout time.Duration, jobDir, p
 	if env == nil {
 		env = os.Environ()
 	}
-	cmd := exec.Command(cfg.OpenCODEBin, "run", "--standalone", prompt)
+	cmd := exec.Command(cfg.OpenCODEBin, runArgs(cfg, prompt)...)
 	cmd.Dir = jobDir
 	// The generated config references the token via {env:WORKER_TOKEN}
 	// (never at rest); guarantee it is present in the child environment.

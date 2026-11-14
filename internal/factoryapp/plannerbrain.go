@@ -94,8 +94,14 @@ func (b *PlannerBrain) runOpencode(ctx context.Context, prompt string) (string, 
 	// substitutes the {env:FACTORY_PLANNER_TOKEN} header against its own
 	// environment - which lacks the token - and the MCP connect dies
 	// with 401 "missing bearer token", stripping the session of every
-	// factory tool.
-	cmd := exec.CommandContext(ctx, "opencode", "run", "--standalone", prompt)
+	// factory tool. The model rides -m, not the config's model field:
+	// V2 drops `#variant` suffixes from the config field, and overrides
+	// may carry one.
+	args := []string{"run", "--standalone"}
+	if b.Model != "" {
+		args = append(args, "-m", b.Model)
+	}
+	cmd := exec.CommandContext(ctx, "opencode", append(args, prompt)...)
 	cmd.Dir = b.WorkDir
 	cmd.Env = withEnvValue(os.Environ(), envPlannerToken, b.Bearer)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

@@ -344,7 +344,7 @@ created today; above the config cap (default $20/day) the factory refuses new
 `create_job` with error `spend_cap_exceeded`; reset by config bump or env
 `FACTORY_SPEND_OVERRIDE=1`.
 
-Model tiering (#13, #28, #29, #30): the factory standardizes on GLM via
+Model tiering (#13, #28, #29, #30, #31): the factory standardizes on GLM via
 OpenRouter (one provider, one credential) and optimizes for cost -
 `internal/models` pins the per-role defaults, every role is
 env-overridable, and swapping a role's model stays a config change only:
@@ -354,20 +354,26 @@ env-overridable, and swapping a role's model stays a config change only:
 | factory planner | `openrouter/z-ai/glm-5.2` | `FACTORY_PLANNER_MODEL` |
 | foreman brain | `openrouter/z-ai/glm-5.2` | `FACTORY_FOREMAN_BRAIN_MODEL` |
 | worker, `tier: "flash"` (and no-tier jobs) | `openrouter/z-ai/glm-5.3-flash` | `FACTORY_WORKER_FLASH_MODEL` |
-| worker, `tier: "default"` | `openrouter/z-ai/glm-5.3-flashx` | `FACTORY_WORKER_MODEL` |
+| worker, `tier: "default"` | `openrouter/z-ai/glm-5.3-flash#max` | `FACTORY_WORKER_MODEL` |
 | worker, `tier: "hardest"` | `openrouter/z-ai/glm-5.3` | `FACTORY_WORKER_HARDEST_MODEL` |
 
 The brains run at least GLM 5.2 (#29). The worker ladder is one GLM 5.3
-generation across three price points (#30): Flash (~$0.04/$0.08 per M
-tokens), FlashX (~$0.37/$1.25), and full GLM 5.3 (~$0.08/$3.6) - GLM 5.2
-priced itself out of the mid slot (~$6.8/M output, roughly twice the
-strongest tier's). Brain sessions are input-heavy and output-light, so
-5.2's bottom-dollar input and cache-read prices keep it the cheapest
-brain model regardless. Dispatching agents (the factory planner's
-`create_job`, the foreman brain's `spawn_worker`) choose among
+generation across two price points (#30, #31): Flash (~$0.04/$0.08 per M
+tokens; the `default` tier is the same model at max reasoning effort -
+same token prices, the only extra spend is the reasoning tokens actually
+consumed) and full GLM 5.3 (~$0.08/$3.6) for the hardest tasks. GLM 5.2
+(~$6.8/M output) and GLM 5.3 FlashX (~$0.37/M input) both priced
+themselves out of the middle: the factory's measured job profile is
+~99:1 input:output, where FlashX costs more than the stronger model.
+Brain sessions are input-heavy and output-light, so 5.2's bottom-dollar
+input and cache-read prices keep it the cheapest brain model regardless.
+Reasoning-effort variants (`#max`) ride the `opencode run -m` flag, never
+the generated config's `model` field - V2 drops `#variant` suffixes
+there (#31). Dispatching agents (the factory
+planner's `create_job`, the foreman brain's `spawn_worker`) choose among
 the three worker tiers and BIAS TOWARDS SAVING MONEY (#29): pick the
 cheapest tier that can do the job - flash for routine work, escalate to
-FlashX or full GLM 5.3 only when the task needs it. A job that carries no
+flash#max or full GLM 5.3 only when the task needs it. A job that carries no
 tier runs flash (the cost-biased default). The tier rides JobSpec (§5.1)
 through `create_job`, `POST /v1/jobs`, schedules, and the job create UI.
 Model strings are injected via the generated child config (§8.4).
@@ -580,15 +586,19 @@ the worker MCP server under the name `inbox`, and opencode exposes MCP
 tools with a `<server>_<tool>` prefix - the §8.3 wording must use the name
 the agent actually sees.
 
-### 8.4 opencode invocation & generated config (#5, #13, #28)
+### 8.4 opencode invocation & generated config (#5, #13, #28, #31)
 
-- Invocation (#28): `opencode run --standalone "<prompt>"`; must be
-  non-interactive. `--standalone` boots a private server inside the child
-  process: the shared background service would substitute the config's
-  `{env:...}` credential headers against its own environment - which has
-  no per-child tokens - and every MCP connect would die with 401 "missing
-  bearer token", silently stripping the child of its tools. Verify exact
-  flags against `opencode --help` during implementation.
+- Invocation (#28, #31): `opencode run --standalone [-m <model>] "<prompt>"`;
+  must be non-interactive. `--standalone` boots a private server inside
+  the child process: the shared background service would substitute the
+  config's `{env:...}` credential headers against its own environment -
+  which has no per-child tokens - and every MCP connect would die with
+  401 "missing bearer token", silently stripping the child of its tools.
+  The pinned model rides `-m`, never only the config's `model` field:
+  V2 drops `#variant` suffixes (reasoning-effort levels like `#max`,
+  §6.5) from the config field, so the flag is the only reliable injection
+  point. Verify exact flags against `opencode --help` during
+  implementation.
 - Config discovery (#28): the generated config is written to the V2
   project-config path `opencode.json` IN THE CHILD'S WORKING DIRECTORY
   (worker: the per-job dir; planner/foreman brain: their WorkDir). V2
@@ -634,9 +644,10 @@ the agent actually sees.
   clock (proxy 3) and post-hoc usage accounting (proxy 4) remain the
   enforcement path.
 - Model strings per role come from the tiering config (§6.5), injected via
-  the generated config's `model` field (worker jobs select their tier per
-  §5.1/§6.5: flash -> GLM 5.3 Flash, default -> GLM 5.3 FlashX, hardest ->
-  GLM 5.3).
+  the `opencode run -m` flag (worker jobs select their tier per
+  §5.1/§6.5: flash -> GLM 5.3 Flash, default -> GLM 5.3 Flash max-reasoning, hardest ->
+  GLM 5.3); the generated config's `model` field stays as documentation
+  only, since V2 drops `#variant` suffixes there (#31).
 - opencode must be on PATH - the foreman's responsibility (#5; #12 detects
   it at startup).
 
@@ -711,7 +722,8 @@ Tools (exact):
 - `spawn_worker(task, result_schema?, tier?, timeout_s?, budget?)` - creates a local
   JobSpec, enqueues it to the harness, returns `job_id` immediately (never
   blocks). `tier` picks the worker model (§5.1, §6.5): flash (GLM 5.3
-  Flash, cheapest, also the no-tier default), default (GLM 5.3 FlashX), hardest
+  Flash, cheapest, also the no-tier default), default (GLM 5.3 Flash max-reasoning,
+  same low price), hardest
   (GLM 5.3) - bias towards the cheapest tier that can do the job (#29).
 - `answer_worker(job_id, answer)` - posts `job.answer` to the job inbox.
 
@@ -735,7 +747,8 @@ Tools (exact):
 - `create_job(task, requires?, result_schema?, tier?, timeout_s?, priority?,
   schedule_cron?)` - ad hoc dispatch via the Matcher interface; `tier`
   selects the worker's model tier (§5.1, §6.5: flash -> GLM 5.3 Flash,
-  the cheapest and the no-tier default; default -> GLM 5.3 FlashX; hardest ->
+  the cheapest and the no-tier default; default -> GLM 5.3 Flash max-reasoning;
+  hardest ->
   GLM 5.3) - bias towards the cheapest tier that can do the job (#29);
   with `schedule_cron`, also creates a schedule via
   the #8 API (§6.8). Refused with error `spend_cap_exceeded` when the

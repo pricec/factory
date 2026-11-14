@@ -34,11 +34,15 @@ const ForemanBrainDefault = "openrouter/z-ai/glm-5.2"
 const WorkerFlash = "openrouter/z-ai/glm-5.3-flash"
 
 // WorkerStandard is the worker's middle tier (spec §5.1
-// `tier: "default"`): GLM 5.3 FlashX (openrouter, ~$0.37/$1.25 per M
-// tokens) - the same 5.3 generation as flash and 5.3 with 1M context,
-// priced between them on output. GLM 5.2 priced itself out of the slot:
-// ~$6.8/M output, roughly twice the strongest tier's.
-const WorkerStandard = "openrouter/z-ai/glm-5.3-flashx"
+// `tier: "default"`): GLM 5.3 Flash at max reasoning effort
+// (openrouter, ~$0.04/$0.08 per M tokens - unchanged from plain flash;
+// the only extra spend is the reasoning tokens actually consumed). The
+// #max variant MUST ride the -m flag: opencode V2 drops #variant
+// suffixes from the config's model field. GLM 5.3 FlashX priced itself
+// out of the slot earlier (~$0.37/M input, 4.4x full GLM 5.3's) - the
+// factory's jobs run ~99:1 input:output, where FlashX costs more than
+// the stronger model.
+const WorkerStandard = "openrouter/z-ai/glm-5.3-flash#max"
 
 // WorkerHardest is the worker's `tier: "hardest"` model: full-strength
 // GLM 5.3 (openrouter, ~$0.084/$3.6 per M tokens) for the hardest tasks

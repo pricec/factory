@@ -87,8 +87,14 @@ func (b *BrainRunner) runOpencode(ctx context.Context, prompt string) (string, e
 	// --standalone: a private server inside this child process, so the
 	// generated config's {env:FOREMAN_BRAIN_TOKEN} header substitution
 	// sees this child's environment (the shared background service's
-	// env lacks the token and would connect with an empty bearer).
-	cmd := exec.CommandContext(ctx, "opencode", "run", "--standalone", prompt)
+	// env lacks the token and would connect with an empty bearer). The
+	// model rides -m, not the config's model field: V2 drops `#variant`
+	// suffixes from the config field, and overrides may carry one.
+	args := []string{"run", "--standalone"}
+	if b.Model != "" {
+		args = append(args, "-m", b.Model)
+	}
+	cmd := exec.CommandContext(ctx, "opencode", append(args, prompt)...)
 	cmd.Dir = b.WorkDir
 	cmd.Env = withEnvValue(os.Environ(), envBrainToken, b.Bearer)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

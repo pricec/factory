@@ -57,7 +57,7 @@ func Handler(cfg Config) (http.Handler, error) {
 	}, listJobsTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "create_job",
-		Description: "Create a job and dispatch it; schedule_cron also creates a schedule. tier: flash (GLM 5.3 Flash, cheapest - default), default (GLM 5.3 FlashX), hardest (GLM 5.3); pick the cheapest that can do the job. Refused past the daily spend cap.",
+		Description: "Create a job and dispatch it; schedule_cron also creates a schedule. tier: flash (GLM 5.3 Flash, cheapest - default), default (GLM 5.3 Flash max-thinking, same low price), hardest (GLM 5.3); pick the cheapest that can do the job. Refused past the daily spend cap.",
 	}, createJobTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "read_result",
