@@ -207,6 +207,10 @@ func (denyAll) Authorize(*http.Request, string, string) error {
 	return fmt.Errorf("denied")
 }
 
+type unauthorizedAuth struct{}
+
+func (unauthorizedAuth) Authorize(*http.Request, string, string) error { return unauthorized{} }
+
 type unauthorized struct{}
 
 func (unauthorized) Error() string   { return "bad token" }
@@ -229,7 +233,7 @@ func TestHTTPAuthenticatorSeam(t *testing.T) {
 	}
 
 	// A StatusError carrying 401 maps to 401 unauthorized (spec §7.3).
-	_, h2 := newTestServer(t, unauthorized{})
+	_, h2 := newTestServer(t, unauthorizedAuth{})
 	rec = doJSON(t, h2, "GET", "/v1/inboxes/factory:main/messages", nil)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", rec.Code)
