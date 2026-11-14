@@ -1,13 +1,16 @@
 package factoryapp
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/pricec/factory/internal/auth"
 	"github.com/pricec/factory/internal/inbox"
 	"github.com/pricec/factory/internal/jobs"
+	"github.com/pricec/factory/internal/registry"
 	"github.com/pricec/factory/internal/wire"
 )
 
@@ -111,7 +114,12 @@ type messageForemanRequest struct {
 // handleMessageForeman serves POST /v1/foremen/{id}/messages (spec §6.9):
 // posts an envelope from the planner identity into the foreman's inbox,
 // same as the MCP message_foreman tool. Unauthenticated like the control
-// plane; the {id} path segment is the bare foreman id (pairing self.id).
+// plane; the {id} path segment is the bare foreman id (pairing self.id)
+// or the full "foreman:{id}" form - both normalize to the same inbox
+// (spec §7.3). Never opens a dead inbox: an id matching no registered
+// foreman is a 404, not a post to an inbox nothing reads, and a missing
+// body is a 400 (2026-11-14: double-prefixed ids and null payloads
+// dead-ended two operator feature requests).
 func (a *App) handleMessageForeman(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
@@ -121,6 +129,27 @@ func (a *App) handleMessageForeman(w http.ResponseWriter, r *http.Request) {
 	var in messageForemanRequest
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON: "+err.Error())
+		return
+	}
+	rows, err := a.jobs.Foremen(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	known := false
+	for _, f := range rows {
+		if registry.SameForeman(f.ID, id) {
+			known = true
+			break
+		}
+	}
+	if !known {
+		writeError(w, http.StatusNotFound, "unknown_foreman",
+			fmt.Sprintf("foreman %q is not registered (GET /v1/foremen lists registered foremen)", id))
+		return
+	}
+	if len(in.Payload) == 0 || bytes.Equal(in.Payload, []byte("null")) {
+		writeError(w, http.StatusBadRequest, "bad_request", "payload: required (send {} for an empty body)")
 		return
 	}
 	env := wire.MessageEnvelope{
@@ -133,7 +162,7 @@ func (a *App) handleMessageForeman(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	posted, err := a.inbox.Post(r.Context(), "foreman:"+id, env)
+	posted, err := a.inbox.Post(r.Context(), registry.InboxID(id), env)
 	if err != nil {
 		var dup *inbox.DuplicateError
 		if errors.As(err, &dup) {

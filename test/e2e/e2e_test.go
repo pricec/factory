@@ -307,7 +307,7 @@ func testSummaryView(t *testing.T, s *stack) {
 		t.Fatal("scenario 1 did not run first; happy-path job missing")
 	}
 
-	entries := s.callToolArray(s.factoryMCP(), s.factory.PlannerToken(), "list_jobs", map[string]any{})
+	entries := s.callToolSlice(s.factoryMCP(), s.factory.PlannerToken(), "list_jobs", "jobs", map[string]any{})
 	var entry map[string]any
 	for _, e := range entries {
 		if e["id"] == s.happyJobID {

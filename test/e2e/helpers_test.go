@@ -235,17 +235,24 @@ func (s *stack) callTool(base, bearer, name string, args map[string]any) map[str
 	return m
 }
 
-// callToolArray calls one MCP tool whose structured content is an array.
-func (s *stack) callToolArray(base, bearer, name string, args map[string]any) []map[string]any {
+// callToolSlice calls one MCP tool whose structured content is a record
+// wrapping an array field ({"jobs": [...]}, {"foremen": [...]}): MCP
+// structured content must be an object - client harnesses reject bare
+// arrays.
+func (s *stack) callToolSlice(base, bearer, name, key string, args map[string]any) []map[string]any {
 	s.t.Helper()
 	sc := s.callToolRaw(base, bearer, name, args)
-	raw, err := json.Marshal(sc)
+	rec, ok := sc.(map[string]any)
+	if !ok {
+		s.t.Fatalf("tools/call %s: structuredContent not a record: %v", name, sc)
+	}
+	raw, err := json.Marshal(rec[key])
 	if err != nil {
-		s.t.Fatalf("marshal structuredContent: %v", err)
+		s.t.Fatalf("marshal %s: %v", key, err)
 	}
 	var out []map[string]any
 	if err := json.Unmarshal(raw, &out); err != nil {
-		s.t.Fatalf("tools/call %s: structuredContent not a JSON array: %v", name, err)
+		s.t.Fatalf("tools/call %s: structuredContent[%q] not a JSON array: %v", name, key, err)
 	}
 	return out
 }

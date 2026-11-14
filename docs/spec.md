@@ -425,7 +425,7 @@ factory planner's list view carries summaries only (#7, #19).
 |---|---|
 | `GET /v1/jobs?state=&foreman=` | filter by state and foreman (#9) |
 | `POST /v1/jobs` | UI twin of the MCP `create_job` tool (§9.4): body `{task, requires[], result_schema, tier, timeout_s, priority, schedule_cron}`; runs the same spend breaker + capability match (no match -> `pending`); `201 + {job_id, state, foreman}` |
-| `POST /v1/foremen/{id}/messages` | UI twin of the MCP `message_foreman` tool (§9.4): body `{type, job_id?, payload?}` posted from the planner identity; `201` + envelope |
+| `POST /v1/foremen/{id}/messages` | UI twin of the MCP `message_foreman` tool (§9.4): body `{type, payload, job_id?}` posted from the planner identity; `201` + envelope. `{id}` accepts the bare foreman id or the full `foreman:{id}` form - both normalize to the same inbox (§7.3), never a double-prefixed one. `payload` is required (any JSON value; `{}` for an empty body); a null/missing payload is `400`. An id matching no registered foreman is `404 unknown_foreman` - posting never opens an inbox no foreman consumes (2026-11-14 amendment) |
 | `GET /v1/jobs/{id}` | (#9) |
 | `GET /v1/foremen` | returns `id, online, capabilities` (#9) |
 | `GET /v1/deadletter` | job + `last_error` + results (#10) |
@@ -689,7 +689,10 @@ Kill the entire process group at `timeout_s`; post a JobResult with
   section (#17, #15).
 - Tool descriptions stay tiny (per-turn token cost for every LLM caller,
   #6); byte budgets asserted by test: worker surface < 1KB total (#17);
-  foreman and factory surfaces < 1.5KB each (#18, #19).
+  foreman and factory surfaces < 1.5KB each (#18, #19). Names,
+  descriptions, and advertised input/output schemas all count toward the
+  budget (2026-11-14 amendment: typed handlers advertise input schemas so
+  callers can introspect argument names).
 - LLM sessions (worker agent, foreman brain, factory planner) all reuse the
   #5 opencode harness pattern (`OPENCODE_CONFIG` + generated config),
   differing in MCP URL + prompt (#5, #18, #19).
@@ -748,9 +751,12 @@ planner never formats raw HTTP or picks hosts itself (#19).
 
 Tools (exact):
 
-- `list_foremen()` - `{id, online, capabilities}`.
-- `list_jobs(state?, limit=50)` - `{id, state, summary, usage, over_budget}`
-  (summaries only, per #7).
+- `list_foremen()` - `{foremen: [{id, online, capabilities}]}` (record-
+  wrapped; 2026-11-14 amendment: MCP structured content is an object -
+  bare arrays are rejected by client harnesses).
+- `list_jobs(state?, limit=50)` - `{jobs: [{id, state, summary, usage,
+  over_budget}]}` (summaries only, per #7; record-wrapped per the
+  `list_foremen` amendment).
 - `create_job(task, requires?, result_schema?, tier?, timeout_s?, priority?,
   schedule_cron?)` - ad hoc dispatch via the Matcher interface; `tier`
   selects the worker's model tier (§5.1, §6.5: flash -> GLM 5.3 Flash,
@@ -762,11 +768,23 @@ Tools (exact):
   daily spend breaker is open (#13).
 - `read_result(job_id)` - full result payload; the ONLY path by which full
   payloads enter LLM context (#19; #7 point 3).
-- `message_foreman(foreman_id, type, payload)` - envelope to that foreman's
-  inbox.
+- `message_foreman(foreman_id, type, payload)` - envelope to that
+  foreman's inbox; `foreman_id` accepts the bare id or the full
+  `foreman:{id}` form (normalized - never double-prefixed); `payload`
+  (any JSON value) is required; an id matching no registered foreman is
+  a tool error (2026-11-14 amendment: a mis-addressed relay must fail,
+  not open an inbox nothing reads).
 - `notify_operator(text)` - posts a `brain.reply` envelope into the operator
   inbox (`planner:main`, §9.5); the ONLY way the LLM planner talks back to
   the human.
+
+Input schemas (2026-11-14 amendment): every tool on this surface
+advertises a typed input schema - argument names and required fields are
+introspectable by MCP clients, unknown arguments are rejected, and
+validation failures are tool errors. Advertised schemas count toward the
+§9.1 byte budget. Rationale: a `message_foreman` call passing `text`
+instead of `payload` was silently dropped and dead-ended two operator
+feature requests in an inbox no consumer drains.
 
 Planner session mechanics: same opencode harness pattern as #5 (#19).
 
@@ -821,6 +839,7 @@ Pinned status codes:
 | `401` | unknown/invalid token; revoked token (row deleted) | #11 |
 | `403` | wrong scope (post to foreign inbox; read without `may_read`) | #11 |
 | `409` | duplicate `job.result` for the same `(inbox_id, job_id)`; response carries the original envelope id | #1 |
+| `404` | `POST /v1/foremen/{id}/messages` where `{id}` matches no registered foreman (`unknown_foreman`) | 2026-11-14 amendment |
 
 Pinned error codes: `spend_cap_exceeded` (#13). Validation rejects anything
 outside the `result_schema` subset at validation time (#3).

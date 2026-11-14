@@ -87,6 +87,11 @@ func newEnv(t *testing.T, budget budgets.Config) *env {
 	if err != nil {
 		t.Fatalf("PairForeman: %v", err)
 	}
+	// Production pairing seeds the foremen registry (factoryapp handlePair
+	// upserts by identity); message_foreman resolves against it.
+	if err := store.UpsertForeman(ctx, "alpha", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("UpsertForeman: %v", err)
+	}
 	worker, err := authStore.MintWorkerToken(ctx, "foreman:alpha", "job_tst")
 	if err != nil {
 		t.Fatalf("MintWorkerToken: %v", err)
@@ -159,16 +164,19 @@ func structured(t *testing.T, res map[string]any) map[string]any {
 	return sc
 }
 
-// structuredArray extracts an array-valued structuredContent.
-func structuredArray(t *testing.T, res map[string]any) []map[string]any {
+// structuredSlice extracts an array field the tool wrapped in a record
+// ({"jobs": [...]}, {"foremen": [...]}): MCP structured content must be
+// an object - client harnesses reject bare arrays.
+func structuredSlice(t *testing.T, res map[string]any, key string) []map[string]any {
 	t.Helper()
-	raw, err := json.Marshal(res["structuredContent"])
+	sc := structured(t, res)
+	raw, err := json.Marshal(sc[key])
 	if err != nil {
-		t.Fatalf("marshal structuredContent: %v", err)
+		t.Fatalf("marshal %s: %v", key, err)
 	}
 	var out []map[string]any
 	if err := json.Unmarshal(raw, &out); err != nil {
-		t.Fatalf("structuredContent not a JSON array: %v (%s)", err, raw)
+		t.Fatalf("structuredContent %q not a JSON array: %v (%s)", key, err, raw)
 	}
 	return out
 }
@@ -274,7 +282,7 @@ func TestListJobsSummaryOnlyAndReadResult(t *testing.T) {
 	spec := e.seedFinished(t, "do a big thing", "all done", big, 0.5)
 
 	// list_jobs: summary only - no results array, no spec payload (#7).
-	entries := structuredArray(t, resultOf(t, e.callTool("list_jobs", map[string]any{})))
+	entries := structuredSlice(t, resultOf(t, e.callTool("list_jobs", map[string]any{})), "jobs")
 	found := false
 	for _, entry := range entries {
 		if entry["id"] != spec.ID {
@@ -548,8 +556,79 @@ func TestMessageForeman(t *testing.T) {
 		t.Errorf("payload = %v", p)
 	}
 
-	// Job-scoped type without job_id: tool error (spec §3.1).
+	// Full inbox-id form (the form list_foremen reports) addresses the SAME
+	// inbox - never "foreman:foreman:alpha" (2026-11-14 incident).
+	sc = structured(t, resultOf(t, e.callTool("message_foreman", map[string]any{
+		"foreman_id": "foreman:alpha",
+		"type":       "note",
+		"payload":    map[string]any{"say": "full form"},
+	})))
+	if sc["ok"] != true {
+		t.Fatalf("message_foreman full form: %v", sc)
+	}
+	envs, err = e.svc.Get(ctx, "foreman:alpha", 10, 0)
+	if err != nil {
+		t.Fatalf("inbox.Get: %v", err)
+	}
+	if len(envs) != 2 {
+		t.Fatalf("foreman inbox has %d envelopes, want 2 (full form landed in the same inbox)", len(envs))
+	}
+	if envs[1].Payload == nil || !strings.Contains(string(envs[1].Payload), "full form") {
+		t.Errorf("full-form envelope payload = %s", envs[1].Payload)
+	}
+	// The phantom double-prefixed inbox never materialized.
+	if phantom, err := e.svc.Get(ctx, "foreman:foreman:alpha", 10, 0); err != nil || len(phantom) != 0 {
+		t.Errorf("foreman:foreman:alpha exists (err=%v, n=%d): a double-prefixed id must not open a dead inbox", err, len(phantom))
+	}
+
+	// Unknown foreman: tool error, nothing posted (never a dead inbox).
 	msg := toolError(t, "message_foreman", e.callTool("message_foreman", map[string]any{
+		"foreman_id": "ghost",
+		"type":       "note",
+		"payload":    map[string]any{"say": "boo"},
+	}))
+	if !strings.Contains(msg, "unknown foreman") {
+		t.Errorf("unknown-foreman error = %q, want unknown foreman mention", msg)
+	}
+	msg = toolError(t, "message_foreman", e.callTool("message_foreman", map[string]any{
+		"foreman_id": "foreman:foreman:alpha",
+		"type":       "note",
+		"payload":    map[string]any{"say": "double"},
+	}))
+	if !strings.Contains(msg, "unknown foreman") {
+		t.Errorf("double-prefixed id error = %q, want unknown foreman mention", msg)
+	}
+
+	// Mis-typed calls fail loudly (2026-11-14: `text` instead of `payload`
+	// was silently dropped and the message body never left the planner).
+	msg = toolError(t, "message_foreman", e.callTool("message_foreman", map[string]any{
+		"foreman_id": "alpha",
+		"type":       "note",
+	}))
+	if !strings.Contains(msg, "payload") {
+		t.Errorf("missing-payload error = %q, want payload mention", msg)
+	}
+	msg = toolError(t, "message_foreman", e.callTool("message_foreman", map[string]any{
+		"foreman_id": "alpha",
+		"type":       "note",
+		"text":       "wrong arg name",
+	}))
+	if !strings.Contains(msg, "text") {
+		t.Errorf("unknown-arg error = %q, want the unknown property named", msg)
+	}
+
+	// Explicit null payload: rejected, not an empty message.
+	msg = toolError(t, "message_foreman", e.callTool("message_foreman", map[string]any{
+		"foreman_id": "alpha",
+		"type":       "note",
+		"payload":    nil,
+	}))
+	if !strings.Contains(msg, "payload") {
+		t.Errorf("null-payload error = %q, want payload mention", msg)
+	}
+
+	// Job-scoped type without job_id: tool error (spec §3.1).
+	msg = toolError(t, "message_foreman", e.callTool("message_foreman", map[string]any{
 		"foreman_id": "alpha",
 		"type":       "job.pause",
 		"payload":    map[string]any{},
@@ -608,7 +687,7 @@ func TestListForemen(t *testing.T) {
 		t.Fatalf("UpsertForeman: %v", err)
 	}
 
-	sc := structuredArray(t, resultOf(t, e.callTool("list_foremen", map[string]any{})))
+	sc := structuredSlice(t, resultOf(t, e.callTool("list_foremen", map[string]any{})), "foremen")
 	var foremen []struct {
 		ID           string          `json:"id"`
 		Online       bool            `json:"online"`

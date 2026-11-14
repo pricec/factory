@@ -49,15 +49,15 @@ func Handler(cfg Config) (http.Handler, error) {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "factory-planner", Version: "v1"}, nil)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_foremen",
-		Description: "List foremen: {id, online, capabilities}.",
+		Description: "List registered foremen: {foremen: [{id, online, capabilities}]}.",
 	}, listForemenTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_jobs",
-		Description: "List job summaries: {id, state, summary, usage, over_budget}; state filter, limit<=200.",
+		Description: "List job summaries: {jobs: [{id, state, summary, usage, over_budget}]}.",
 	}, listJobsTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "create_job",
-		Description: "Create a job and dispatch it; schedule_cron also creates a schedule. tier: flash (GLM 5.3 Flash, cheapest - default), default (GLM 5.3 Flash max-thinking, same low price), hardest (GLM 5.3); pick the cheapest that can do the job. Refused past the daily spend cap.",
+		Description: "Create and dispatch a job; schedule_cron also creates a schedule. tier: flash (cheapest, default), default (Flash max-thinking, same price), hardest (strongest); pick the cheapest that works. Refused past the spend cap.",
 	}, createJobTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "read_result",
@@ -65,11 +65,11 @@ func Handler(cfg Config) (http.Handler, error) {
 	}, readResultTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "message_foreman",
-		Description: "Post a message to a foreman's inbox.",
+		Description: "Post to a foreman's inbox; foreman_id accepts bare or foreman:-prefixed ids.",
 	}, messageForemanTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "notify_operator",
-		Description: "Reply to the human operator in the chat UI: text lands in their inbox. ALWAYS answer operator questions this way.",
+		Description: "Reply to the operator in the chat UI; ALWAYS answer this way.",
 	}, notifyOperatorTool(cfg))
 
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv },

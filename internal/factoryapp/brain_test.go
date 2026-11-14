@@ -3,6 +3,7 @@ package factoryapp_test
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,32 +101,57 @@ func TestCreateJobEndpoint(t *testing.T) {
 // planner identity into the foreman's inbox, same as the MCP tool.
 func TestMessageForemanEndpoint(t *testing.T) {
 	e := newEnv(t)
+	// The endpoint resolves {id} against the foremen registry; pairing
+	// registers the foreman (factoryapp handlePair upserts by identity).
+	e.pair("alpha", nil)
 
 	// Table-driven validation failures.
 	for _, tt := range []struct {
-		name string
-		body any
+		name    string
+		path    string
+		body    any
+		wantSt  int
+		wantMsg string
 	}{
-		{"not json", "{"},
-		{"missing type", map[string]any{"x": 1}},
-		{"job-scoped without job_id", map[string]any{"type": "job.event"}},
+		{"not json", "/v1/foremen/alpha/messages", "{", http.StatusBadRequest, ""},
+		{"missing type", "/v1/foremen/alpha/messages", map[string]any{"payload": map[string]any{"q": 1}}, http.StatusBadRequest, "type"},
+		{"job-scoped without job_id", "/v1/foremen/alpha/messages", map[string]any{"type": "job.event", "payload": map[string]any{}}, http.StatusBadRequest, "job_id"},
+		{"missing payload", "/v1/foremen/alpha/messages", map[string]any{"type": "note"}, http.StatusBadRequest, "payload"},
+		{"null payload", "/v1/foremen/alpha/messages", map[string]any{"type": "note", "payload": nil}, http.StatusBadRequest, "payload"},
+		{"unknown foreman", "/v1/foremen/ghost/messages", map[string]any{"type": "note", "payload": map[string]any{}}, http.StatusNotFound, "unknown_foreman"},
+		{"double-prefixed id", "/v1/foremen/foreman:foreman:alpha/messages", map[string]any{"type": "note", "payload": map[string]any{}}, http.StatusNotFound, "unknown_foreman"},
 	} {
 		var errResp map[string]any
-		if status := e.do("POST", "/v1/foremen/alpha/messages", "", tt.body, &errResp); status != http.StatusBadRequest {
-			t.Errorf("%s: status = %d, want 400", tt.name, status)
+		if status := e.do("POST", tt.path, "", tt.body, &errResp); status != tt.wantSt {
+			t.Errorf("%s: status = %d, want %d: %v", tt.name, status, tt.wantSt, errResp)
+			continue
+		}
+		if tt.wantMsg != "" {
+			raw, _ := json.Marshal(errResp["error"])
+			if !strings.Contains(string(raw), tt.wantMsg) {
+				t.Errorf("%s: error = %s, want %q mention", tt.name, raw, tt.wantMsg)
+			}
 		}
 	}
 
-	var env wire.MessageEnvelope
-	body := map[string]any{"type": "brain.ping", "payload": map[string]any{"q": "status?"}}
-	if status := e.do("POST", "/v1/foremen/alpha/messages", "", body, &env); status != http.StatusCreated {
-		t.Fatalf("post status = %d, want 201", status)
+	// Bare id and full id address the SAME inbox (never a double-prefixed
+	// phantom); the body lands in foreman:alpha both times.
+	for _, path := range []string{"/v1/foremen/alpha/messages", "/v1/foremen/foreman:alpha/messages"} {
+		var env wire.MessageEnvelope
+		body := map[string]any{"type": "brain.ping", "payload": map[string]any{"q": "status?"}}
+		if status := e.do("POST", path, "", body, &env); status != http.StatusCreated {
+			t.Fatalf("post %s status = %d, want 201", path, status)
+		}
+		if env.From != "factory:planner" || env.Type != "brain.ping" {
+			t.Fatalf("posted envelope = %+v", env)
+		}
+		if !isEnvelopeIn(t, e, "foreman:alpha", env.ID) {
+			t.Fatalf("message %s not stored in foreman:alpha inbox", env.ID)
+		}
 	}
-	if env.From != "factory:planner" || env.Type != "brain.ping" {
-		t.Fatalf("posted envelope = %+v", env)
-	}
-	if !isEnvelopeIn(t, e, "foreman:alpha", env.ID) {
-		t.Fatalf("message %s not stored in foreman:alpha inbox", env.ID)
+	var phantom []wire.MessageEnvelope
+	if status := e.do("GET", "/v1/inboxes/foreman:foreman:alpha/recent?limit=50", "", nil, &phantom); status != http.StatusOK || len(phantom) != 0 {
+		t.Errorf("foreman:foreman:alpha inbox: status=%d n=%d - a double-prefixed id must never open one", status, len(phantom))
 	}
 }
 

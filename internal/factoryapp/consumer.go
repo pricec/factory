@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/pricec/factory/internal/jobs"
+	"github.com/pricec/factory/internal/registry"
 	"github.com/pricec/factory/internal/wire"
 )
 
@@ -110,10 +111,7 @@ func (a *App) notifyDispatched(ctx context.Context, job jobs.Job) error {
 	if err := env.Validate(); err != nil {
 		return fmt.Errorf("envelope: %w", err)
 	}
-	target := job.ForemanID
-	if !hasForemanPrefix(target) {
-		target = "foreman:" + target
-	}
+	target := registry.InboxID(job.ForemanID)
 	if _, err := a.inbox.Post(ctx, target, env); err != nil {
 		return fmt.Errorf("post to %s: %w", target, err)
 	}

@@ -3,7 +3,6 @@ package factoryapp
 import (
 	"context"
 	"log"
-	"strings"
 	"time"
 
 	"github.com/pricec/factory/internal/jobs"
@@ -30,8 +29,6 @@ const (
 	notifyTick      = 500 * time.Millisecond
 	notifyListLimit = 1000
 )
-
-func hasForemanPrefix(id string) bool { return strings.HasPrefix(id, "foreman:") }
 
 func (a *App) notifyLoop(ctx context.Context) {
 	ticker := time.NewTicker(notifyTick)
