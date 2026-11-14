@@ -18,7 +18,10 @@ func Resolve(override, fallback string) string {
 }
 
 // PlannerDefault is the factory planner's model (GLM 5.2: the brains run
-// at least 5.2; openrouter ~$0.007/$6.8 per M tokens in/out).
+// at least 5.2; openrouter ~$0.007/$6.8 per M tokens in/out). Brain
+// sessions are input-heavy and output-light, so 5.2's rock-bottom input
+// and cache-read prices make it the cheapest brain model despite the
+// expensive output - the output volume never comes into play.
 const PlannerDefault = "openrouter/z-ai/glm-5.2"
 
 // ForemanBrainDefault is the foreman brain's model (same tier as the
@@ -31,8 +34,11 @@ const ForemanBrainDefault = "openrouter/z-ai/glm-5.2"
 const WorkerFlash = "openrouter/z-ai/glm-5.3-flash"
 
 // WorkerStandard is the worker's middle tier (spec §5.1
-// `tier: "default"`): GLM 5.2 (openrouter, ~$0.007/$6.8 per M tokens).
-const WorkerStandard = "openrouter/z-ai/glm-5.2"
+// `tier: "default"`): GLM 5.3 FlashX (openrouter, ~$0.37/$1.25 per M
+// tokens) - the same 5.3 generation as flash and 5.3 with 1M context,
+// priced between them on output. GLM 5.2 priced itself out of the slot:
+// ~$6.8/M output, roughly twice the strongest tier's.
+const WorkerStandard = "openrouter/z-ai/glm-5.3-flashx"
 
 // WorkerHardest is the worker's `tier: "hardest"` model: full-strength
 // GLM 5.3 (openrouter, ~$0.084/$3.6 per M tokens) for the hardest tasks
