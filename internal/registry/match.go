@@ -3,7 +3,11 @@
 // tags are a superset of the job's requires list.
 package registry
 
-import "context"
+import (
+	"cmp"
+	"context"
+	"slices"
+)
 
 // Foreman is a registry snapshot row for matching.
 type Foreman struct {
@@ -25,25 +29,39 @@ type Matcher interface {
 	Match(ctx context.Context, requires []string) (foreman Foreman, ok bool, err error)
 }
 
-// FirstOnline is the v1 stub matcher (#8): the first online foreman wins,
-// ignoring requires. #12 replaces it with the capability matcher and this
-// stub is deleted.
-type FirstOnline struct {
-	Source ForemanSource
-}
+// CapabilityMatcher is the real matcher (spec §6.7): online foremen whose
+// capability tags are a superset of requires, AND semantics, no negation;
+// deterministic pick by (running_jobs asc, id asc).
+type CapabilityMatcher struct{ Source ForemanSource }
 
-// Match implements Matcher.
-func (m *FirstOnline) Match(ctx context.Context, requires []string) (Foreman, bool, error) {
+// Match implements Matcher: it filters to online foremen satisfying every
+// required tag, then picks the deterministic winner by (running_jobs asc,
+// id asc). No qualifying foreman yields (zero, false, nil).
+func (m *CapabilityMatcher) Match(ctx context.Context, requires []string) (Foreman, bool, error) {
 	foremen, err := m.Source.Foremen(ctx)
 	if err != nil {
 		return Foreman{}, false, err
 	}
+	var candidates []Foreman
 	for _, f := range foremen {
-		if f.Online {
-			return f, true, nil
+		if !f.Online {
+			continue
 		}
+		if !Capabilities(f.Capabilities).HasAll(requires) {
+			continue
+		}
+		candidates = append(candidates, f)
 	}
-	return Foreman{}, false, nil
+	if len(candidates) == 0 {
+		return Foreman{}, false, nil
+	}
+	slices.SortFunc(candidates, func(a, b Foreman) int {
+		return cmp.Or(
+			cmp.Compare(a.RunningJobs, b.RunningJobs),
+			cmp.Compare(a.ID, b.ID),
+		)
+	})
+	return candidates[0], true, nil
 }
 
-var _ Matcher = (*FirstOnline)(nil)
+var _ Matcher = (*CapabilityMatcher)(nil)
