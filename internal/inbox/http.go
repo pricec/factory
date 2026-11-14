@@ -44,11 +44,23 @@ func NewHandler(svc *Service, auth Authenticator) http.Handler {
 func (h *Handler) authz(action string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := h.auth.Authorize(r, r.PathValue("id"), action); err != nil {
+			var se StatusError
+			if errors.As(err, &se) {
+				writeError(w, se.HTTPStatus(), statusErrorCode(se.HTTPStatus()), err.Error(), false)
+				return
+			}
 			writeError(w, http.StatusForbidden, "forbidden", err.Error(), false)
 			return
 		}
 		next(w, r)
 	}
+}
+
+func statusErrorCode(status int) string {
+	if status == http.StatusUnauthorized {
+		return "unauthorized"
+	}
+	return "forbidden"
 }
 
 func (h *Handler) postMessages(w http.ResponseWriter, r *http.Request) {
