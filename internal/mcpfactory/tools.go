@@ -45,6 +45,9 @@ type (
 		Payload   json.RawMessage `json:"payload,omitempty"`
 		JobID     string          `json:"job_id,omitempty"`
 	}
+	notifyOperatorArgs struct {
+		Text string `json:"text"`
+	}
 )
 
 // decodeArgs round-trips the tool's untyped JSON arguments into dst.
@@ -264,4 +267,40 @@ func messageForemanTool(cfg Config) mcp.ToolHandlerFor[any, any] {
 		}
 		return structuredResult(map[string]any{"ok": true, "id": posted.ID}), nil, nil
 	}
+}
+
+// notifyOperatorTool serves the notify_operator tool (spec §9.4): posts the
+// planner's reply into the operator inbox (planner:main, spec §9.5) as a
+// brain.reply envelope. This is the ONLY way the LLM planner talks back - the
+// conversational UI renders planner:main, so every reply lands in the
+// operator's chat log (and streams to browsers via the SSE hub).
+func notifyOperatorTool(cfg Config) mcp.ToolHandlerFor[any, any] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, _ any) (*mcp.CallToolResult, any, error) {
+		var in notifyOperatorArgs
+		if err := decodeArgs(req, &in); err != nil {
+			return nil, nil, fmt.Errorf("arguments: %w", err)
+		}
+		if in.Text == "" {
+			return nil, nil, fmt.Errorf("text: required")
+		}
+		env := wire.MessageEnvelope{
+			Type:    "brain.reply",
+			From:    auth.FactoryBrainIdentity,
+			Payload: json.RawMessage(`{"text":` + mustQuote(in.Text) + `}`),
+		}
+		posted, err := cfg.Inbox.Post(ctx, auth.PlannerMainInbox, env)
+		if err != nil {
+			return nil, nil, err
+		}
+		return structuredResult(map[string]any{"ok": true, "id": posted.ID}), nil, nil
+	}
+}
+
+// mustQuote marshals s to a JSON string (always valid).
+func mustQuote(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return `""`
+	}
+	return string(b)
 }

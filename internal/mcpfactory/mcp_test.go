@@ -228,12 +228,12 @@ func TestToolsListAndBudget(t *testing.T) {
 	_, out = e.rpc(e.planner, "tools/list", nil)
 	res := resultOf(t, out)
 	tools, ok := res["tools"].([]any)
-	if !ok || len(tools) != 5 {
-		t.Fatalf("tools/list: want 5 tools, got %v", res["tools"])
+	if !ok || len(tools) != 6 {
+		t.Fatalf("tools/list: want 6 tools, got %v", res["tools"])
 	}
 	want := map[string]bool{
 		"list_foremen": false, "list_jobs": false, "create_job": false,
-		"read_result": false, "message_foreman": false,
+		"read_result": false, "message_foreman": false, "notify_operator": false,
 	}
 	var budget int
 	for _, tl := range tools {
@@ -556,6 +556,47 @@ func TestMessageForeman(t *testing.T) {
 	}))
 	if !strings.Contains(msg, "job_id") {
 		t.Errorf("tool error = %q, want job_id mention", msg)
+	}
+}
+
+// TestNotifyOperator: notify_operator posts a brain.reply envelope into the
+// operator inbox (planner:main, spec §9.5) - the planner's only reply path.
+func TestNotifyOperator(t *testing.T) {
+	e := newEnv(t, budgets.DefaultConfig())
+	ctx := context.Background()
+
+	sc := structured(t, resultOf(t, e.callTool("notify_operator", map[string]any{
+		"text": "all quiet; 3 jobs done",
+	})))
+	if sc["ok"] != true {
+		t.Fatalf("notify_operator: %v", sc)
+	}
+
+	envs, err := e.svc.Get(ctx, "planner:main", 10, 0)
+	if err != nil {
+		t.Fatalf("inbox.Get: %v", err)
+	}
+	if len(envs) != 1 {
+		t.Fatalf("operator inbox has %d envelopes, want 1", len(envs))
+	}
+	got := envs[0]
+	if got.Type != "brain.reply" || got.From != "factory:brain" {
+		t.Fatalf("envelope = %+v", got)
+	}
+	var p struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(got.Payload, &p); err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	if p.Text != "all quiet; 3 jobs done" {
+		t.Errorf("payload text = %q", p.Text)
+	}
+
+	// Empty text: tool error.
+	msg := toolError(t, "notify_operator", e.callTool("notify_operator", map[string]any{"text": ""}))
+	if !strings.Contains(msg, "text") {
+		t.Errorf("tool error = %q, want text mention", msg)
 	}
 }
 

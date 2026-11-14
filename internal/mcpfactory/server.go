@@ -67,6 +67,10 @@ func Handler(cfg Config) (http.Handler, error) {
 		Name:        "message_foreman",
 		Description: "Post a message to a foreman's inbox.",
 	}, messageForemanTool(cfg))
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "notify_operator",
+		Description: "Reply to the human operator in the chat UI: text lands in their inbox. ALWAYS answer operator questions this way.",
+	}, notifyOperatorTool(cfg))
 
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})

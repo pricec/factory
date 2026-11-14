@@ -157,8 +157,9 @@ bytes are free - token cost is governed by what enters LLM context, which the
 The two UI endpoints are unauthenticated like the §6.9 control plane (trusted-LAN
 posture, §7.5) and exist because no factory credential carries inbox-read
 scopes: the UI reads the store server-side instead. `GET /` serves the
-single-page operator UI (foremen list with `last_seen`, inbox listing, per-item
-detail views) over these endpoints plus §6.9.
+single-page operator UI (§9.5 conversational chat over `planner:main`, foremen
+list with `last_seen`, inbox listing, per-item detail views) over these
+endpoints plus §6.9.
 
 `wait_seconds` 0-60 long-polls until non-empty (#1). Error responses use the
 error model in §10.
@@ -398,6 +399,8 @@ factory planner's list view carries summaries only (#7, #19).
 | `GET /v1/spend?day=` | daily totals `{total_usd, jobs}`; per-role deferred until jobs carry role tags (#13) |
 | `GET /v1/inboxes` | per-inbox aggregate listing `{inbox_id, total, unacked, last_ts}` (UI; §4.1) |
 | `GET /v1/inboxes/{id}/recent` | recent envelopes for one inbox, acked included (UI; §4.1) |
+| `POST /v1/chat` | `{text}` -> chat.message envelope in the operator inbox; wakes the LLM planner (§9.5) |
+| `GET /v1/inboxes/planner:main/stream` | permissive SSE stream of the operator inbox for the chat UI (§9.5) |
 | `GET /` | operator web UI (single page; §4.1) |
 | `POST /v1/pairing-tokens` | planner-credential auth (v1: the planner token doubles as the operator credential); issues a one-time pairing token, `200 {pairing_token, expires_at}` (#23) |
 
@@ -670,8 +673,39 @@ Tools (exact):
   payloads enter LLM context (#19; #7 point 3).
 - `message_foreman(foreman_id, type, payload)` - envelope to that foreman's
   inbox.
+- `notify_operator(text)` - posts a `brain.reply` envelope into the operator
+  inbox (`planner:main`, §9.5); the ONLY way the LLM planner talks back to
+  the human.
 
 Planner session mechanics: same opencode harness pattern as #5 (#19).
+
+### 9.5 Conversational surface: the operator inbox
+
+The factory planner is conversational: the human operator drives the
+factory through one inbox, `planner:main`, rendered by the web UI (§4.1
+`GET /`).
+
+Envelope types in `planner:main`:
+
+- `chat.message` (from `human:operator`, payload `{text}`) - the operator's
+  message, via `POST /v1/chat {text}` (unauthenticated like the rest of the
+  UI surface, §7.5).
+- `brain.reply` (from `factory:brain`, payload `{text}`) - the LLM
+  planner's answer, posted by the `notify_operator` tool (§9.4).
+- `notify.job` (from `factory`) - job terminal-state notification (id,
+  state, foreman, last_error, over_budget, summary), posted on every
+  terminal transition (done/failed/timed_out/dead) to bring completions
+  and failures to the operator's attention.
+
+Planner loop (internal/factoryapp, twin of the consumer loop): drains
+`planner:main`; `chat.message` wakes one opencode planner session (§9.4
+surface, planner bearer, model via `FACTORY_PLANNER_MODEL`) with the recent
+inbox history replayed into the prompt (per-payload 2KB caps, §6.6);
+everything else is informational and acked without a wake. A failed session
+posts a `brain.reply` error note so the operator is never left waiting.
+Acking never deletes: history stays replayable via
+`GET /v1/inboxes/planner:main/recent` and streams to browsers via the
+permissive SSE `GET /v1/inboxes/planner:main/stream`.
 
 ## 10. Error model
 

@@ -66,6 +66,7 @@ type App struct {
 	picker     *jobs.RetryPicker
 	matcher    *registry.CapabilityMatcher
 	budget     budgets.Config
+	planner    *PlannerBrain
 	handler    http.Handler
 	advertise  string
 	plannerTok string
@@ -168,6 +169,16 @@ func New(cfg Config) (*App, error) {
 		_ = a.Close()
 		return nil, fmt.Errorf("factoryapp: planner MCP: %w", err)
 	}
+
+	// Conversational planner (spec §9.5): one-shot opencode sessions over
+	// the planner MCP surface, woken by the planner loop on chat.message
+	// envelopes in the operator inbox. Model via FACTORY_PLANNER_MODEL.
+	a.planner = &PlannerBrain{
+		Model:   os.Getenv("FACTORY_PLANNER_MODEL"),
+		MCPURL:  a.advertise + "/v1/mcp/factory",
+		Bearer:  a.plannerTok,
+		WorkDir: filepath.Join(cfg.DataDir, "planner"),
+	}
 	a.handler = buildMux(a, mcpH)
 	return a, nil
 }
@@ -177,6 +188,13 @@ func (a *App) Handler() http.Handler { return a.handler }
 
 // PlannerToken returns the factory planner bearer (env-provided or minted).
 func (a *App) PlannerToken() string { return a.plannerTok }
+
+// SetPlannerExec is a test seam: it replaces the planner brain's session
+// runner so no test ever invokes a real opencode (the BrainRunner.Exec
+// pattern of foremanapp, #9.3).
+func (a *App) SetPlannerExec(fn func(ctx context.Context, prompt string) (string, error)) {
+	a.planner.Exec = fn
+}
 
 // AdvertiseURL returns the URL advertised to pairing children.
 func (a *App) AdvertiseURL() string { return a.advertise }
@@ -204,6 +222,7 @@ func (a *App) Run(ctx context.Context) error {
 	run("scheduler", func() error { return a.scheduler.Run(ctx) })
 	run("retry picker", func() error { return a.picker.Run(ctx) })
 	run("consumer", func() error { a.consumeLoop(ctx); return nil })
+	run("planner", func() error { a.plannerLoop(ctx); return nil })
 	run("dispatch notifier", func() error { a.notifyLoop(ctx); return nil })
 	wg.Wait()
 	return nil
@@ -225,12 +244,14 @@ func (a *App) Close() error {
 }
 
 // onTerminal fires on every terminal job transition: revoke the job's
-// worker tokens (spec §7.4) and flag over-budget jobs (spec §6.5 proxy 4).
+// worker tokens (spec §7.4), flag over-budget jobs (spec §6.5 proxy 4),
+// and bring the terminal state to the operator's attention (spec §9.5).
 func (a *App) onTerminal(jobID, _ string) {
 	ctx := context.Background()
 	if err := a.auth.InvalidateJob(ctx, jobID); err != nil {
 		log.Printf("factoryapp: invalidate credentials for %s: %v", jobID, err)
 	}
+	a.notifyOperatorJob(ctx, jobID)
 	job, ok, err := a.jobs.Get(ctx, jobID)
 	if err != nil || !ok {
 		return
@@ -258,6 +279,13 @@ func buildMux(a *App, mcpH http.Handler) http.Handler {
 	mux.HandleFunc("GET /{$}", a.handleUI)
 	mux.HandleFunc("GET /v1/inboxes", a.handleInboxSummaries)
 	mux.HandleFunc("GET /v1/inboxes/{id}/recent", a.handleInboxRecent)
+	// Conversational surface (spec §9.5): the UI's send path into the
+	// operator inbox; the planner loop wakes the LLM on chat.message.
+	// The permissive planner:main SSE stream pushes new envelopes to the
+	// browser chat tab (no bearer: the UI surface is unauthenticated,
+	// §7.5); the literal pattern outranks the authed {id} wildcard.
+	mux.HandleFunc("POST /v1/chat", a.handleChat)
+	mux.Handle("GET /v1/inboxes/planner:main/stream", notify.StreamHandler(a.hub, nil))
 	// Brain drive surface (spec §6.9): UI twins of the MCP create_job and
 	// message_foreman tools (§9.4) - same stores, same matcher, same breaker.
 	mux.HandleFunc("POST /v1/jobs", a.handleCreateJob)

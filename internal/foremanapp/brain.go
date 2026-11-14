@@ -79,7 +79,8 @@ func (b *BrainRunner) runOpencode(ctx context.Context, prompt string) (string, e
 
 	ctx, cancel := context.WithTimeout(ctx, brainTimeout)
 	defer cancel()
-	cmd := exec.Command("opencode", "run", prompt)
+	// CommandContext (not Command): cmd.Cancel below requires it.
+	cmd := exec.CommandContext(ctx, "opencode", "run", prompt)
 	cmd.Dir = b.WorkDir
 	env := withEnvValue(os.Environ(), envBrainToken, b.Bearer)
 	cmd.Env = withEnvValue(env, envOpenCODEConfig, configPath)
