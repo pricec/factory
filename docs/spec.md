@@ -334,8 +334,10 @@ created today; above the config cap (default $20/day) the factory refuses new
 
 Model tiering (#13): config map `{planner, foreman_brain, worker}` -> model
 strings injected via opencode `-m` / config; defaults in config file,
-env-overridable; swapping a role's model is a config change only. Reporting:
-`GET /v1/spend?day=` -> per-role totals `{planner, foreman_brain, worker}`.
+env-overridable; swapping a role's model is a config change only. Reporting
+(v1 amendment, #13): `GET /v1/spend?day=` returns daily totals
+`{total_usd, jobs}` - jobs do not yet carry a role tag, so per-role totals
+`{planner, foreman_brain, worker}` are deferred until they do.
 
 ### 6.6 LLM context cap (#7)
 
@@ -383,7 +385,7 @@ factory planner's list view carries summaries only (#7, #19).
 | `POST /v1/schedules/{id}/enable` | (#8) |
 | `POST /v1/schedules/{id}/disable` | (#8) |
 | `POST /v1/foreman/capabilities` | foreman token; upserts tags, bumps `last_seen` (#12) |
-| `GET /v1/spend?day=` | per-role totals `{planner, foreman_brain, worker}` (#13) |
+| `GET /v1/spend?day=` | daily totals `{total_usd, jobs}`; per-role deferred until jobs carry role tags (#13) |
 
 Request/response shapes and status codes beyond those shown are not pinned.
 
@@ -546,6 +548,10 @@ Kill the entire process group at `timeout_s`; post a JobResult with
 - LLM sessions (worker agent, foreman brain, factory planner) all reuse the
   #5 opencode harness pattern (`OPENCODE_CONFIG` + generated config),
   differing in MCP URL + prompt (#5, #18, #19).
+- Decision (append-only, #17): implemented with
+  `github.com/modelcontextprotocol/go-sdk` v1.8.0 (streamable-HTTP server,
+  stateless + JSONResponse modes, bearer auth as wrapping middleware);
+  hand-roll not needed.
 
 ### 9.2 Worker surface: `/v1/mcp/worker` (#17)
 
