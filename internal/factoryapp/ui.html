@@ -205,8 +205,18 @@ function table(headers, rows) {
 let lastChatTS = "";
 let sending = false;
 
+// The API returns payloads as parsed JSON objects (json.RawMessage marshals
+// inline), not strings - parse only when a string somehow arrives.
+function payloadObj(env) {
+  if (typeof env.payload === "string") {
+    try { return JSON.parse(env.payload); } catch { return {}; }
+  }
+  return env.payload || {};
+}
+
 function chatPayloadText(env) {
-  try { const p = JSON.parse(env.payload); return p.text || p.summary || ""; } catch { return ""; }
+  const p = payloadObj(env);
+  return p.text || p.summary || "";
 }
 
 function bubble(env) {
@@ -218,7 +228,7 @@ function bubble(env) {
     return '<div class="bubble brain"><span class="who">planner · ' + esc(rel(env.ts)) + '</span>' + esc(text) + "</div>";
   }
   if (env.type === "notify.job") {
-    let p = {}; try { p = JSON.parse(env.payload); } catch {}
+    const p = payloadObj(env);
     return '<div class="bubble notify"><span class="who">job ' + esc(p.job_id || env.job_id || "?") + " → " +
       '<span class="state st-' + esc(p.state || "") + '">' + esc(p.state || "?") + "</span> · " + esc(rel(env.ts)) + "</span>" +
       (p.foreman_id ? "foreman " + esc(p.foreman_id) + " · " : "") +
