@@ -1,0 +1,391 @@
+// Package foremanapp wires the foreman binary (issue #21): the local inbox,
+// auth, notify, routing, worker harness, and the worker + brain MCP surfaces
+// composed into one HTTP mux plus the background loops (remote inbox client,
+// local inbox consumer, capabilities refresh).
+package foremanapp
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"github.com/pricec/factory/internal/auth"
+	"github.com/pricec/factory/internal/inbox"
+	"github.com/pricec/factory/internal/mcpforeman"
+	"github.com/pricec/factory/internal/mcpworker"
+	"github.com/pricec/factory/internal/notify"
+	"github.com/pricec/factory/internal/routing"
+	"github.com/pricec/factory/internal/wire"
+	"github.com/pricec/factory/internal/workerharness"
+)
+
+// FactoryMainInbox is the factory's processing inbox: forwarded job.result
+// and job.event envelopes target it (spec §7.3).
+const FactoryMainInbox = "factory:main"
+
+// Config configures the foreman App.
+type Config struct {
+	// FactoryURL is the factory's base URL, e.g. "http://127.0.0.1:8080"
+	// (the factory's AdvertiseURL).
+	FactoryURL string
+	// ID is the bare foreman id, e.g. "alpha".
+	ID string
+	// DataDir holds inbox.db, auth.db, and paired.json.
+	DataDir string
+	// Addr is the foreman's own listen address, e.g. ":8090".
+	Addr string
+	// AdvertiseURL is logged at startup; v1 does not strictly need it
+	// (the factory never calls back over it beyond the local mux).
+	// Empty -> http://<hostname>:<port of Addr>.
+	AdvertiseURL string
+	// PairingToken is the one-time pairing token, first run only.
+	// Empty with no stored paired.json -> New fails ("not paired").
+	PairingToken string
+	// BrainModel is the opencode model string for brain sessions;
+	// "" -> opencode default.
+	BrainModel string
+	// WorkerModel is the opencode model string for worker sessions;
+	// "" -> opencode default.
+	WorkerModel string
+	// Now is the clock; nil -> real UTC time.
+	Now func() time.Time
+}
+
+// App is the wired foreman agent host.
+type App struct {
+	cfg        Config
+	factoryURL string
+	id         string
+	inboxID    string // "foreman:{id}"
+	dataDir    string
+	advertise  string
+	now        func() time.Time
+
+	paired     pairingRecord
+	brainToken string
+
+	inbox  *inbox.Service
+	auth   *auth.Store
+	authn  *auth.Authenticator
+	hub    *notify.Hub
+	router *routing.Router
+	brain  *BrainRunner
+	poster *Poster
+	client *notify.Client
+
+	// BuildHarnessConfig builds the workerharness.Config the spawner runs
+	// for one job. A field so tests can replace the opencode binary and
+	// URLs; the default derives them from cfg (see defaultHarnessConfig).
+	BuildHarnessConfig func(spec wire.JobSpec, bearer string) workerharness.Config
+
+	handler http.Handler
+}
+
+// New opens the local stores, pairs with the factory when needed (spec
+// §7.1), wires the router/spawner/brain/poster/client, and builds the local
+// /v1 mux. It starts no goroutines and no listeners; Run owns the loops.
+func New(cfg Config) (*App, error) {
+	switch {
+	case cfg.FactoryURL == "":
+		return nil, errors.New("foremanapp: Config.FactoryURL is required")
+	case cfg.ID == "":
+		return nil, errors.New("foremanapp: Config.ID is required")
+	case cfg.DataDir == "":
+		return nil, errors.New("foremanapp: Config.DataDir is required")
+	}
+	if cfg.Addr == "" {
+		cfg.Addr = ":8090"
+	}
+	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
+		return nil, fmt.Errorf("foremanapp: data dir: %w", err)
+	}
+	now := cfg.Now
+	if now == nil {
+		now = func() time.Time { return time.Now().UTC() }
+	}
+
+	a := &App{
+		cfg:        cfg,
+		factoryURL: cfg.FactoryURL,
+		id:         cfg.ID,
+		inboxID:    "foreman:" + cfg.ID,
+		dataDir:    cfg.DataDir,
+		advertise:  cfg.AdvertiseURL,
+		now:        now,
+	}
+	if a.advertise == "" {
+		a.advertise = defaultAdvertiseURL(cfg.Addr)
+	}
+
+	// Stores: open both or none.
+	var err error
+	a.inbox, err = inbox.Open(filepath.Join(cfg.DataDir, "inbox.db"))
+	if err != nil {
+		return nil, fmt.Errorf("foremanapp: open inbox: %w", err)
+	}
+	a.auth, err = auth.Open(filepath.Join(cfg.DataDir, "auth.db"))
+	if err != nil {
+		_ = a.Close()
+		return nil, fmt.Errorf("foremanapp: open auth: %w", err)
+	}
+	a.auth.Now = now
+
+	// Pairing (spec §7.1): load paired.json, or burn the one-time token.
+	ctx := context.Background()
+	a.paired, err = loadOrPair(ctx, a)
+	if err != nil {
+		_ = a.Close()
+		return nil, err
+	}
+	if a.paired.InboxID != "" {
+		a.inboxID = a.paired.InboxID
+	}
+
+	// Brain credential: a local foreman:{id} credential on the foreman's
+	// own auth store, valid for its own inbox. The factory-paired bearer
+	// lives in the factory's auth DB and cannot authenticate against the
+	// local mcpforeman/inbox surfaces, so the brain token is minted
+	// locally via the same PairForeman path (spec §7.1, §7.3).
+	localPair, _, err := a.auth.IssuePairingToken(ctx)
+	if err != nil {
+		_ = a.Close()
+		return nil, fmt.Errorf("foremanapp: issue local pairing token: %w", err)
+	}
+	a.brainToken, _, err = a.auth.PairForeman(ctx, localPair, a.id)
+	if err != nil {
+		_ = a.Close()
+		return nil, fmt.Errorf("foremanapp: mint brain credential: %w", err)
+	}
+
+	// Local SSE fan-out (spec §4.4) + inbox auth.
+	a.hub = notify.NewHub()
+	a.hub.AttachTo(a.inbox)
+	a.authn = auth.NewAuthenticator(a.auth)
+
+	// Brain, poster, spawner, router (spec §3.3).
+	a.brain = &BrainRunner{
+		Model:   cfg.BrainModel,
+		MCPURL:  localBaseURL(cfg.Addr) + "/v1/mcp/foreman",
+		Bearer:  a.brainToken,
+		WorkDir: cfg.DataDir,
+	}
+	a.poster = &Poster{FactoryURL: cfg.FactoryURL, Bearer: a.paired.Bearer}
+	a.BuildHarnessConfig = a.defaultHarnessConfig
+	a.router = &routing.Router{
+		Brain:   a.brain,
+		Poster:  a.poster,
+		Spawner: spawnerFunc(a.SpawnWorker),
+	}
+
+	// MCP surfaces (spec §9.2, §9.3).
+	workerH, err := mcpworker.Handler(mcpworker.Config{
+		Auth:           a.auth,
+		Inbox:          a.inbox,
+		ForemanInboxID: a.inboxID,
+		WorkDir:        cfg.DataDir,
+		Now:            now,
+	})
+	if err != nil {
+		_ = a.Close()
+		return nil, fmt.Errorf("foremanapp: worker MCP: %w", err)
+	}
+	foremanH, err := mcpforeman.Handler(mcpforeman.Config{
+		Auth:           a.auth,
+		Inbox:          a.inbox,
+		ForemanInboxID: a.inboxID,
+		ParentInboxID:  FactoryMainInbox,
+		Spawn:          a.SpawnWorker,
+	})
+	if err != nil {
+		_ = a.Close()
+		return nil, fmt.Errorf("foremanapp: foreman MCP: %w", err)
+	}
+
+	// Local mux: the foreman's own inbox backs foreman:{id} and job:{id}
+	// inboxes (workers post results/questions here).
+	mux := http.NewServeMux()
+	mux.Handle("/v1/inboxes/", inbox.NewHandler(a.inbox, a.authn))
+	mux.Handle("GET /v1/inboxes/{id}/stream", notify.StreamHandler(a.hub, a.authn))
+	mux.Handle("/v1/mcp/worker", workerH)
+	mux.Handle("/v1/mcp/foreman", foremanH)
+	a.handler = mux
+
+	// Remote inbox client (spec §4.5): streams the factory-side copy of
+	// foreman:{id}; batches are routed and acked via the factory's REST.
+	a.client = &notify.Client{
+		BaseURL: cfg.FactoryURL,
+		InboxID: a.inboxID,
+		Token:   a.paired.Bearer,
+		Handler: a.handleRemoteBatch,
+	}
+	return a, nil
+}
+
+// Handler returns the local /v1 mux.
+func (a *App) Handler() http.Handler { return a.handler }
+
+// Paired reports whether the foreman carries a stored pairing.
+func (a *App) Paired() bool { return a.paired.Bearer != "" }
+
+// AdvertiseURL returns the foreman's advertised base URL (logged at
+// startup; the factory does not call back over it in v1).
+func (a *App) AdvertiseURL() string { return a.advertise }
+
+// Inbox returns the local inbox service (test/integration accessor).
+func (a *App) Inbox() *inbox.Service { return a.inbox }
+
+// Auth returns the local auth store (test/integration accessor).
+func (a *App) Auth() *auth.Store { return a.auth }
+
+// Router returns the wired router (test/integration accessor).
+func (a *App) Router() *routing.Router { return a.router }
+
+// BrainToken returns the local foreman brain bearer, valid on the foreman's
+// own mux (brain MCP + own-inbox read/post). Test accessor; also the token
+// the default BrainRunner.Exec injects as FOREMAN_BRAIN_TOKEN.
+func (a *App) BrainToken() string { return a.brainToken }
+
+// Brain returns the wired brain runner (test seam: replace its Exec).
+func (a *App) Brain() *BrainRunner { return a.brain }
+
+// Run runs the background loops: the remote inbox client, the local inbox
+// consumer, and the capabilities refresh (startup push + 60s ticker). It
+// blocks until ctx is done. v1 fails fast: a definitive remote-loop error
+// is logged and the loop ends.
+func (a *App) Run(ctx context.Context) error {
+	if err := a.pushCapabilities(ctx); err != nil {
+		log.Printf("foremanapp: initial capabilities push: %v", err)
+	}
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		if err := a.client.Run(ctx); err != nil && ctx.Err() == nil {
+			log.Printf("foremanapp: inbox client stopped: %v", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		a.capsLoop(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		a.localLoop(ctx)
+	}()
+	wg.Wait()
+	return nil
+}
+
+// Close closes the local stores.
+func (a *App) Close() error {
+	var errs []error
+	if a.inbox != nil {
+		errs = append(errs, a.inbox.Close())
+	}
+	if a.auth != nil {
+		errs = append(errs, a.auth.Close())
+	}
+	return errors.Join(errs...)
+}
+
+// handleRemoteBatch routes one factory-side snapshot batch and acks the
+// handled ids via the factory's REST API (the notify.Client Handler
+// contract: the caller owns processing AND acking; Run propagates its
+// error, so an ack failure ends the loop - fail fast in v1).
+func (a *App) handleRemoteBatch(ctx context.Context, envs []wire.MessageEnvelope) error {
+	return a.handleBatch(ctx, envs, a.ackRemote)
+}
+
+// handleBatch routes each envelope through the rule table (spec §3.3),
+// acks the successfully routed ids, and revokes the worker credential of
+// any terminal job.result observed (spec §7.4 analog: the result IS the
+// terminal signal the foreman sees).
+func (a *App) handleBatch(ctx context.Context, envs []wire.MessageEnvelope, ack func(context.Context, []string) error) error {
+	var ids []string
+	for _, env := range envs {
+		if err := a.router.Handle(ctx, env); err != nil {
+			log.Printf("foremanapp: route %s %s: %v (not acked; redelivered)", env.Type, env.ID, err)
+			continue
+		}
+		ids = append(ids, env.ID)
+		if env.Type == "job.result" && env.JobID != "" {
+			if err := a.auth.InvalidateJob(ctx, env.JobID); err != nil {
+				log.Printf("foremanapp: revoke worker credential for %s: %v", env.JobID, err)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	return ack(ctx, ids)
+}
+
+// localLoop drains the foreman's own local inbox via the library API (no
+// HTTP): job.result and job.question posted by in-process workers, plus
+// brain.wake posted locally. Routed envelopes are acked locally.
+func (a *App) localLoop(ctx context.Context) {
+	for {
+		envs, err := a.inbox.Get(ctx, a.inboxID, 50, 5*time.Second)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("foremanapp: local consumer: get: %v", err)
+			if !sleepCtx(ctx, time.Second) {
+				return
+			}
+			continue
+		}
+		if len(envs) == 0 {
+			continue
+		}
+		if err := a.handleBatch(ctx, envs, a.ackLocal); err != nil {
+			log.Printf("foremanapp: local consumer: %v", err)
+		}
+	}
+}
+
+// capsLoop pushes detected capabilities at startup and on a 60s ticker
+// (spec §6.7 refresh): keeps last_seen fresh even without traffic.
+func (a *App) capsLoop(ctx context.Context) {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := a.pushCapabilities(ctx); err != nil {
+				log.Printf("foremanapp: capabilities push: %v", err)
+			}
+		}
+	}
+}
+
+// pushCapabilities POSTs the detected capability tags to the factory
+// (spec §6.7): POST /v1/foreman/capabilities with the paired bearer.
+func (a *App) pushCapabilities(ctx context.Context) error {
+	return postJSON(ctx, a.factoryURL+"/v1/foreman/capabilities", a.paired.Bearer,
+		map[string]any{"capabilities": detectCapabilities()})
+}
+
+// ackLocal acks ids in the local inbox service.
+func (a *App) ackLocal(ctx context.Context, ids []string) error {
+	return a.inbox.Ack(ctx, a.inboxID, ids)
+}
+
+// ackRemote acks ids in the factory-side copy of the foreman inbox:
+// POST {FactoryURL}/v1/inboxes/{foreman:{id}}/ack with the paired bearer
+// (spec §4.1; the notify.Client does not ack on its own).
+func (a *App) ackRemote(ctx context.Context, ids []string) error {
+	return postJSON(ctx,
+		a.factoryURL+"/v1/inboxes/"+url.PathEscape(a.inboxID)+"/ack",
+		a.paired.Bearer, map[string]any{"ids": ids})
+}

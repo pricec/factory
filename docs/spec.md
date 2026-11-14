@@ -446,6 +446,11 @@ own inbox at the factory), `factory:main` (factory processing inbox),
 ### 7.4 Worker-token invalidation hook (#9, #11)
 
 Called exactly once on terminal transition; registered by #11, wired by #9.
+Execution site (integration note, #21): worker tokens live in the FOREMAN's
+auth store, so revocation runs foreman-side - the foreman's local consumer
+loop calls InvalidateJob(job_id) when it routes a terminal job.result. The
+factory-side OnTerminal hook still fires for jobs-bookkeeping (over-budget
+flagging).
 
 ### 7.5 TLS posture (#11)
 
@@ -586,7 +591,10 @@ Tools (exact):
 
 Brain session mechanics: the foreman runtime spawns opencode with
 `OPENCODE_CONFIG` pointing here - same code path as #5, different MCP URL +
-prompt (#18).
+prompt (#18). The brain token is a LOCAL foreman credential on the foreman's
+own auth store (the factory-paired bearer lives in the factory's store and
+cannot authenticate against the foreman's local endpoints); the foreman
+mints it at startup (#21).
 
 ### 9.4 Factory planner surface: `/v1/mcp/factory` (#19)
 
