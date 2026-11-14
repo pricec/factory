@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>factory</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d;
+    --text: #e6edf3; --dim: #8b949e; --accent: #58a6ff;
+    --ok: #3fb950; --warn: #d29922; --bad: #f85149;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 16px;
+    padding: 14px 20px; border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 16px; margin: 0; font-family: var(--mono); }
+  header h1 .prompt { color: var(--accent); }
+  nav { display: flex; gap: 4px; margin-left: auto; }
+  nav button {
+    background: none; border: 1px solid transparent; color: var(--dim);
+    padding: 5px 12px; border-radius: 6px; cursor: pointer; font: inherit;
+  }
+  nav button.active { color: var(--text); border-color: var(--border); background: var(--panel); }
+  nav button:hover { color: var(--text); }
+  main { padding: 20px; max-width: 1100px; margin: 0 auto; }
+  .toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; color: var(--dim); font-size: 12px; }
+  .toolbar .count { font-family: var(--mono); }
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); font-family: var(--mono); font-size: 13px; }
+  th { color: var(--dim); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+  tr:last-child td { border-bottom: none; }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: #1c2128; }
+  tr.selected { background: #1f2937; outline: 1px solid var(--accent); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .dot.online { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+  .dot.offline { background: var(--bad); }
+  .badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; border: 1px solid var(--border); color: var(--dim); }
+  .badge.hot { color: var(--warn); border-color: var(--warn); }
+  #detail { margin-top: 16px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+  #detail h2 { margin: 0 0 4px; font-size: 14px; font-family: var(--mono); }
+  #detail .sub { color: var(--dim); font-size: 12px; margin-bottom: 12px; }
+  #detail h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--dim); margin: 16px 0 6px; }
+  pre { background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 10px; overflow: auto; font-family: var(--mono); font-size: 12px; margin: 0; }
+  .msg { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; font-family: var(--mono); font-size: 12px; }
+  .msg .meta { color: var(--dim); margin-bottom: 4px; }
+  .msg .type { color: var(--accent); }
+  .empty { color: var(--dim); font-style: italic; padding: 16px; text-align: center; }
+  a { color: var(--accent); text-decoration: none; }
+  .actions { margin-top: 14px; }
+  .actions button { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 5px 12px; cursor: pointer; font: inherit; }
+  .actions button:hover { border-color: var(--accent); }
+  .err { color: var(--bad); font-family: var(--mono); font-size: 12px; padding: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="prompt">factory</span> : <span id="adv">-</span></h1>
+  <nav>
+    <button id="tab-foremen" class="active">Foremen</button>
+    <button id="tab-inboxes">Inboxes</button>
+  </nav>
+</header>
+<main>
+  <div class="toolbar">
+    <span class="count" id="rowcount"></span>
+    <span style="margin-left:auto" id="refreshed"></span>
+  </div>
+  <div id="list"></div>
+  <div id="detail" style="display:none"></div>
+</main>
+<script>
+"use strict";
+let selectedForeman = null;
+let selectedInbox = null;
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+function rel(ts) {
+  if (!ts) return "-";
+  const s = (Date.now() - Date.parse(ts)) / 1000;
+  if (s < 0) return "just now";
+  if (s < 60) return Math.floor(s) + "s ago";
+  if (s < 3600) return Math.floor(s/60) + "m ago";
+  if (s < 86400) return Math.floor(s/3600) + "h ago";
+  return Math.floor(s/86400) + "d ago";
+}
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(url + " -> HTTP " + r.status);
+  return r.json();
+}
+
+function parseCaps(raw) {
+  if (!raw) return {};
+  if (typeof raw === "object") return raw;
+  try { return JSON.parse(raw) || {}; } catch { return {}; }
+}
+
+function table(headers, rows) {
+  if (rows.length === 0) {
+    return '<table><thead><tr>' + headers.map(h => "<th>"+h+"</th>").join("") +
+      '</tr></thead><tbody><tr><td class="empty" colspan="'+headers.length+'">nothing yet</td></tr></tbody></table>';
+  }
+  return '<table><thead><tr>' + headers.map(h => "<th>"+h+"</th>").join("") +
+    "</tr></thead><tbody>" + rows.join("") + "</tbody></table>";
+}
+
+function envelopeList(envs, emptyNote) {
+  if (!envs || envs.length === 0) return '<div class="empty">' + esc(emptyNote) + "</div>";
+  return envs.map(e =>
+    '<div class="msg"><div class="meta"><span class="type">' + esc(e.type) + "</span>" +
+    (e.job_id ? " · job <a href=\"/v1/jobs/" + encodeURIComponent(e.job_id) + "\" target=\"_blank\">" + esc(e.job_id) + "</a>" : "") +
+    " · from " + esc(e.from) + " · " + esc(e.ts) + "</div><pre>" +
+    esc(JSON.stringify(e.payload ?? null, null, 2)) + "</pre></div>").join("");
+}
+
+async function loadForemen() {
+  let foremen;
+  try {
+    foremen = await getJSON("/v1/foremen");
+  } catch (e) { $("list").innerHTML = '<div class="err">' + esc(e.message) + "</div>"; return; }
+  if (!foremen) foremen = [];
+  $("rowcount").textContent = foremen.length + " foreman" + (foremen.length === 1 ? "" : "s");
+  const rows = foremen.map(f => {
+    const caps = parseCaps(f.capabilities);
+    const n = Object.keys(caps).length;
+    return '<tr data-id="' + esc(f.id) + (f.id === selectedForeman ? '" class="selected' : "") + '">' +
+      "<td>" + (f.online ? '<span class="dot online"></span>' : '<span class="dot offline"></span>') + esc(f.id) + "</td>" +
+      "<td>" + (f.online ? "online" : "offline") + "</td>" +
+      "<td>" + esc(rel(f.last_seen)) + " <span style=\"color:var(--dim)\">(" + esc(f.last_seen || "never") + ")</span></td>" +
+      "<td>" + (n ? '<span class="badge">' + n + " cap" + (n === 1 ? "" : "s") + "</span>" : "-") + "</td></tr>";
+  });
+  $("list").innerHTML = table(["foreman", "status", "last seen", "capabilities"], rows);
+  for (const tr of $("list").querySelectorAll("tr[data-id]")) {
+    tr.onclick = () => { selectedForeman = tr.dataset.id; selectedInbox = null; renderForemanDetail(selectedForeman); };
+  }
+  if (selectedForeman) renderForemanDetail(selectedForeman);
+  else $("detail").style.display = "none";
+}
+
+async function renderForemanDetail(id) {
+  const d = $("detail");
+  d.style.display = "block";
+  d.innerHTML = "<h2>" + esc(id) + '</h2><div class="sub">loading…</div>';
+  let f = null, jobs = [], msgs;
+  try {
+    [f] = (await getJSON("/v1/foremen") || []).filter(x => x.id === id);
+    jobs = (await getJSON("/v1/jobs?foreman=" + encodeURIComponent(id) + "&limit=25")) || [];
+    msgs = await getJSON("/v1/inboxes/" + encodeURIComponent(id) + "/recent?limit=25");
+  } catch (e) { d.innerHTML = '<div class="err">' + esc(e.message) + "</div>"; return; }
+  if (!f) { d.innerHTML = '<div class="err">foreman ' + esc(id) + " no longer registered</div>"; return; }
+  const caps = parseCaps(f.capabilities);
+  const inboxId = id; // foreman inbox id == foreman identity
+  d.innerHTML = "<h2>" + (f.online ? '<span class="dot online"></span>' : '<span class="dot offline"></span>') + esc(id) + "</h2>" +
+    '<div class="sub">last seen ' + esc(rel(f.last_seen)) + " · " + esc(f.last_seen || "never") + "</div>" +
+    "<h3>capabilities</h3><pre>" + esc(JSON.stringify(caps, null, 2)) + "</pre>" +
+    "<h3>recent jobs (latest " + jobs.length + ")</h3>" +
+    table(["job", "state", "attempts", "created", "updated"],
+      jobs.map(j => "<tr><td>" + esc(j.id) + "</td><td>" + esc(j.state) + "</td><td>" + j.attempts +
+        "</td><td>" + esc(j.created_at) + "</td><td>" + esc(j.updated_at) + "</td></tr>")) +
+    "<h3>inbox " + esc(inboxId) + " — recent messages (acked included)</h3>" +
+    '<div id="fmsgs">' + envelopeList(msgs, "no messages yet") + "</div>" +
+    '<div class="actions"><button onclick="foremanBack()">← all foremen</button></div>';
+  for (const tr of $("list").querySelectorAll("tr[data-id]")) tr.classList.toggle("selected", tr.dataset.id === id);
+}
+
+function foremanBack() { selectedForeman = null; $("detail").style.display = "none"; }
+
+async function loadInboxes() {
+  let sums;
+  try {
+    sums = await getJSON("/v1/inboxes");
+  } catch (e) { $("list").innerHTML = '<div class="err">' + esc(e.message) + "</div>"; return; }
+  if (!sums) sums = [];
+  $("rowcount").textContent = sums.length + " inbox" + (sums.length === 1 ? "" : "s");
+  const rows = sums.map(s =>
+    '<tr data-id="' + esc(s.inbox_id) + (s.inbox_id === selectedInbox ? '" class="selected' : "") + '">' +
+    "<td>" + esc(s.inbox_id) + "</td>" +
+    "<td>" + (s.unacked > 0 ? '<span class="badge hot">' + s.unacked + " unacked</span>" : "0") + "</td>" +
+    "<td>" + s.total + "</td><td>" + esc(rel(s.last_ts)) + "</td></tr>");
+  $("list").innerHTML = table(["inbox", "backlog", "total messages", "last activity"], rows);
+  for (const tr of $("list").querySelectorAll("tr[data-id]")) {
+    tr.onclick = () => { selectedInbox = tr.dataset.id; renderInboxDetail(selectedInbox); };
+  }
+  if (selectedInbox) renderInboxDetail(selectedInbox);
+  else $("detail").style.display = "none";
+}
+
+async function renderInboxDetail(id) {
+  const d = $("detail");
+  d.style.display = "block";
+  d.innerHTML = "<h2>" + esc(id) + '</h2><div class="sub">loading…</div>';
+  let msgs;
+  try {
+    msgs = await getJSON("/v1/inboxes/" + encodeURIComponent(id) + "/recent?limit=100");
+  } catch (e) { d.innerHTML = '<div class="err">' + esc(e.message) + "</div>"; return; }
+  d.innerHTML = "<h2>" + esc(id) + "</h2>" +
+    '<div class="sub">latest ' + (msgs ? msgs.length : 0) + " messages, chronological, acked included</div>" +
+    envelopeList(msgs, "no messages yet") +
+    '<div class="actions"><button onclick="inboxBack()">← all inboxes</button></div>';
+  for (const tr of $("list").querySelectorAll("tr[data-id]")) tr.classList.toggle("selected", tr.dataset.id === id);
+}
+
+function inboxBack() { selectedInbox = null; $("detail").style.display = "none"; }
+
+let tab = "foremen";
+const loaders = { foremen: loadForemen, inboxes: loadInboxes };
+function setTab(t) {
+  tab = t;
+  $("tab-foremen").classList.toggle("active", t === "foremen");
+  $("tab-inboxes").classList.toggle("active", t === "inboxes");
+  selectedForeman = null; selectedInbox = null; $("detail").style.display = "none";
+  loaders[t]();
+}
+$("tab-foremen").onclick = () => setTab("foremen");
+$("tab-inboxes").onclick = () => setTab("inboxes");
+
+window.foremanBack = foremanBack;
+window.inboxBack = inboxBack;
+
+(async () => {
+  $("adv").textContent = location.host;
+  const tick = async () => { await loaders[tab](); $("refreshed").textContent = "refreshed " + new Date().toLocaleTimeString(); };
+  await tick();
+  setInterval(tick, 5000);
+})();
+</script>
+</body>
+</html>

@@ -248,6 +248,12 @@ func (a *App) onTerminal(jobID, _ string) {
 // buildMux mounts every /v1 surface on a single mux.
 func buildMux(a *App, mcpH http.Handler) http.Handler {
 	mux := http.NewServeMux()
+	// Operator UI (spec §2): GET / serves the page; the two /v1/inboxes UI
+	// endpoints below are registered before the authed inbox subtree so the
+	// more specific patterns take precedence.
+	mux.HandleFunc("GET /{$}", a.handleUI)
+	mux.HandleFunc("GET /v1/inboxes", a.handleInboxSummaries)
+	mux.HandleFunc("GET /v1/inboxes/{id}/recent", a.handleInboxRecent)
 	// Onboarding surfaces (#24): top-level, outside /v1. /install.sh is
 	// planner-authed; downloads are unauthenticated per spec §7.5.
 	mux.HandleFunc("GET /install.sh", a.handleInstall)

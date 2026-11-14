@@ -233,6 +233,77 @@ func (s *Service) list(ctx context.Context, inboxID string, limit int) ([]wire.M
 	return envs, rows.Err()
 }
 
+// InboxSummary is one row of the UI inbox listing (spec §4.1): aggregate
+// counts over a single inbox. Rows are retained after ack, so every inbox
+// that has ever received a message appears; acked_at is included so the UI
+// can show recent activity even for fully-drained inboxes.
+type InboxSummary struct {
+	InboxID string `json:"inbox_id"`
+	Total   int    `json:"total"`
+	Unacked int    `json:"unacked"`
+	LastTS  string `json:"last_ts,omitempty"`
+}
+
+// Summaries returns one InboxSummary per inbox that has ever received a
+// message, ordered by inbox id (spec §4.1: UI listing). An empty store
+// returns a nil slice.
+func (s *Service) Summaries(ctx context.Context) ([]InboxSummary, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT inbox_id, COUNT(*), SUM(acked = 0), IFNULL(MAX(ts), '')
+		 FROM messages GROUP BY inbox_id ORDER BY inbox_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var sums []InboxSummary
+	for rows.Next() {
+		var sum InboxSummary
+		if err := rows.Scan(&sum.InboxID, &sum.Total, &sum.Unacked, &sum.LastTS); err != nil {
+			return nil, err
+		}
+		sums = append(sums, sum)
+	}
+	return sums, rows.Err()
+}
+
+// Recent returns up to limit envelopes for inboxID in chronological order,
+// including acked ones (spec §4.1: UI replay path - the streaming GET
+// excludes acked, so the UI needs this to show history). It reads the newest
+// rows then reverses them client-side of the query.
+func (s *Service) Recent(ctx context.Context, inboxID string, limit int) ([]wire.MessageEnvelope, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, type, job_id, sender, payload, ts
+		 FROM messages WHERE inbox_id = ? ORDER BY seq DESC LIMIT ?`,
+		inboxID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var envs []wire.MessageEnvelope
+	for rows.Next() {
+		var env wire.MessageEnvelope
+		var payload string
+		if err := rows.Scan(&env.ID, &env.Type, &env.JobID, &env.From, &payload, &env.TS); err != nil {
+			return nil, err
+		}
+		env.Payload = jsonRaw(payload)
+		envs = append(envs, env)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Chronological: the query walked newest-first.
+	for i, j := 0, len(envs)-1; i < j; i, j = i+1, j-1 {
+		envs[i], envs[j] = envs[j], envs[i]
+	}
+	return envs, nil
+}
+
 // GetMessage returns the stored envelope with the given id (spec §4.1:
 // replay/UI path), including acked messages. ok is false when absent.
 func (s *Service) GetMessage(ctx context.Context, mid string) (env wire.MessageEnvelope, ok bool, err error) {

@@ -151,6 +151,14 @@ bytes are free - token cost is governed by what enters LLM context, which the
 | `GET /v1/inboxes/{id}/messages?limit=50&wait_seconds=0` | `limit` default 50, max 500; `wait_seconds` 0-60 | `200` + `[envelope]`, unacked only, FIFO |
 | `POST /v1/inboxes/{id}/ack` | `{"ids": [...]}` | `204`; double-ack is also `204` (not an error) |
 | `GET /v1/inboxes/{id}/messages/{mid}` | - | `200` + envelope (replay/UI) |
+| `GET /v1/inboxes` | - | `200` + `[{inbox_id, total, unacked, last_ts}]`, one aggregate row per inbox that has ever received a message, ordered by inbox id (UI listing) |
+| `GET /v1/inboxes/{id}/recent?limit=50` | `limit` default 50, max 500 | `200` + newest `limit` envelopes in chronological order, acked **included** (UI history; the long-poll GET above is unacked-only) |
+
+The two UI endpoints are unauthenticated like the §6.9 control plane (trusted-LAN
+posture, §7.5) and exist because no factory credential carries inbox-read
+scopes: the UI reads the store server-side instead. `GET /` serves the
+single-page operator UI (foremen list with `last_seen`, inbox listing, per-item
+detail views) over these endpoints plus §6.9.
 
 `wait_seconds` 0-60 long-polls until non-empty (#1). Error responses use the
 error model in §10.
@@ -386,6 +394,9 @@ factory planner's list view carries summaries only (#7, #19).
 | `POST /v1/schedules/{id}/disable` | (#8) |
 | `POST /v1/foreman/capabilities` | foreman token; upserts tags, bumps `last_seen` (#12) |
 | `GET /v1/spend?day=` | daily totals `{total_usd, jobs}`; per-role deferred until jobs carry role tags (#13) |
+| `GET /v1/inboxes` | per-inbox aggregate listing `{inbox_id, total, unacked, last_ts}` (UI; §4.1) |
+| `GET /v1/inboxes/{id}/recent` | recent envelopes for one inbox, acked included (UI; §4.1) |
+| `GET /` | operator web UI (single page; §4.1) |
 | `POST /v1/pairing-tokens` | planner-credential auth (v1: the planner token doubles as the operator credential); issues a one-time pairing token, `200 {pairing_token, expires_at}` (#23) |
 
 Request/response shapes and status codes beyond those shown are not pinned.
