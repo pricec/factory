@@ -4,7 +4,7 @@ export PATH := $(GOBIN):$(PATH)
 GOFUMPT := $(GOBIN)/gofumpt
 CMDS := ./cmd/factory ./cmd/foreman ./cmd/worker
 
-.PHONY: gofumpt fmt fmt-check vet test build ci
+.PHONY: gofumpt fmt fmt-check vet test build release ci
 
 gofumpt:
 	@test -x "$(GOFUMPT)" || GOBIN="$(GOBIN)" go install mvdan.cc/gofumpt@latest
@@ -29,5 +29,9 @@ test:
 
 build:
 	go build $(CMDS)
+
+release:
+	GOOS=linux GOARCH=amd64 go build -o dist/foreman-linux-amd64 ./cmd/foreman
+	GOOS=linux GOARCH=arm64 go build -o dist/foreman-linux-arm64 ./cmd/foreman
 
 ci: fmt-check vet test build

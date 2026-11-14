@@ -22,12 +22,14 @@ func main() {
 	dataDir := flag.String("data", "./factory-data", "data directory for the sqlite stores")
 	addr := flag.String("addr", ":8080", "HTTP listen address")
 	advertise := flag.String("advertise", "", "advertised base URL (default http://<hostname>:<port>)")
+	downloads := flag.String("downloads", "./downloads", "directory holding the foreman binaries served by GET /download (see `make release`)")
 	flag.Parse()
 
 	app, err := factoryapp.New(factoryapp.Config{
 		DataDir:      *dataDir,
 		Addr:         *addr,
 		AdvertiseURL: *advertise,
+		DownloadsDir: *downloads,
 		Budget:       budgets.LoadConfig(),
 	})
 	if err != nil {

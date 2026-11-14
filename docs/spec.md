@@ -418,6 +418,25 @@ Request/response shapes and status codes beyond those shown are not pinned.
 - Worker tokens are minted by a library call inside the foreman - not an HTTP
   endpoint.
 
+Onboarding endpoints (#24) - both outside `/v1`:
+
+- `GET /install.sh`: planner-credential auth (same as
+  `POST /v1/pairing-tokens`; 401 unknown/revoked, 403 non-planner). The
+  factory renders the onboarding script per-request with a fresh embedded
+  one-time pairing token (15-min TTL) and its own advertise URL - no manual
+  token copy-paste. The script (as root, on Linux with systemd) downloads
+  the foreman binary, installs `/etc/systemd/system/factory-foreman.service`
+  (`Environment=FACTORY_PAIRING_TOKEN`, inert once `paired.json` exists),
+  and enables + restarts the service; it is idempotent. Trust note: the
+  pairing token rides the rendered script, so the v1 operator-credential
+  note extends here - anyone holding the planner token can onboard machines.
+- `GET /download/foreman/{platform}`: serves the foreman binary from the
+  factory's `-downloads` dir for `{platform}` = `linux-amd64` |
+  `linux-arm64` (400 otherwise, which is also the traversal gate; 404 when
+  the file is missing). Unauthenticated per the trusted-LAN posture (§7.5).
+
+These endpoints are not part of the §6.9 control-plane surface.
+
 ### 7.2 Credentials & storage (#11)
 
 - Bearer: 32B random; stored SHA-256 only - no plaintext bearer at rest.

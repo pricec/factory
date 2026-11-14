@@ -42,6 +42,10 @@ type Config struct {
 	// AdvertiseURL is the base URL advertised to pairing children; empty
 	// -> http://<hostname>:<port of Addr>.
 	AdvertiseURL string
+	// DownloadsDir serves GET /download/foreman/{platform} (#24): the
+	// pre-built foreman binaries (see the Makefile release target). Empty
+	// -> ./downloads, resolved in New.
+	DownloadsDir string
 	// Budget carries the spend-cap breaker config (spec §6.5).
 	Budget budgets.Config
 	// Now is the clock; nil -> real UTC time. Propagated to the jobs and
@@ -63,6 +67,8 @@ type App struct {
 	handler    http.Handler
 	advertise  string
 	plannerTok string
+	// downloadsDir backs GET /download/foreman/{platform} (#24).
+	downloadsDir string
 }
 
 // New opens the three sqlite stores under cfg.DataDir, wires every
@@ -83,6 +89,10 @@ func New(cfg Config) (*App, error) {
 	a := &App{advertise: cfg.AdvertiseURL}
 	if a.advertise == "" {
 		a.advertise = defaultAdvertiseURL(cfg.Addr)
+	}
+	a.downloadsDir = cfg.DownloadsDir
+	if a.downloadsDir == "" {
+		a.downloadsDir = "./downloads" // default -downloads dir (cmd/factory)
 	}
 
 	// Stores: open all three or none.
@@ -238,6 +248,10 @@ func (a *App) onTerminal(jobID, _ string) {
 // buildMux mounts every /v1 surface on a single mux.
 func buildMux(a *App, mcpH http.Handler) http.Handler {
 	mux := http.NewServeMux()
+	// Onboarding surfaces (#24): top-level, outside /v1. /install.sh is
+	// planner-authed; downloads are unauthenticated per spec §7.5.
+	mux.HandleFunc("GET /install.sh", a.handleInstall)
+	mux.HandleFunc("GET /download/foreman/{platform}", a.handleDownload)
 	mux.HandleFunc("POST /v1/pair", a.handlePair)
 	mux.HandleFunc("POST /v1/pairing-tokens", a.handlePairingTokens)
 	mux.Handle("/v1/inboxes/", inbox.NewHandler(a.inbox, a.authn))
