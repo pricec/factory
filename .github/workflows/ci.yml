@@ -26,3 +26,22 @@ jobs:
         with:
           go-version: 'stable'
       - run: GOOS=linux GOARCH=${{ matrix.goarch }} go build ./...
+  docker-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build release artifacts in Docker
+        run: make release-docker
+      - name: Smoke-test artifacts
+        run: |
+          set -e
+          for f in dist/factory-linux-amd64 dist/factory-linux-arm64 dist/foreman-linux-amd64 dist/foreman-linux-arm64; do
+            test -s "$f"
+          done
+          set +e
+          # flag exits 0 for -h (ErrHelp); an undefined flag exits 2 + prints usage
+          ./dist/factory-linux-amd64 --no-such-flag > /tmp/usage.txt 2>&1
+          code=$?
+          set -e
+          test $code -ne 0
+          grep -q "Usage" /tmp/usage.txt

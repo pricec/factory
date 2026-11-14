@@ -23,3 +23,6 @@ change contracts in code without updating the spec.
 ## Targets
 
 Linux only: amd64 and arm64.
+
+Reproducible release builds: `make release-docker` (pinned golang image);
+`make release` is the native path.
