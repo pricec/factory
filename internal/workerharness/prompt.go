@@ -4,8 +4,11 @@ import (
 	"github.com/pricec/factory/internal/wire"
 )
 
-// promptSuffix is the reporting instruction pinned in §8.3.
-const promptSuffix = "\n\nReport with the report_result tool. If you cannot, your final stdout is used as fallback."
+// promptSuffix is the reporting instruction pinned in §8.3. The MCP
+// server is named "inbox", so opencode exposes its tools with an
+// `inbox_` prefix (V2 `<server>_<tool>` naming); the prompt must use the
+// name the agent actually sees.
+const promptSuffix = "\n\nReport with the inbox_report_result tool. If you cannot, your final stdout is used as fallback."
 
 // payloadNull is the payload stand-in when the spec has no payload (§8.3).
 const payloadNull = "null"

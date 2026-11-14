@@ -20,6 +20,7 @@ import (
 	"github.com/pricec/factory/internal/inbox"
 	"github.com/pricec/factory/internal/mcpforeman"
 	"github.com/pricec/factory/internal/mcpworker"
+	"github.com/pricec/factory/internal/models"
 	"github.com/pricec/factory/internal/notify"
 	"github.com/pricec/factory/internal/routing"
 	"github.com/pricec/factory/internal/wire"
@@ -49,11 +50,14 @@ type Config struct {
 	// Empty with no stored paired.json -> New fails ("not paired").
 	PairingToken string
 	// BrainModel is the opencode model string for brain sessions;
-	// "" -> opencode default.
+	// "" -> the pinned GLM tiering default (spec §6.5).
 	BrainModel string
 	// WorkerModel is the opencode model string for worker sessions;
-	// "" -> opencode default.
+	// "" -> the pinned GLM tiering default (spec §6.5).
 	WorkerModel string
+	// WorkerHardestModel is the model for `tier: "hardest"` jobs (spec
+	// §5.1, §6.5); "" -> the pinned GLM 5.3 default.
+	WorkerHardestModel string
 	// Now is the clock; nil -> real UTC time.
 	Now func() time.Time
 }
@@ -123,6 +127,11 @@ func New(cfg Config) (*App, error) {
 	if a.advertise == "" {
 		a.advertise = defaultAdvertiseURL(cfg.Addr)
 	}
+	// Model tiering (spec §6.5): unset fields fall back to the pinned
+	// GLM defaults; callers override via env (cmd/foreman).
+	a.cfg.BrainModel = models.Resolve(a.cfg.BrainModel, models.ForemanBrainDefault)
+	a.cfg.WorkerModel = models.Resolve(a.cfg.WorkerModel, models.WorkerDefault)
+	a.cfg.WorkerHardestModel = models.Resolve(a.cfg.WorkerHardestModel, models.WorkerHardest)
 
 	// Stores: open both or none.
 	var err error
@@ -169,12 +178,16 @@ func New(cfg Config) (*App, error) {
 	a.hub.AttachTo(a.inbox)
 	a.authn = auth.NewAuthenticator(a.auth)
 
-	// Brain, poster, spawner, router (spec §3.3).
+	// Brain, poster, spawner, router (spec §3.3). The brain's WorkDir is
+	// its own subdirectory: the generated opencode.json is the V2
+	// project config discovered from the working dir, so it must not sit
+	// in DataDir itself, which is an ancestor of every worker job dir
+	// (ancestor configs would leak into worker sessions).
 	a.brain = &BrainRunner{
 		Model:   cfg.BrainModel,
 		MCPURL:  localBaseURL(cfg.Addr) + "/v1/mcp/foreman",
 		Bearer:  a.brainToken,
-		WorkDir: cfg.DataDir,
+		WorkDir: filepath.Join(cfg.DataDir, "brain"),
 	}
 	a.poster = &Poster{FactoryURL: cfg.FactoryURL, Bearer: a.paired.Bearer}
 	a.BuildHarnessConfig = a.defaultHarnessConfig

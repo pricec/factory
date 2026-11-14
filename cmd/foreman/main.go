@@ -32,14 +32,15 @@ func main() {
 	}
 
 	app, err := foremanapp.New(foremanapp.Config{
-		FactoryURL:   *factory,
-		ID:           *id,
-		DataDir:      *dataDir,
-		Addr:         *addr,
-		AdvertiseURL: *advertise,
-		PairingToken: *pairingToken,
-		BrainModel:   os.Getenv("FACTORY_FOREMAN_BRAIN_MODEL"),
-		WorkerModel:  os.Getenv("FACTORY_WORKER_MODEL"),
+		FactoryURL:         *factory,
+		ID:                 *id,
+		DataDir:            *dataDir,
+		Addr:               *addr,
+		AdvertiseURL:       *advertise,
+		PairingToken:       *pairingToken,
+		BrainModel:         os.Getenv("FACTORY_FOREMAN_BRAIN_MODEL"),
+		WorkerModel:        os.Getenv("FACTORY_WORKER_MODEL"),
+		WorkerHardestModel: os.Getenv("FACTORY_WORKER_HARDEST_MODEL"),
 	})
 	if err != nil {
 		log.Fatalf("foreman: %v", err)

@@ -18,6 +18,7 @@ type createJobRequest struct {
 	Task         string          `json:"task"`
 	Requires     []string        `json:"requires,omitempty"`
 	ResultSchema json.RawMessage `json:"result_schema,omitempty"`
+	Tier         string          `json:"tier,omitempty"`
 	TimeoutS     int             `json:"timeout_s,omitempty"`
 	Priority     int             `json:"priority,omitempty"`
 	ScheduleCron string          `json:"schedule_cron,omitempty"`
@@ -48,6 +49,7 @@ func (a *App) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	spec := wire.NewJobSpec(in.Task, "ui")
 	spec.Requires = in.Requires
 	spec.ResultSchema = in.ResultSchema
+	spec.Tier = in.Tier
 	if in.TimeoutS != 0 {
 		spec.TimeoutS = in.TimeoutS
 	}

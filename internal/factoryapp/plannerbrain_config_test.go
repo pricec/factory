@@ -3,28 +3,59 @@ package factoryapp
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/pricec/factory/internal/models"
 )
 
-// TestPlannerConfigPermissions pins the generated planner-child config's
-// permission policy: allow-all, because a headless `opencode run` has no
-// client to answer an "ask" and an unanswered ask aborts the whole session
-// (the live failure this pins: read/grep outside the workdir declined,
-// exit status 1, operator left with an error note).
-func TestPlannerConfigPermissions(t *testing.T) {
+// TestPlannerModelDefault: the planner brain defaults to the pinned GLM
+// tiering (spec §6.5) when FACTORY_PLANNER_MODEL is unset.
+func TestPlannerModelDefault(t *testing.T) {
+	t.Setenv("FACTORY_PLANNER_TOKEN", "test-planner-secret-0123456789")
+	a, err := New(Config{DataDir: t.TempDir(), Addr: ":8090", AdvertiseURL: "http://factory.test"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer a.Close()
+	if a.planner.Model != models.PlannerDefault {
+		t.Errorf("planner model = %q, want the pinned default %q", a.planner.Model, models.PlannerDefault)
+	}
+	// The MCP endpoint must be loopback: the MCP SDK's streamable-HTTP
+	// server rejects non-loopback Host headers, and the planner child
+	// always runs on this host (spec §9.5).
+	if a.planner.MCPURL != "http://127.0.0.1:8090/v1/mcp/factory" {
+		t.Errorf("planner MCP URL = %q, want the loopback endpoint", a.planner.MCPURL)
+	}
+}
+
+// TestPlannerConfig pins the generated planner-child config: it must land
+// at the V2 project-config path (WorkDir/opencode.json - the V1-era
+// OPENCODE_CONFIG env var is ignored by V2, which silently dropped the
+// whole config), carry the allow-all permissions (a headless run has no
+// client to answer an ask; an unanswered ask aborts the session), and pin
+// the model.
+func TestPlannerConfig(t *testing.T) {
 	t.Parallel()
+	dir := t.TempDir()
 	b := &PlannerBrain{
-		Model:   "google/gemini-4-hydrogen",
+		Model:   models.PlannerDefault,
 		MCPURL:  "http://factory.test/v1/mcp/factory",
 		Bearer:  "planner-secret",
-		WorkDir: t.TempDir(),
+		WorkDir: dir,
 	}
 	path, err := b.writeConfig()
 	if err != nil {
 		t.Fatalf("writeConfig: %v", err)
 	}
-	defer os.Remove(path)
+	if want := filepath.Join(dir, "opencode.json"); path != want {
+		t.Errorf("config path = %q, want the V2 project-config path %q", path, want)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("config perms: %v (%o), want 0600", err, info.Mode().Perm())
+	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -34,11 +65,21 @@ func TestPlannerConfigPermissions(t *testing.T) {
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatalf("unmarshal(%s): %v", data, err)
 	}
-	want := []any{map[string]any{"action": "*", "resource": "*", "effect": "allow"}}
-	if !reflect.DeepEqual(got["permissions"], want) {
-		t.Errorf("permissions = %v, want %v", got["permissions"], want)
+	if got["model"] != models.PlannerDefault {
+		t.Errorf("model = %v, want %q", got["model"], models.PlannerDefault)
+	}
+	wantPerms := []any{map[string]any{"action": "*", "resource": "*", "effect": "allow"}}
+	if !reflect.DeepEqual(got["permissions"], wantPerms) {
+		t.Errorf("permissions = %v, want %v", got["permissions"], wantPerms)
 	}
 	if got["mcp"] == nil {
 		t.Errorf("generated config lost the mcp block:\n%s", data)
 	}
+	if contains := string(data); containsSecret(contains, "planner-secret") {
+		t.Errorf("generated config leaks the bearer at rest:\n%s", data)
+	}
+}
+
+func containsSecret(data, secret string) bool {
+	return len(secret) >= 6 && strings.Contains(data, secret)
 }

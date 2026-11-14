@@ -22,13 +22,17 @@ import (
 const (
 	// jobsDirName is the per-job directory root under WorkDir (§8.2).
 	jobsDirName = "jobs"
-	// configFileName is the generated opencode config in the job dir (§8.4).
-	configFileName = ".opencode.json"
+	// configFileName is the generated opencode config in the job dir
+	// (§8.4). It must be the V2 project-config name `opencode.json`:
+	// V2 discovers config from the working directory, and the V1-era
+	// OPENCODE_CONFIG env var and .opencode.json dotfile are both
+	// ignored by V2 (upstream regression, umbrella issue #36990) - the
+	// child would silently lose MCP injection, permissions, and the
+	// model pin.
+	configFileName = "opencode.json"
 	// flagFileName is the report_result flag file written by the worker MCP
 	// surface (§8.5).
 	flagFileName = ".result_posted"
-	// envOpenCODEConfig points the child at the generated config (§8.4).
-	envOpenCODEConfig = "OPENCODE_CONFIG"
 	// envWorkerToken carries the per-job token into the child so the
 	// generated config can reference it via {env:WORKER_TOKEN} without
 	// writing the secret to disk.
@@ -59,7 +63,7 @@ type Config struct {
 	// OpenCODEBin is the opencode binary; "" means "opencode" on PATH.
 	OpenCODEBin string
 	// Env is the child environment; nil means the worker process
-	// environment. OPENCODE_CONFIG is always overridden.
+	// environment. WORKER_TOKEN is always overridden.
 	Env []string
 	// Post delivers the fallback JobResult; nil means HTTP with Bearer
 	// auth. Retried at-least-once (§8.5).
@@ -122,13 +126,14 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := os.Remove(filepath.Join(jobDir, flagFileName)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("clear report flag: %w", err)
 	}
-	configPath := filepath.Join(jobDir, configFileName)
-	if err := writeConfig(configPath, newOpenCODEConfig(cfg)); err != nil {
+	// The generated config lands at the V2 project-config path in the
+	// child's working directory; the child discovers it from cwd (§8.4).
+	if err := writeConfig(filepath.Join(jobDir, configFileName), newOpenCODEConfig(cfg)); err != nil {
 		return fmt.Errorf("generated config: %w", err)
 	}
 
 	stdout, stderr := newSyncBuffer(), newSyncBuffer()
-	runErr, timedOut, harnessErr := execChild(ctx, cfg, jobTimeout(cfg, spec), jobDir, configPath, buildPrompt(spec), stdout, stderr)
+	runErr, timedOut, harnessErr := execChild(ctx, cfg, jobTimeout(cfg, spec), jobDir, buildPrompt(spec), stdout, stderr)
 	if harnessErr != nil {
 		return harnessErr
 	}
@@ -182,22 +187,27 @@ func jobTimeout(cfg Config, spec wire.JobSpec) time.Duration {
 	return time.Duration(spec.TimeoutS) * time.Second
 }
 
-// execChild runs `opencode run <prompt>` with cwd jobDir and
-// OPENCODE_CONFIG set (§8.4), in its own process group so the entire group
-// can be killed at the timeout (§8.6). It returns the child's wait error
-// and whether the timeout fired. A non-nil third return aborts the run
-// without posting (parent context canceled).
-func execChild(ctx context.Context, cfg Config, timeout time.Duration, jobDir, configPath, prompt string, stdout, stderr *syncBuffer) (runErr error, timedOut bool, harnessErr error) {
+// execChild runs `opencode run --standalone <prompt>` with cwd jobDir
+// (§8.4): the generated opencode.json there is the V2 project config the
+// child discovers from its working directory, and --standalone boots a
+// private server inside the child process - the shared background service
+// would substitute the config's {env:WORKER_TOKEN} header against its own
+// environment (no per-job tokens there) and connect with an empty bearer,
+// silently stripping the child of its MCP tools. The child runs in its
+// own process group so the entire group can be killed at the timeout
+// (§8.6). It returns the child's wait error and whether the timeout
+// fired. A non-nil third return aborts the run without posting (parent
+// context canceled).
+func execChild(ctx context.Context, cfg Config, timeout time.Duration, jobDir, prompt string, stdout, stderr *syncBuffer) (runErr error, timedOut bool, harnessErr error) {
 	env := cfg.Env
 	if env == nil {
 		env = os.Environ()
 	}
-	cmd := exec.Command(cfg.OpenCODEBin, "run", prompt)
+	cmd := exec.Command(cfg.OpenCODEBin, "run", "--standalone", prompt)
 	cmd.Dir = jobDir
 	// The generated config references the token via {env:WORKER_TOKEN}
 	// (never at rest); guarantee it is present in the child environment.
-	env = withEnvValue(env, envWorkerToken, cfg.Token)
-	cmd.Env = withEnvValue(env, envOpenCODEConfig, configPath)
+	cmd.Env = withEnvValue(env, envWorkerToken, cfg.Token)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

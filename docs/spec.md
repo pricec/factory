@@ -219,6 +219,7 @@ a different, fixed curve.)
   "payload": {},
   "result_schema": {},
   "requires": ["gpu"],
+  "tier": "default",
   "timeout_s": 300,
   "priority": 5,
   "budget": {
@@ -231,7 +232,8 @@ a different, fixed curve.)
 }
 ```
 
-Defaults shown; `priority` 1-9, 9 highest (#3).
+Defaults shown; `priority` 1-9, 9 highest (#3). `tier` selects the
+worker's model tier (#28): `default` (or absent) or `hardest`; see §6.5.
 
 ### 5.2 JobResult (#3)
 
@@ -341,12 +343,25 @@ created today; above the config cap (default $20/day) the factory refuses new
 `create_job` with error `spend_cap_exceeded`; reset by config bump or env
 `FACTORY_SPEND_OVERRIDE=1`.
 
-Model tiering (#13): config map `{planner, foreman_brain, worker}` -> model
-strings injected via opencode `-m` / config; defaults in config file,
-env-overridable; swapping a role's model is a config change only. Reporting
-(v1 amendment, #13): `GET /v1/spend?day=` returns daily totals
-`{total_usd, jobs}` - jobs do not yet carry a role tag, so per-role totals
-`{planner, foreman_brain, worker}` are deferred until they do.
+Model tiering (#13, #28): the factory standardizes on GLM and optimizes
+for cost - `internal/models` pins the per-role defaults, every role is
+env-overridable, and swapping a role's model stays a config change only:
+
+| Role | Pinned default | Env override |
+| --- | --- | --- |
+| factory planner | `openrouter/z-ai/glm-5.3-flash` | `FACTORY_PLANNER_MODEL` |
+| foreman brain | `openrouter/z-ai/glm-5.3-flash` | `FACTORY_FOREMAN_BRAIN_MODEL` |
+| worker (default tier) | `openrouter/z-ai/glm-5.2` | `FACTORY_WORKER_MODEL` |
+| worker (`tier: "hardest"`, §5.1) | `ollama-cloud/glm-5.3` | `FACTORY_WORKER_HARDEST_MODEL` |
+
+GLM 5.3 Flash carries the conversational overhead roles; workers default
+to GLM 5.2; the strongest GLM 5.3 runs only jobs explicitly marked
+`tier: "hardest"` (§5.1, flows through `create_job`, `POST /v1/jobs`,
+schedules, and the `job.request` envelope). Model strings are injected via
+the generated child config (§8.4). Reporting (v1 amendment, #13):
+`GET /v1/spend?day=` returns daily totals `{total_usd, jobs}` - jobs do
+not yet carry a role tag, so per-role totals `{planner, foreman_brain,
+worker}` are deferred until they do.
 
 ### 6.6 LLM context cap (#7)
 
@@ -390,7 +405,7 @@ factory planner's list view carries summaries only (#7, #19).
 | Method & path | Notes |
 |---|---|
 | `GET /v1/jobs?state=&foreman=` | filter by state and foreman (#9) |
-| `POST /v1/jobs` | UI twin of the MCP `create_job` tool (§9.4): body `{task, requires[], result_schema, timeout_s, priority, schedule_cron}`; runs the same spend breaker + capability match (no match -> `pending`); `201 + {job_id, state, foreman}` |
+| `POST /v1/jobs` | UI twin of the MCP `create_job` tool (§9.4): body `{task, requires[], result_schema, tier, timeout_s, priority, schedule_cron}`; runs the same spend breaker + capability match (no match -> `pending`); `201 + {job_id, state, foreman}` |
 | `POST /v1/foremen/{id}/messages` | UI twin of the MCP `message_foreman` tool (§9.4): body `{type, job_id?, payload?}` posted from the planner identity; `201` + envelope |
 | `GET /v1/jobs/{id}` | (#9) |
 | `GET /v1/foremen` | returns `id, online, capabilities` (#9) |
@@ -542,22 +557,39 @@ Environment: `WORKER_RESULT_URL`, `WORKER_MCP_URL`, `WORKER_TOKEN`,
 Fresh dir per job: `WORKER_DIR/jobs/{job_id}/`; the process cwd is that dir;
 no shared state.
 
-### 8.3 Prompt construction (#5)
+### 8.3 Prompt construction (#5, #28)
 
 ```
-{task}\n\nMachine input:\n{payload JSON}\n\nReport with the report_result tool. If you cannot, your final stdout is used as fallback.
+{task}\n\nMachine input:\n{payload JSON}\n\nReport with the inbox_report_result tool. If you cannot, your final stdout is used as fallback.
 ```
 
-### 8.4 opencode invocation & generated config (#5, #13)
+The tool name is `inbox_report_result` (#28): the generated config mounts
+the worker MCP server under the name `inbox`, and opencode exposes MCP
+tools with a `<server>_<tool>` prefix - the §8.3 wording must use the name
+the agent actually sees.
 
-- Invocation: `opencode run "<prompt>"`; must be non-interactive. Verify exact
+### 8.4 opencode invocation & generated config (#5, #13, #28)
+
+- Invocation (#28): `opencode run --standalone "<prompt>"`; must be
+  non-interactive. `--standalone` boots a private server inside the child
+  process: the shared background service would substitute the config's
+  `{env:...}` credential headers against its own environment - which has
+  no per-child tokens - and every MCP connect would die with 401 "missing
+  bearer token", silently stripping the child of its tools. Verify exact
   flags against `opencode --help` during implementation.
-- MCP injection: `OPENCODE_CONFIG` env pointing at a generated config with
-  remote MCP (verified against the opencode V2 config shape, opencode 1.18
-  docs/mcp-servers - servers nest under `mcp.servers`; headers supported;
-  token referenced via `{env:WORKER_TOKEN}` substitution so it never lands
-  in the file at rest; the harness guarantees `WORKER_TOKEN` is present in
-  the child env):
+- Config discovery (#28): the generated config is written to the V2
+  project-config path `opencode.json` IN THE CHILD'S WORKING DIRECTORY
+  (worker: the per-job dir; planner/foreman brain: their WorkDir). V2
+  opencode discovers `opencode.json` from the working directory - the
+  V1-era `OPENCODE_CONFIG` env var (and the `.opencode.json` dotfile name)
+  are IGNORED by V2 (upstream regression, umbrella issue #36990), and
+  pointing the child at a temp file silently loses MCP injection,
+  permissions, and the model pin. The file is rewritten before every run,
+  0600; tokens are referenced via `{env:...}` substitution so secrets
+  never land in the file at rest (the harness guarantees the env var is
+  present in the child env).
+- MCP injection (worker shape; planner and foreman brain mount their own
+  URL under the same pattern):
 
 ```json
 {
@@ -578,19 +610,20 @@ no shared state.
 ```
 
 - Permissions (#27): every generated child config (worker, foreman brain,
-  factory planner) pins one allow-all rule. A headless `opencode run` has no
-  client to answer an `ask`; an unanswered ask is auto-declined and aborts
-  the whole session mid-flight (observed live: a `grep` outside the workdir
-  declined, `opencode run` exit status 1, completed work discarded). The
-  children run with the enclosing service user's authority either way, so
-  gating them is the enclosing service's job, not the prompt's.
-
+  factory planner) pins the one allow-all rule shown above. A headless
+  `opencode run` has no client to answer an `ask`; an unanswered ask is
+  auto-declined and aborts the whole session mid-flight (observed live:
+  exit status 1, completed work discarded). The children run with the
+  enclosing service user's authority either way, so gating them is the
+  enclosing service's job, not the prompt's.
 - max_tokens: the opencode 1.18 config schema exposes no per-request
   max-output-tokens setting, so the pin "config sets model max_tokens =
   budget.max_output_tokens" is withdrawn; #13 proxy 2 is deferred - wall
   clock (proxy 3) and post-hoc usage accounting (proxy 4) remain the
   enforcement path.
-- Model strings per role come from the tiering config (#13).
+- Model strings per role come from the tiering config (§6.5), injected via
+  the generated config's `model` field (worker jobs select their tier per
+  §5.1/§6.5: `default` -> GLM 5.2, `hardest` -> GLM 5.3).
 - opencode must be on PATH - the foreman's responsibility (#5; #12 detects
   it at startup).
 
@@ -639,7 +672,9 @@ Kill the entire process group at `timeout_s`; post a JobResult with
 `internal/mcpworker`; mounted on the foreman. Bearer = per-job worker token
 (#11 scope); it resolves `job_id` and provides no other auth context.
 
-Tools (exact):
+Tools (exact; opencode exposes each as `<server>_<tool>` - with the server
+named `inbox`, the agent sees `inbox_report_result` and `inbox_ask_parent`
+(#28), and §8.3's prompt wording matches):
 
 - `report_result(status, summary, result?, error?, usage?)` - validate via
   `internal/wire`; post the JobResult to the result inbox (409 dedupe
@@ -682,10 +717,12 @@ Tools (exact):
 - `list_foremen()` - `{id, online, capabilities}`.
 - `list_jobs(state?, limit=50)` - `{id, state, summary, usage, over_budget}`
   (summaries only, per #7).
-- `create_job(task, requires?, result_schema?, timeout_s?, priority?,
-  schedule_cron?)` - ad hoc dispatch via the Matcher interface; with
-  `schedule_cron`, also creates a schedule via the #8 API (§6.8). Refused
-  with error `spend_cap_exceeded` when the daily spend breaker is open (#13).
+- `create_job(task, requires?, result_schema?, tier?, timeout_s?, priority?,
+  schedule_cron?)` - ad hoc dispatch via the Matcher interface; `tier`
+  selects the worker's model tier (§5.1, §6.5: `default` -> GLM 5.2,
+  `hardest` -> GLM 5.3); with `schedule_cron`, also creates a schedule via
+  the #8 API (§6.8). Refused with error `spend_cap_exceeded` when the
+  daily spend breaker is open (#13).
 - `read_result(job_id)` - full result payload; the ONLY path by which full
   payloads enter LLM context (#19; #7 point 3).
 - `message_foreman(foreman_id, type, payload)` - envelope to that foreman's
@@ -716,10 +753,16 @@ Envelope types in `planner:main`:
 
 Planner loop (internal/factoryapp, twin of the consumer loop): drains
 `planner:main`; `chat.message` wakes one opencode planner session (§9.4
-surface, planner bearer, model via `FACTORY_PLANNER_MODEL`) with the recent
+surface, planner bearer, model via `FACTORY_PLANNER_MODEL`, default
+per §6.5) with the recent
 inbox history replayed into the prompt (per-payload 2KB caps, §6.6);
 everything else is informational and acked without a wake. A failed session
 posts a `brain.reply` error note so the operator is never left waiting.
+The child's MCP endpoint is the factory's loopback address, NOT the
+advertised URL (#28): the child runs on the factory's own host, and the
+MCP SDK's streamable-HTTP server rejects non-loopback Host headers
+(DNS-rebinding protection) - the advertised hostname yields "403 invalid
+Host header" and a session silently stripped of every factory tool.
 Acking never deletes: history stays replayable via
 `GET /v1/inboxes/planner:main/recent` and streams to browsers via the
 permissive SSE `GET /v1/inboxes/planner:main/stream`.

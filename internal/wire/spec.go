@@ -17,6 +17,16 @@ const (
 	DefaultMaxCostUSD      = 5.0
 )
 
+// Job tiers (§5.1, §6.5): the model tier a job runs at. Empty means
+// TierDefault; "hardest" routes the worker onto the strongest model.
+const (
+	TierDefault = "default"
+	TierHardest = "hardest"
+)
+
+// Tiers is every allowed tier value (§5.1).
+var Tiers = []string{TierDefault, TierHardest}
+
 // Budget bounds a job's prompt size, output size, and spend (§5.1).
 type Budget struct {
 	MaxPromptBytes  int     `json:"max_prompt_bytes"`
@@ -39,6 +49,7 @@ type JobSpec struct {
 	Payload      json.RawMessage `json:"payload,omitempty"`
 	ResultSchema json.RawMessage `json:"result_schema,omitempty"`
 	Requires     []string        `json:"requires,omitempty"`
+	Tier         string          `json:"tier,omitempty"`
 	TimeoutS     int             `json:"timeout_s"`
 	Priority     int             `json:"priority"`
 	Budget       Budget          `json:"budget"`
@@ -114,6 +125,11 @@ func (s *JobSpec) validate(requireID bool) error {
 		if r == "" {
 			return fmt.Errorf("requires: entries must be non-empty")
 		}
+	}
+	switch s.Tier {
+	case "", TierDefault, TierHardest:
+	default:
+		return fmt.Errorf("tier: must be one of %v, got %q", Tiers, s.Tier)
 	}
 	if s.Budget.MaxPromptBytes <= 0 || s.Budget.MaxOutputTokens <= 0 || s.Budget.MaxCostUSD <= 0 {
 		return fmt.Errorf("budget: fields must be > 0, got %+v", s.Budget)

@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -20,12 +21,17 @@ import (
 const (
 	// plannerBrainTimeout bounds one planner opencode session.
 	plannerBrainTimeout = 300 * time.Second
+	// plannerConfigName is the generated opencode config written into
+	// WorkDir (spec §8.4). It must be the V2 project-config name
+	// `opencode.json`: V2 discovers config from the working directory,
+	// and the V1-era OPENCODE_CONFIG env var is ignored by V2 (upstream
+	// regression, umbrella issue #36990) - pointing the child at a temp
+	// file silently lost MCP injection, permissions, and the model pin.
+	plannerConfigName = "opencode.json"
 	// envPlannerToken carries the planner bearer into the child so the
 	// generated config can reference it via {env:FACTORY_PLANNER_TOKEN}
 	// without the secret landing in the file at rest.
 	envPlannerToken = "FACTORY_PLANNER_TOKEN"
-	// envOpenCODEConfig points the child at the generated config.
-	envOpenCODEConfig = "OPENCODE_CONFIG"
 )
 
 // PlannerBrain runs one-shot factory-planner LLM sessions (spec §9.5): an
@@ -68,25 +74,30 @@ func (b *PlannerBrain) Handle(ctx context.Context, reason string, history, envs 
 	return nil
 }
 
-// runOpencode is the default Exec: it generates the opencode config in a
-// temp file under WorkDir (mcp.servers.factory -> MCPURL, bearer via
-// {env:FACTORY_PLANNER_TOKEN}, oauth off, optional model), then runs
-// `opencode run <prompt>` non-interactively in its own process group with a
-// 300s timeout. Mirrors foremanapp's BrainRunner (#9.3 pattern).
+// runOpencode is the default Exec: it regenerates the opencode project
+// config in WorkDir (mcp.servers.factory -> MCPURL, bearer via
+// {env:FACTORY_PLANNER_TOKEN}, oauth off, pinned model, allow-all
+// permissions), then runs `opencode run <prompt>` non-interactively in
+// its own process group with a 300s timeout. The child discovers the
+// config from its working directory (V2 project config; OPENCODE_CONFIG
+// is ignored by V2). Mirrors foremanapp's BrainRunner (#9.3 pattern).
 func (b *PlannerBrain) runOpencode(ctx context.Context, prompt string) (string, error) {
-	configPath, err := b.writeConfig()
-	if err != nil {
+	if _, err := b.writeConfig(); err != nil {
 		return "", err
 	}
-	defer os.Remove(configPath)
 
 	ctx, cancel := context.WithTimeout(ctx, plannerBrainTimeout)
 	defer cancel()
 	// CommandContext (not Command): cmd.Cancel below requires it.
-	cmd := exec.CommandContext(ctx, "opencode", "run", prompt)
+	// --standalone: a private server inside this child process. Without
+	// it the shared background service loads the generated config and
+	// substitutes the {env:FACTORY_PLANNER_TOKEN} header against its own
+	// environment - which lacks the token - and the MCP connect dies
+	// with 401 "missing bearer token", stripping the session of every
+	// factory tool.
+	cmd := exec.CommandContext(ctx, "opencode", "run", "--standalone", prompt)
 	cmd.Dir = b.WorkDir
-	env := withEnvValue(os.Environ(), envPlannerToken, b.Bearer)
-	cmd.Env = withEnvValue(env, envOpenCODEConfig, configPath)
+	cmd.Env = withEnvValue(os.Environ(), envPlannerToken, b.Bearer)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process != nil {
@@ -106,16 +117,15 @@ func (b *PlannerBrain) runOpencode(ctx context.Context, prompt string) (string, 
 	return stdout.String(), nil
 }
 
-// writeConfig generates the opencode config as a temp file under WorkDir,
-// 0600 (the §8.4 pattern; foremanapp.BrainRunner twin).
+// writeConfig regenerates the opencode project config at
+// WorkDir/opencode.json, 0600 (the §8.4 pattern; foremanapp.BrainRunner
+// twin). The file persists across runs - each run rewrites it, so the
+// child always starts from the freshly generated config.
 func (b *PlannerBrain) writeConfig() (string, error) {
 	if err := os.MkdirAll(b.WorkDir, 0o755); err != nil {
 		return "", fmt.Errorf("planner work dir: %w", err)
 	}
-	f, err := os.CreateTemp(b.WorkDir, ".planner-opencode-*.json")
-	if err != nil {
-		return "", err
-	}
+	path := filepath.Join(b.WorkDir, plannerConfigName)
 	cfg := plannerOpenCODEConfig{
 		Model: b.Model,
 		MCP: plannerMCPBlock{Servers: map[string]*plannerRemoteMCPServer{
@@ -130,21 +140,10 @@ func (b *PlannerBrain) writeConfig() (string, error) {
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
-		f.Close()
-		os.Remove(f.Name())
 		return "", err
 	}
 	data = append(data, '\n')
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		os.Remove(f.Name())
-		return "", err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(f.Name())
-		return "", err
-	}
-	return f.Name(), nil
+	return path, os.WriteFile(path, data, 0o600)
 }
 
 // plannerOpenCODEConfig and friends mirror the opencode V2 config shape

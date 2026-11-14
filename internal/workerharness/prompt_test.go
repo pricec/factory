@@ -7,9 +7,11 @@ import (
 )
 
 // wantPrompt is the §8.3 golden, spelled out independently of buildPrompt.
+// The MCP server is named "inbox", so the agent sees the tool as
+// `inbox_report_result` (V2 `<server>_<tool>` naming).
 func wantPrompt(task, payload string) string {
 	return task + "\n\nMachine input:\n" + payload +
-		"\n\nReport with the report_result tool. If you cannot, your final stdout is used as fallback."
+		"\n\nReport with the inbox_report_result tool. If you cannot, your final stdout is used as fallback."
 }
 
 func TestBuildPrompt(t *testing.T) {

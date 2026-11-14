@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -20,12 +21,15 @@ import (
 const (
 	// brainTimeout bounds one brain opencode session.
 	brainTimeout = 300 * time.Second
+	// brainConfigName is the generated opencode config written into
+	// WorkDir (spec §8.4): the V2 project-config name, discovered from
+	// the working directory. The V1-era OPENCODE_CONFIG env var is
+	// ignored by V2 (upstream regression, umbrella issue #36990).
+	brainConfigName = "opencode.json"
 	// envBrainToken carries the brain bearer into the child so the
 	// generated config can reference it via {env:FOREMAN_BRAIN_TOKEN}
 	// without the secret landing in the file at rest.
 	envBrainToken = "FOREMAN_BRAIN_TOKEN"
-	// envOpenCODEConfig points the child at the generated config.
-	envOpenCODEConfig = "OPENCODE_CONFIG"
 )
 
 // BrainRunner runs one-shot foreman-brain LLM sessions (spec §9.3): an
@@ -65,25 +69,28 @@ func (b *BrainRunner) Handle(ctx context.Context, env wire.MessageEnvelope) erro
 	return nil
 }
 
-// runOpencode is the default Exec: it generates the opencode config
-// in a temp file under WorkDir (mcp.servers.foreman -> MCPURL, bearer via
-// {env:FOREMAN_BRAIN_TOKEN}, oauth off, optional model), then runs
-// `opencode run <prompt>` non-interactively in its own process group with
-// a 300s timeout.
+// runOpencode is the default Exec: it regenerates the opencode project
+// config in WorkDir (mcp.servers.foreman -> MCPURL, bearer via
+// {env:FOREMAN_BRAIN_TOKEN}, oauth off, pinned model, allow-all
+// permissions), then runs `opencode run <prompt>` non-interactively in
+// its own process group with a 300s timeout. The child discovers the
+// config from its working directory (V2 project config; the V1-era
+// OPENCODE_CONFIG env var is ignored by V2).
 func (b *BrainRunner) runOpencode(ctx context.Context, prompt string) (string, error) {
-	configPath, err := b.writeConfig()
-	if err != nil {
+	if _, err := b.writeConfig(); err != nil {
 		return "", err
 	}
-	defer os.Remove(configPath)
 
 	ctx, cancel := context.WithTimeout(ctx, brainTimeout)
 	defer cancel()
 	// CommandContext (not Command): cmd.Cancel below requires it.
-	cmd := exec.CommandContext(ctx, "opencode", "run", prompt)
+	// --standalone: a private server inside this child process, so the
+	// generated config's {env:FOREMAN_BRAIN_TOKEN} header substitution
+	// sees this child's environment (the shared background service's
+	// env lacks the token and would connect with an empty bearer).
+	cmd := exec.CommandContext(ctx, "opencode", "run", "--standalone", prompt)
 	cmd.Dir = b.WorkDir
-	env := withEnvValue(os.Environ(), envBrainToken, b.Bearer)
-	cmd.Env = withEnvValue(env, envOpenCODEConfig, configPath)
+	cmd.Env = withEnvValue(os.Environ(), envBrainToken, b.Bearer)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process != nil {
@@ -103,17 +110,15 @@ func (b *BrainRunner) runOpencode(ctx context.Context, prompt string) (string, e
 	return stdout.String(), nil
 }
 
-// writeConfig generates the opencode config (the §8.4 pattern, ~20 lines
-// reimplemented here: workerharness's generator is unexported and pins the
-// worker server name/token env) as a temp file under WorkDir, 0600.
+// writeConfig regenerates the opencode project config (the §8.4 pattern,
+// ~20 lines reimplemented here: workerharness's generator is unexported
+// and pins the worker server name/token env) at WorkDir/opencode.json,
+// 0600. The file persists across runs - each run rewrites it.
 func (b *BrainRunner) writeConfig() (string, error) {
 	if err := os.MkdirAll(b.WorkDir, 0o755); err != nil {
 		return "", fmt.Errorf("brain work dir: %w", err)
 	}
-	f, err := os.CreateTemp(b.WorkDir, ".brain-opencode-*.json")
-	if err != nil {
-		return "", err
-	}
+	path := filepath.Join(b.WorkDir, brainConfigName)
 	cfg := brainOpenCODEConfig{
 		Model: b.Model,
 		MCP: brainMCPBlock{Servers: map[string]*brainRemoteMCPServer{
@@ -128,21 +133,10 @@ func (b *BrainRunner) writeConfig() (string, error) {
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
-		f.Close()
-		os.Remove(f.Name())
 		return "", err
 	}
 	data = append(data, '\n')
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		os.Remove(f.Name())
-		return "", err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(f.Name())
-		return "", err
-	}
-	return f.Name(), nil
+	return path, os.WriteFile(path, data, 0o600)
 }
 
 // brainOpenCODEConfig and friends mirror the opencode V2 config shape

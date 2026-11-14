@@ -39,7 +39,7 @@ func fakePathEnv(t *testing.T, binDir string) []string {
 	t.Helper()
 	env := make([]string, 0, len(os.Environ())+1)
 	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "PATH=") || strings.HasPrefix(e, "OPENCODE_CONFIG=") {
+		if strings.HasPrefix(e, "PATH=") {
 			continue
 		}
 		env = append(env, e)
@@ -115,8 +115,8 @@ func TestRunChildEnvironmentAndArgs(t *testing.T) {
 	dir := t.TempDir()
 	spec, specPath := writeSpec(t, dir, nil)
 	binDir := fakeOpencode(t, `pwd > pwd.txt
-printf '%s' "$OPENCODE_CONFIG" > cfg.txt
-printf '%s' "$2" > prompt.txt
+cat opencode.json > cfg.txt
+printf '%s' "$3" > prompt.txt
 printf 'all good'`)
 	rec := &recordingPost{}
 	cfg := testConfig(t, specPath, binDir, rec.post)
@@ -134,9 +134,15 @@ printf 'all good'`)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The child finds the generated config by reading opencode.json from
+	// its working directory (V2 project-config discovery; no env pointer).
+	wantCfg, err := os.ReadFile(filepath.Join(jobDir, configFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for name, want := range map[string]string{
 		"pwd.txt":    wantPwd,
-		"cfg.txt":    filepath.Join(jobDir, configFileName),
+		"cfg.txt":    strings.TrimRight(string(wantCfg), "\n"),
 		"prompt.txt": buildPrompt(spec),
 	} {
 		data, err := os.ReadFile(filepath.Join(jobDir, name))

@@ -97,7 +97,7 @@ func testHappyPath(t *testing.T, s *stack) {
 	// primary path - which the pinned printf-only fake script does not
 	// exercise; the fallback result is the pinned script's report.)
 	jobDir := filepath.Join(s.foremanDataDir, "jobs", jobID)
-	for _, name := range []string{"job.json", ".opencode.json"} {
+	for _, name := range []string{"job.json", "opencode.json"} {
 		if _, err := os.Stat(filepath.Join(jobDir, name)); err != nil {
 			t.Errorf("worker artifact %s: %v", name, err)
 		}

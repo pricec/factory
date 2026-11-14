@@ -22,6 +22,7 @@ import (
 	"github.com/pricec/factory/internal/inbox"
 	"github.com/pricec/factory/internal/jobs"
 	"github.com/pricec/factory/internal/mcpfactory"
+	"github.com/pricec/factory/internal/models"
 	"github.com/pricec/factory/internal/notify"
 	"github.com/pricec/factory/internal/registry"
 	"github.com/pricec/factory/internal/wire"
@@ -174,10 +175,16 @@ func New(cfg Config) (*App, error) {
 
 	// Conversational planner (spec §9.5): one-shot opencode sessions over
 	// the planner MCP surface, woken by the planner loop on chat.message
-	// envelopes in the operator inbox. Model via FACTORY_PLANNER_MODEL.
+	// envelopes in the operator inbox. Model: FACTORY_PLANNER_MODEL
+	// overrides the pinned GLM tiering default (spec §6.5). The MCP URL
+	// is loopback, not the advertised URL: the child runs on this very
+	// host, and the MCP SDK's streamable-HTTP server rejects non-loopback
+	// Host headers (DNS-rebinding protection) - the advertised hostname
+	// gets "403 Forbidden: invalid Host header" and the child silently
+	// runs without any factory tools.
 	a.planner = &PlannerBrain{
-		Model:   os.Getenv("FACTORY_PLANNER_MODEL"),
-		MCPURL:  a.advertise + "/v1/mcp/factory",
+		Model:   models.Resolve(os.Getenv("FACTORY_PLANNER_MODEL"), models.PlannerDefault),
+		MCPURL:  loopbackMCPURL(cfg.Addr) + "/v1/mcp/factory",
 		Bearer:  a.plannerTok,
 		WorkDir: filepath.Join(cfg.DataDir, "planner"),
 	}
@@ -327,4 +334,18 @@ func defaultAdvertiseURL(addr string) string {
 		port = addr[i+1:]
 	}
 	return "http://" + net.JoinHostPort(host, port)
+}
+
+// loopbackMCPURL returns the loopback base URL for the planner child's
+// MCP endpoint (the port of Addr, default 8080). The MCP SDK's
+// streamable-HTTP server validates Host headers against loopback
+// (DNS-rebinding protection): the advertised hostname is rejected with
+// "403 Forbidden: invalid Host header", which silently strips the child
+// of every factory tool.
+func loopbackMCPURL(addr string) string {
+	port := "8080"
+	if i := strings.LastIndex(addr, ":"); i >= 0 && addr[i+1:] != "" {
+		port = addr[i+1:]
+	}
+	return "http://127.0.0.1:" + port
 }

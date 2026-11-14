@@ -82,15 +82,21 @@ func (a *App) postJobEvent(ctx context.Context, jobID, event string) error {
 // defaultHarnessConfig builds the harness config for one job (spec §8.1):
 // the persisted spec path, the loopback ResultURL and MCPURL (see
 // localBaseURL - workers are local in-process children), the per-job token,
-// DataDir as the per-job root, and the worker model.
+// DataDir as the per-job root, and the model from the job's tier (spec
+// §6.5): default jobs run the GLM 5.2 worker tier, `tier: "hardest"`
+// jobs run GLM 5.3.
 func (a *App) defaultHarnessConfig(spec wire.JobSpec, bearer string) workerharness.Config {
 	base := localBaseURL(a.cfg.Addr)
+	model := a.cfg.WorkerModel
+	if spec.Tier == wire.TierHardest {
+		model = a.cfg.WorkerHardestModel
+	}
 	return workerharness.Config{
 		JobPath:   filepath.Join(a.dataDir, jobsDirName, spec.ID, "job.json"),
 		ResultURL: base + "/v1/inboxes/" + url.PathEscape(a.inboxID) + "/messages",
 		MCPURL:    base + "/v1/mcp/worker",
 		Token:     bearer,
 		WorkDir:   a.dataDir,
-		Model:     a.cfg.WorkerModel,
+		Model:     model,
 	}
 }

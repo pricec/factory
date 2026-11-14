@@ -74,11 +74,25 @@ func TestCreateJobEndpoint(t *testing.T) {
 		{"not json", "{"},
 		{"missing task", map[string]any{"task": ""}},
 		{"bad priority", map[string]any{"task": "x", "priority": 99}},
+		{"bad tier", map[string]any{"task": "x", "tier": "turbo"}},
 	} {
 		var errResp map[string]any
 		if status := e.do("POST", "/v1/jobs", "", tt.in, &errResp); status != http.StatusBadRequest {
 			t.Errorf("%s: status = %d, want 400", tt.name, status)
 		}
+	}
+
+	// Tier pass-through (spec §5.1, §6.5): `tier: "hardest"` rides the
+	// job.request to the foreman.
+	hardest := map[string]any{"task": "refactor the kernel", "tier": "hardest"}
+	if status := e.do("POST", "/v1/jobs", "", hardest, &created); status != http.StatusCreated {
+		t.Fatalf("hardest-tier create status = %d, want 201", status)
+	}
+	if status := e.do("GET", "/v1/jobs/"+created.JobID, "", nil, &job); status != http.StatusOK {
+		t.Fatalf("get hardest job status = %d", status)
+	}
+	if job.Spec.Tier != wire.TierHardest {
+		t.Errorf("hardest job tier = %q, want %q", job.Spec.Tier, wire.TierHardest)
 	}
 }
 
