@@ -268,6 +268,68 @@ func TestGetMessageMissing(t *testing.T) {
 	}
 }
 
+func TestPublishHook(t *testing.T) {
+	svc := openTemp(t)
+	ctx := context.Background()
+
+	type got struct {
+		inboxID string
+		env     wire.MessageEnvelope
+	}
+	gotCh := make(chan got, 4)
+	svc.SetPublishHook(func(inboxID string, env wire.MessageEnvelope) {
+		gotCh <- got{inboxID, env}
+	})
+
+	full, err := svc.Post(ctx, "inbox:main", testEnvelope(t, "job.event", "", `{"n":0}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case g := <-gotCh:
+		if g.inboxID != "inbox:main" {
+			t.Errorf("hook inboxID = %q, want inbox:main", g.inboxID)
+		}
+		if g.env.ID != full.ID || g.env.TS != full.TS || g.env.From != full.From {
+			t.Errorf("hook env = %+v, want full envelope %+v", g.env, full)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("hook not called after successful Post")
+	}
+
+	// Duplicate posts fail and must not fire the hook.
+	if _, err := svc.Post(ctx, "inbox:main", testEnvelope(t, "job.result", "job_abc", `{}`)); err != nil {
+		t.Fatal(err)
+	}
+	select { // the successful job.result post above fires the hook
+	case g := <-gotCh:
+		if g.inboxID != "inbox:main" {
+			t.Errorf("hook inboxID = %q, want inbox:main", g.inboxID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("hook not called after successful job.result Post")
+	}
+	if _, err := svc.Post(ctx, "inbox:main", testEnvelope(t, "job.result", "job_abc", `{}`)); err == nil {
+		t.Fatal("second duplicate post unexpectedly succeeded")
+	}
+	select {
+	case g := <-gotCh:
+		t.Fatalf("hook fired for duplicate post: %+v", g)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Setting nil disables the hook (default no-op).
+	svc.SetPublishHook(nil)
+	if _, err := svc.Post(ctx, "inbox:main", testEnvelope(t, "job.event", "", `{"n":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case g := <-gotCh:
+		t.Fatalf("hook fired after SetPublishHook(nil): %+v", g)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func openTemp(t *testing.T) *Service {
 	t.Helper()
 	svc, err := Open(filepath.Join(t.TempDir(), "inbox.db"))

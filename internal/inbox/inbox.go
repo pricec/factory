@@ -38,6 +38,7 @@ type Service struct {
 
 	mu      sync.Mutex
 	waiters map[string][]chan struct{}
+	hook    func(inboxID string, env wire.MessageEnvelope)
 	closed  bool
 }
 
@@ -136,7 +137,29 @@ func (s *Service) Post(ctx context.Context, inboxID string, env wire.MessageEnve
 		return env, err
 	}
 	s.notify(inboxID)
+	if hook := s.hookFunc(); hook != nil {
+		hook(inboxID, env)
+	}
 	return env, nil
+}
+
+// SetPublishHook sets fn to be invoked after every successful Post, with the
+// target inbox id and the full stored envelope. fn is called synchronously
+// on the posting goroutine, so it must not block Post and must be safe to
+// call concurrently from multiple goroutines. A nil fn (the default) is a
+// no-op. Failed and duplicate posts do not fire it. The intended consumer is
+// the notify Hub's SSE fan-out (spec §4.4), whose Publish is a non-blocking
+// buffered send.
+func (s *Service) SetPublishHook(fn func(inboxID string, env wire.MessageEnvelope)) {
+	s.mu.Lock()
+	s.hook = fn
+	s.mu.Unlock()
+}
+
+func (s *Service) hookFunc() func(inboxID string, env wire.MessageEnvelope) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.hook
 }
 
 func (s *Service) existingResult(ctx context.Context, inboxID, jobID string) (id string, dup bool, err error) {
