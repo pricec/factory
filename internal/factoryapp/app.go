@@ -251,6 +251,8 @@ func buildMux(a *App, mcpH http.Handler) http.Handler {
 	// Onboarding surfaces (#24): top-level, outside /v1. /install.sh is
 	// planner-authed; downloads are unauthenticated per spec §7.5.
 	mux.HandleFunc("GET /install.sh", a.handleInstall)
+	mux.HandleFunc("GET /install-server.sh", a.handleInstallServer)
+	mux.HandleFunc("GET /download/factory/{platform}", a.handleDownload)
 	mux.HandleFunc("GET /download/foreman/{platform}", a.handleDownload)
 	mux.HandleFunc("POST /v1/pair", a.handlePair)
 	mux.HandleFunc("POST /v1/pairing-tokens", a.handlePairingTokens)

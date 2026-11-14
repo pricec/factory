@@ -31,6 +31,8 @@ build:
 	go build $(CMDS)
 
 release:
+	GOOS=linux GOARCH=amd64 go build -o dist/factory-linux-amd64 ./cmd/factory
+	GOOS=linux GOARCH=arm64 go build -o dist/factory-linux-arm64 ./cmd/factory
 	GOOS=linux GOARCH=amd64 go build -o dist/foreman-linux-amd64 ./cmd/foreman
 	GOOS=linux GOARCH=arm64 go build -o dist/foreman-linux-arm64 ./cmd/foreman
 

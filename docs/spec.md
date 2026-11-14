@@ -418,7 +418,7 @@ Request/response shapes and status codes beyond those shown are not pinned.
 - Worker tokens are minted by a library call inside the foreman - not an HTTP
   endpoint.
 
-Onboarding endpoints (#24) - both outside `/v1`:
+Onboarding endpoints (#24, #25) - all outside `/v1`:
 
 - `GET /install.sh`: planner-credential auth (same as
   `POST /v1/pairing-tokens`; 401 unknown/revoked, 403 non-planner). The
@@ -430,10 +430,29 @@ Onboarding endpoints (#24) - both outside `/v1`:
   and enables + restarts the service; it is idempotent. Trust note: the
   pairing token rides the rendered script, so the v1 operator-credential
   note extends here - anyone holding the planner token can onboard machines.
-- `GET /download/foreman/{platform}`: serves the foreman binary from the
-  factory's `-downloads` dir for `{platform}` = `linux-amd64` |
-  `linux-arm64` (400 otherwise, which is also the traversal gate; 404 when
-  the file is missing). Unauthenticated per the trusted-LAN posture (§7.5).
+- `GET /install-server.sh` (#25): planner-credential auth identical to
+  `GET /install.sh` (401 unknown/revoked, 403 non-planner); same trust note
+  as above - the v1 operator-credential note extends here: anyone holding the
+  planner token can bootstrap new factories. The factory renders the
+  bootstrap script per-request with its own advertise URL as the download
+  source. The script (as root, on Linux with systemd) downloads the factory
+  binary, installs `/etc/systemd/system/factory.service`
+  (`Environment=FACTORY_PLANNER_TOKEN`, `chmod 600` - the unit carries the
+  planner token; `EnvironmentFile=/etc/factory/factory.env`, the `FACTORY_*`
+  override point), pre-seeds the local-arch foreman binary into
+  `/var/lib/factory/downloads/` (non-fatal on failure), and enables +
+  restarts the service; it is idempotent, and a reinstall preserves the
+  existing planner token from the prior unit file.
+- `GET /download/{kind}/{platform}` (#24, #25): serves the {kind} =
+  `factory` | `foreman` binary from the factory's `-downloads` dir for
+  `{platform}` = `linux-amd64` | `linux-arm64` (400 otherwise, which is also
+  the traversal gate; 404 when the file is missing). Unauthenticated per the
+  trusted-LAN posture (§7.5).
+
+Bootstrap rule (#25): the first factory in a deployment is installed
+manually (`make release` + provision); thereafter factories serve
+factories - `GET /install-server.sh` from any running factory bootstraps the
+next one.
 
 These endpoints are not part of the §6.9 control-plane surface.
 
