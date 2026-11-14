@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/pricec/factory/internal/auth"
 	"github.com/pricec/factory/internal/registry"
@@ -56,6 +57,37 @@ func (a *App) handlePair(w http.ResponseWriter, r *http.Request) {
 		"bearer":     bearer,
 		"inbox_id":   inboxID,
 		"parent_url": a.advertise,
+	})
+}
+
+// handlePairingTokens serves POST /v1/pairing-tokens (spec §7.1):
+// planner-credential auth only - in v1 the planner token doubles as the
+// operator credential (same trust class as create_job/message_foreman).
+// The request has no fields: the body, if any, is ignored so an
+// empty-body POST works with plain curl.
+func (a *App) handlePairingTokens(w http.ResponseWriter, r *http.Request) {
+	identity, _, err := a.auth.Identify(r.Context(), bearerOf(r.Header.Get("Authorization")))
+	var ue *auth.UnauthorizedError
+	if errors.As(err, &ue) {
+		writeError(w, http.StatusUnauthorized, "unauthorized", ue.Reason)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	if identity != auth.FactoryPlannerIdentity {
+		writeError(w, http.StatusForbidden, "forbidden", "credential "+identity+" may not issue pairing tokens")
+		return
+	}
+	token, expiresAt, err := a.auth.IssuePairingToken(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"pairing_token": token,
+		"expires_at":    expiresAt.UTC().Format(time.RFC3339),
 	})
 }
 

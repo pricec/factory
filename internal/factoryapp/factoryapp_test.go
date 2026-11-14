@@ -300,6 +300,84 @@ func TestPairRefreshesCapabilities(t *testing.T) {
 	}
 }
 
+func TestPairingTokens(t *testing.T) {
+	e := newEnv(t)
+
+	// A foreman paired via the existing flow (#11) supplies the
+	// non-planner bearer for the rejection table.
+	foremanBearer := e.pair("alpha", nil)
+
+	// Planner-credential auth only (spec §7.1): 401 for a
+	// missing/unknown bearer, 403 for any non-planner identity.
+	for _, tc := range []struct {
+		name   string
+		bearer string
+		status int
+		code   string
+	}{
+		{"foreman bearer", foremanBearer, http.StatusForbidden, "forbidden"},
+		{"unknown bearer", "bearer-that-does-not-exist", http.StatusUnauthorized, "unauthorized"},
+		{"missing authorization", "", http.StatusUnauthorized, "unauthorized"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var errBody struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			if status := e.do("POST", "/v1/pairing-tokens", tc.bearer, nil, &errBody); status != tc.status {
+				t.Fatalf("status = %d, want %d", status, tc.status)
+			}
+			if errBody.Error.Code != tc.code {
+				t.Fatalf("error code = %q, want %q", errBody.Error.Code, tc.code)
+			}
+		})
+	}
+
+	// Happy path: the planner bearer (the v1 operator credential) mints a
+	// one-time pairing token with an empty request body.
+	var resp struct {
+		PairingToken string `json:"pairing_token"`
+		ExpiresAt    string `json:"expires_at"`
+	}
+	if status := e.do("POST", "/v1/pairing-tokens", e.a.PlannerToken(), nil, &resp); status != http.StatusOK {
+		t.Fatalf("POST /v1/pairing-tokens status = %d, want 200", status)
+	}
+	if !isHex64(resp.PairingToken) {
+		t.Fatalf("pairing_token = %q, want 64 hex chars (32B)", resp.PairingToken)
+	}
+	if _, err := time.Parse(time.RFC3339, resp.ExpiresAt); err != nil {
+		t.Fatalf("expires_at = %q, want RFC3339: %v", resp.ExpiresAt, err)
+	}
+
+	// The issued token pairs a fresh foreman end to end.
+	var pairResp struct {
+		Bearer    string `json:"bearer"`
+		InboxID   string `json:"inbox_id"`
+		ParentURL string `json:"parent_url"`
+	}
+	if status := e.do("POST", "/v1/pair", "", map[string]any{
+		"pairing_token": resp.PairingToken,
+		"self":          map[string]any{"id": "bravo", "capabilities": map[string]string{}},
+	}, &pairResp); status != http.StatusOK {
+		t.Fatalf("POST /v1/pair status = %d, want 200", status)
+	}
+	if pairResp.Bearer == "" || pairResp.InboxID != "foreman:bravo" || pairResp.ParentURL != testAdvertiseURL {
+		t.Fatalf("pair response = %+v", pairResp)
+	}
+	var foremen []jobs.Foreman
+	if status := e.do("GET", "/v1/foremen", "", nil, &foremen); status != http.StatusOK {
+		t.Fatalf("GET /v1/foremen status = %d", status)
+	}
+	got := map[string]bool{}
+	for _, f := range foremen {
+		got[f.ID] = true
+	}
+	if !got["foreman:alpha"] || !got["foreman:bravo"] {
+		t.Fatalf("foremen = %+v, want foreman:alpha and foreman:bravo", foremen)
+	}
+}
+
 func TestJobFlow(t *testing.T) {
 	e := newEnv(t)
 	foremanBearer := e.pair("alpha", map[string]string{"gpu": "true"})
@@ -531,6 +609,19 @@ func TestStreamSmoke(t *testing.T) {
 }
 
 // --- helpers ---
+
+// isHex64 reports whether s is 64 lowercase hex chars (32B, spec §11).
+func isHex64(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if !strings.ContainsRune("0123456789abcdef", c) {
+			return false
+		}
+	}
+	return true
+}
 
 func mustJSON(t *testing.T, v any) json.RawMessage {
 	t.Helper()

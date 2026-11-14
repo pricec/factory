@@ -239,6 +239,7 @@ func (a *App) onTerminal(jobID, _ string) {
 func buildMux(a *App, mcpH http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/pair", a.handlePair)
+	mux.HandleFunc("POST /v1/pairing-tokens", a.handlePairingTokens)
 	mux.Handle("/v1/inboxes/", inbox.NewHandler(a.inbox, a.authn))
 	mux.Handle("GET /v1/inboxes/{id}/stream", notify.StreamHandler(a.hub, a.authn))
 	mux.Handle("/v1/foreman/capabilities", registry.RefreshHandler(a.refreshAuthz(), a.upsertCaps))

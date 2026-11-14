@@ -386,6 +386,7 @@ factory planner's list view carries summaries only (#7, #19).
 | `POST /v1/schedules/{id}/disable` | (#8) |
 | `POST /v1/foreman/capabilities` | foreman token; upserts tags, bumps `last_seen` (#12) |
 | `GET /v1/spend?day=` | daily totals `{total_usd, jobs}`; per-role deferred until jobs carry role tags (#13) |
+| `POST /v1/pairing-tokens` | planner-credential auth (v1: the planner token doubles as the operator credential); issues a one-time pairing token, `200 {pairing_token, expires_at}` (#23) |
 
 Request/response shapes and status codes beyond those shown are not pinned.
 
@@ -394,6 +395,10 @@ Request/response shapes and status codes beyond those shown are not pinned.
 ### 7.1 Pairing flow (#11)
 
 - The parent prints a one-time token: 32B random hex, 15-min TTL, single use.
+- `POST /v1/pairing-tokens` (factory; planner-credential auth: the planner
+  token doubles as the operator credential in v1 - same trust class as
+  create_job/message_foreman) issues a one-time pairing token; `200
+  {pairing_token, expires_at}` (#23).
 - The child POSTs `POST /v1/pair`:
 
 ```json

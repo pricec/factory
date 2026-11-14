@@ -45,7 +45,8 @@ func loadOrPair(ctx context.Context, a *App) (pairingRecord, error) {
 	}
 
 	if a.cfg.PairingToken == "" {
-		return pairingRecord{}, errors.New("foremanapp: not paired: no paired.json and no pairing token")
+		return pairingRecord{}, fmt.Errorf("foremanapp: not paired: no %s and no pairing token; obtain one (curl -X POST %s/v1/pairing-tokens -H %q) and pass -pairing-token",
+			pairedFileName, strings.TrimSuffix(a.factoryURL, "/"), `Authorization: Bearer <planner token>`)
 	}
 	rec, err := pairWithFactory(ctx, a)
 	if err != nil {
