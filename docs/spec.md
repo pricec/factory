@@ -344,29 +344,30 @@ created today; above the config cap (default $20/day) the factory refuses new
 `create_job` with error `spend_cap_exceeded`; reset by config bump or env
 `FACTORY_SPEND_OVERRIDE=1`.
 
-Model tiering (#13, #28, #29, #30, #31): the factory standardizes on GLM via
+Model tiering (#13, #28, #29, #30, #31, #32): the factory standardizes on GLM via
 OpenRouter (one provider, one credential) and optimizes for cost -
 `internal/models` pins the per-role defaults, every role is
 env-overridable, and swapping a role's model stays a config change only:
 
 | Role | Pinned default | Env override |
 | --- | --- | --- |
-| factory planner | `openrouter/z-ai/glm-5.2` | `FACTORY_PLANNER_MODEL` |
-| foreman brain | `openrouter/z-ai/glm-5.2` | `FACTORY_FOREMAN_BRAIN_MODEL` |
+| factory planner | `openrouter/z-ai/glm-5.3` | `FACTORY_PLANNER_MODEL` |
+| foreman brain | `openrouter/z-ai/glm-5.3` | `FACTORY_FOREMAN_BRAIN_MODEL` |
 | worker, `tier: "flash"` (and no-tier jobs) | `openrouter/z-ai/glm-5.3-flash` | `FACTORY_WORKER_FLASH_MODEL` |
 | worker, `tier: "default"` | `openrouter/z-ai/glm-5.3-flash#max` | `FACTORY_WORKER_MODEL` |
 | worker, `tier: "hardest"` | `openrouter/z-ai/glm-5.3` | `FACTORY_WORKER_HARDEST_MODEL` |
 
-The brains run at least GLM 5.2 (#29). The worker ladder is one GLM 5.3
-generation across two price points (#30, #31): Flash (~$0.04/$0.08 per M
-tokens; the `default` tier is the same model at max reasoning effort -
-same token prices, the only extra spend is the reasoning tokens actually
-consumed) and full GLM 5.3 (~$0.08/$3.6) for the hardest tasks. GLM 5.2
-(~$6.8/M output) and GLM 5.3 FlashX (~$0.37/M input) both priced
-themselves out of the middle: the factory's measured job profile is
-~99:1 input:output, where FlashX costs more than the stronger model.
-Brain sessions are input-heavy and output-light, so 5.2's bottom-dollar
-input and cache-read prices keep it the cheapest brain model regardless.
+The coordinator - factory planner and foreman brain - runs full GLM 5.3
+(#32): coordination is the factory's judgment layer, and its sessions
+are output-light, so the output price barely comes into play. The worker
+ladder is one GLM 5.3 generation across two price points (#30, #31):
+Flash (~$0.04/$0.08 per M tokens; the `default` tier is the same model
+at max reasoning effort - same token prices, the only extra spend is the
+reasoning tokens actually consumed) and full GLM 5.3 (~$0.08/$3.6) for
+the hardest tasks. GLM 5.2 (~$6.8/M output) and GLM 5.3 FlashX
+(~$0.37/M input) both priced themselves out of the middle: the
+factory's measured job profile is ~99:1 input:output, where FlashX
+costs more than the stronger model.
 Reasoning-effort variants (`#max`) ride the `opencode run -m` flag, never
 the generated config's `model` field - V2 drops `#variant` suffixes
 there (#31). Dispatching agents (the factory
@@ -526,6 +527,12 @@ Scope struct: `{inbox, may_read, may_post, job_id?}`.
   forwarded job.result #4, post_to_factory #18). The pair response's
   `parent_url` names the factory base URL; `factory:main` is the inbox id
   that foreman-originated posts target.
+- The foreman keeps a LOCAL `factory:main` copy as a staging inbox
+  (#33): `post_to_factory` (§9.3) writes there, and the parent
+  forwarder loop drains it, forwarding every envelope verbatim to the
+  factory-side `factory:main` over HTTP and acking locally. Without the
+  forwarder the staging copy is a dead end - brain replies never reached
+  the factory.
 - Worker tokens (resolution of TODO-2; corrected #11): post-only on
   `foreman:{id}` (job.result, job.question) and read-only on the per-job
   inbox `job:{job_id}` (job.answer; the foreman creates it at dispatch).

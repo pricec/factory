@@ -118,6 +118,14 @@ func New(cfg Config) (*App, error) {
 	if now == nil {
 		now = func() time.Time { return time.Now().UTC() }
 	}
+	// Model tiering (spec §6.5): unset fields fall back to the pinned GLM
+	// defaults; callers override via env (cmd/foreman). Resolved BEFORE
+	// the App literal copies cfg - every later construction (BrainRunner,
+	// spawner) must see the resolved values.
+	cfg.BrainModel = models.Resolve(cfg.BrainModel, models.ForemanBrainDefault)
+	cfg.WorkerFlashModel = models.Resolve(cfg.WorkerFlashModel, models.WorkerFlash)
+	cfg.WorkerModel = models.Resolve(cfg.WorkerModel, models.WorkerStandard)
+	cfg.WorkerHardestModel = models.Resolve(cfg.WorkerHardestModel, models.WorkerHardest)
 
 	a := &App{
 		cfg:        cfg,
@@ -131,12 +139,6 @@ func New(cfg Config) (*App, error) {
 	if a.advertise == "" {
 		a.advertise = defaultAdvertiseURL(cfg.Addr)
 	}
-	// Model tiering (spec §6.5): unset fields fall back to the pinned
-	// GLM defaults; callers override via env (cmd/foreman).
-	a.cfg.BrainModel = models.Resolve(a.cfg.BrainModel, models.ForemanBrainDefault)
-	a.cfg.WorkerFlashModel = models.Resolve(a.cfg.WorkerFlashModel, models.WorkerFlash)
-	a.cfg.WorkerModel = models.Resolve(a.cfg.WorkerModel, models.WorkerStandard)
-	a.cfg.WorkerHardestModel = models.Resolve(a.cfg.WorkerHardestModel, models.WorkerHardest)
 
 	// Stores: open both or none.
 	var err error
@@ -274,15 +276,15 @@ func (a *App) BrainToken() string { return a.brainToken }
 func (a *App) Brain() *BrainRunner { return a.brain }
 
 // Run runs the background loops: the remote inbox client, the local inbox
-// consumer, and the capabilities refresh (startup push + 60s ticker). It
-// blocks until ctx is done. v1 fails fast: a definitive remote-loop error
-// is logged and the loop ends.
+// consumer, the parent forwarder, and the capabilities refresh (startup
+// push + 60s ticker). It blocks until ctx is done. v1 fails fast: a
+// definitive remote-loop error is logged and the loop ends.
 func (a *App) Run(ctx context.Context) error {
 	if err := a.pushCapabilities(ctx); err != nil {
 		log.Printf("foremanapp: initial capabilities push: %v", err)
 	}
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(4)
 	go func() {
 		defer wg.Done()
 		if err := a.client.Run(ctx); err != nil && ctx.Err() == nil {
@@ -296,6 +298,10 @@ func (a *App) Run(ctx context.Context) error {
 	go func() {
 		defer wg.Done()
 		a.localLoop(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		a.parentLoop(ctx)
 	}()
 	wg.Wait()
 	return nil
@@ -366,6 +372,46 @@ func (a *App) localLoop(ctx context.Context) {
 		}
 		if err := a.handleBatch(ctx, envs, a.ackLocal); err != nil {
 			log.Printf("foremanapp: local consumer: %v", err)
+		}
+	}
+}
+
+// parentLoop drains the foreman's local copy of factory:main (spec §7.3):
+// a staging inbox for envelopes bound for the factory - the brain's
+// post_to_factory output and anything else addressed there. Every
+// envelope is forwarded verbatim to the parent over HTTP and acked
+// locally; the §3.3 rule table never applies here (the sender already
+// chose the destination, and routing brain replies through it would loop
+// them straight back into the brain).
+func (a *App) parentLoop(ctx context.Context) {
+	for {
+		envs, err := a.inbox.Get(ctx, FactoryMainInbox, 50, 5*time.Second)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("foremanapp: parent forwarder: get: %v", err)
+			if !sleepCtx(ctx, time.Second) {
+				return
+			}
+			continue
+		}
+		if len(envs) == 0 {
+			continue
+		}
+		acked := make([]string, 0, len(envs))
+		for _, env := range envs {
+			if err := a.poster.PostToParent(ctx, env); err != nil {
+				log.Printf("foremanapp: parent forwarder: %s %s: %v (redelivered)", env.Type, env.ID, err)
+				continue
+			}
+			acked = append(acked, env.ID)
+		}
+		if len(acked) == 0 {
+			continue
+		}
+		if err := a.inbox.Ack(ctx, FactoryMainInbox, acked); err != nil {
+			log.Printf("foremanapp: parent forwarder: ack: %v", err)
 		}
 	}
 }

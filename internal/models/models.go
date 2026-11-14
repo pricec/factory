@@ -1,11 +1,12 @@
 // Package models pins the factory's model tiering (spec §6.5): the
 // factory standardizes on GLM via OpenRouter (single provider, no
-// per-provider credential sprawl) and optimizes for cost - the overhead
-// roles (factory planner, foreman brain) run GLM 5.2, and worker jobs
-// pick among three tiers with an explicit bias towards the cheapest one
-// that can do the job. Every string was verified reachable against the
-// running opencode install; each role stays env-overridable (spec §6.5:
-// swapping a role's model is a config change only).
+// per-provider credential sprawl) and optimizes for cost - the
+// coordinator (factory planner + foreman brain) runs full GLM 5.3
+// (#32), and worker jobs pick among three tiers with an explicit bias
+// towards the cheapest one that can do the job. Every string was
+// verified reachable against the running opencode install; each role
+// stays env-overridable (spec §6.5: swapping a role's model is a config
+// change only).
 package models
 
 // Resolve returns override when set, else fallback: the env-override
@@ -17,16 +18,16 @@ func Resolve(override, fallback string) string {
 	return fallback
 }
 
-// PlannerDefault is the factory planner's model (GLM 5.2: the brains run
-// at least 5.2; openrouter ~$0.007/$6.8 per M tokens in/out). Brain
-// sessions are input-heavy and output-light, so 5.2's rock-bottom input
-// and cache-read prices make it the cheapest brain model despite the
-// expensive output - the output volume never comes into play.
-const PlannerDefault = "openrouter/z-ai/glm-5.2"
+// PlannerDefault is the factory planner's model (GLM 5.3: the
+// coordinator - planner and foreman brain - runs full GLM 5.3,
+// per operator direction #32; only workers are tiered). Openrouter
+// ~$0.084/$3.6 per M tokens in/out; coordinator sessions are
+// output-light, so the output price barely comes into play.
+const PlannerDefault = "openrouter/z-ai/glm-5.3"
 
-// ForemanBrainDefault is the foreman brain's model (same tier as the
-// planner).
-const ForemanBrainDefault = "openrouter/z-ai/glm-5.2"
+// ForemanBrainDefault is the foreman brain's model (same coordinator
+// tier as the planner, #32).
+const ForemanBrainDefault = "openrouter/z-ai/glm-5.3"
 
 // WorkerFlash is the worker's cheap tier (spec §5.1 `tier: "flash"`, also
 // the cost-biased default for jobs that pick no tier): GLM 5.3 Flash

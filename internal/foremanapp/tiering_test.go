@@ -34,6 +34,14 @@ func TestModelTieringDefaults(t *testing.T) {
 	}
 	defer a.Close()
 
+	// The brain runner itself must carry the resolved model (regression:
+	// the App literal copies cfg, so resolving after the copy left the
+	// BrainRunner with the stale empty string - the brain silently ran
+	// the opencode default model instead).
+	if got := a.Brain().Model; got != models.ForemanBrainDefault {
+		t.Errorf("brain model = %q, want the pinned default %q", got, models.ForemanBrainDefault)
+	}
+
 	cases := []struct {
 		name      string
 		tier      string
