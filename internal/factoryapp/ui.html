@@ -58,6 +58,18 @@
   .actions button { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 5px 12px; cursor: pointer; font: inherit; }
   .actions button:hover { border-color: var(--accent); }
   .err { color: var(--bad); font-family: var(--mono); font-size: 12px; padding: 12px; }
+  form.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 16px; }
+  form.panel label { display: block; color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; margin: 10px 0 4px; }
+  form.panel input, form.panel textarea, form.panel select {
+    width: 100%; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px;
+    font: 13px var(--mono);
+  }
+  form.panel textarea { min-height: 60px; resize: vertical; }
+  form.panel .row { display: flex; gap: 10px; }
+  form.panel .row > div { flex: 1; }
+  form.panel button[type=submit] { margin-top: 12px; background: #1f6feb; border: 1px solid #1f6feb; color: #fff; border-radius: 6px; padding: 6px 14px; cursor: pointer; font: inherit; }
+  .result-note { color: var(--ok); font-family: var(--mono); font-size: 12px; margin: 8px 2px; }
 </style>
 </head>
 <body>
@@ -65,12 +77,35 @@
   <h1><span class="prompt">factory</span> : <span id="adv">-</span></h1>
   <nav>
     <button id="tab-foremen" class="active">Foremen</button>
+    <button id="tab-jobs">Jobs</button>
     <button id="tab-inboxes">Inboxes</button>
   </nav>
 </header>
 <main>
+  <div id="createpanel" style="display:none">
+    <form class="panel" id="createjob">
+      <label>task</label>
+      <textarea id="job-task" placeholder="what should the worker do?"></textarea>
+      <div class="row">
+        <div><label>requires (comma-separated)</label><input id="job-requires" placeholder="gpu, bigmem"></div>
+        <div><label>timeout_s</label><input id="job-timeout" type="number" min="1" placeholder="300"></div>
+        <div><label>priority 1-9</label><input id="job-priority" type="number" min="1" max="9" placeholder="5"></div>
+      </div>
+      <div class="row">
+        <div><label>schedule (cron, optional)</label><input id="job-cron" placeholder="0 3 * * *"></div>
+        <div><label>result schema (JSON, optional)</label><input id="job-schema" placeholder='{"type":"object"}'></div>
+      </div>
+      <button type="submit">create job</button>
+      <span class="result-note" id="job-note"></span>
+    </form>
+  </div>
   <div class="toolbar">
     <span class="count" id="rowcount"></span>
+    <select id="state-filter" style="display:none;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:6px;font:12px var(--mono);padding:3px 6px">
+      <option value="">all states</option>
+      <option>pending</option><option>dispatched</option><option>running</option>
+      <option>done</option><option>failed</option><option>timed_out</option><option>dead</option>
+    </select>
     <span style="margin-left:auto" id="refreshed"></span>
   </div>
   <div id="list"></div>
@@ -170,8 +205,34 @@ async function renderForemanDetail(id) {
         "</td><td>" + esc(j.created_at) + "</td><td>" + esc(j.updated_at) + "</td></tr>")) +
     "<h3>inbox " + esc(inboxId) + " — recent messages (acked included)</h3>" +
     '<div id="fmsgs">' + envelopeList(msgs, "no messages yet") + "</div>" +
+    '<h3>message this foreman (from the planner identity)</h3>' +
+    '<form class="panel" id="msgform" data-foreman="' + esc(id) + '">' +
+    '<div class="row"><div><label>type</label><input id="msg-type" placeholder="brain.ping"></div>' +
+    '<div><label>job_id (for job.* types)</label><input id="msg-job" placeholder="job_…"></div></div>' +
+    '<label>payload (JSON)</label><textarea id="msg-payload" placeholder="{}"></textarea>' +
+    '<button type="submit">send</button> <span class="result-note" id="msg-note"></span></form>' +
     '<div class="actions"><button onclick="foremanBack()">← all foremen</button></div>';
   for (const tr of $("list").querySelectorAll("tr[data-id]")) tr.classList.toggle("selected", tr.dataset.id === id);
+  $("msgform").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const note = $("msg-note");
+    note.textContent = "";
+    const body = { type: $("msg-type").value.trim() };
+    if ($("msg-job").value.trim()) body.job_id = $("msg-job").value.trim();
+    if ($("msg-payload").value.trim()) {
+      try { body.payload = JSON.parse($("msg-payload").value); }
+      catch (e) { note.style.color = "var(--bad)"; note.textContent = "payload is not valid JSON: " + e.message; return; }
+    }
+    try {
+      const env = await postJSON("/v1/foremen/" + encodeURIComponent(id.slice("foreman:".length)) + "/messages", body);
+      note.style.color = "var(--ok)";
+      note.textContent = "sent " + env.id;
+      await renderForemanDetail(id);
+    } catch (e) {
+      note.style.color = "var(--bad)";
+      note.textContent = e.message;
+    }
+  };
 }
 
 function foremanBack() { selectedForeman = null; $("detail").style.display = "none"; }
@@ -214,16 +275,99 @@ async function renderInboxDetail(id) {
 function inboxBack() { selectedInbox = null; $("detail").style.display = "none"; }
 
 let tab = "foremen";
-const loaders = { foremen: loadForemen, inboxes: loadInboxes };
+const loaders = { foremen: loadForemen, jobs: loadJobs, inboxes: loadInboxes };
 function setTab(t) {
   tab = t;
   $("tab-foremen").classList.toggle("active", t === "foremen");
+  $("tab-jobs").classList.toggle("active", t === "jobs");
   $("tab-inboxes").classList.toggle("active", t === "inboxes");
-  selectedForeman = null; selectedInbox = null; $("detail").style.display = "none";
+  $("createpanel").style.display = t === "jobs" ? "block" : "none";
+  $("state-filter").style.display = t === "jobs" ? "inline" : "none";
+  selectedForeman = null; selectedInbox = null; selectedJob = null;
+  $("detail").style.display = "none";
   loaders[t]();
 }
 $("tab-foremen").onclick = () => setTab("foremen");
+$("tab-jobs").onclick = () => setTab("jobs");
 $("tab-inboxes").onclick = () => setTab("inboxes");
+$("state-filter").onchange = () => loadJobs();
+
+async function postJSON(url, body) {
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error((data.error && data.error.message) || ("HTTP " + r.status)), { data });
+  return data;
+}
+
+let selectedJob = null;
+
+async function loadJobs() {
+  const state = $("state-filter").value;
+  let jobs;
+  try {
+    jobs = await getJSON("/v1/jobs?limit=100" + (state ? "&state=" + encodeURIComponent(state) : ""));
+  } catch (e) { $("list").innerHTML = '<div class="err">' + esc(e.message) + "</div>"; return; }
+  if (!jobs) jobs = [];
+  $("rowcount").textContent = jobs.length + " job" + (jobs.length === 1 ? "" : "s");
+  const rows = jobs.map(j =>
+    '<tr data-id="' + esc(j.id) + (j.id === selectedJob ? '" class="selected' : "") + '">' +
+    "<td>" + esc(j.id) + "</td><td>" + esc(j.state) + "</td>" +
+    "<td>" + esc(j.foreman_id || "-") + "</td>" +
+    "<td>" + (j.over_budget ? '<span class="badge hot">over budget</span>' : "-") + "</td>" +
+    "<td>" + esc(rel(j.created_at)) + "</td></tr>");
+  $("list").innerHTML = table(["job", "state", "foreman", "budget", "created"], rows);
+  for (const tr of $("list").querySelectorAll("tr[data-id]")) {
+    tr.onclick = () => { selectedJob = tr.dataset.id; renderJobDetail(selectedJob); };
+  }
+}
+
+async function renderJobDetail(id) {
+  const d = $("detail");
+  d.style.display = "block";
+  d.innerHTML = "<h2>" + esc(id) + '</h2><div class="sub">loading…</div>';
+  let job;
+  try { job = await getJSON("/v1/jobs/" + encodeURIComponent(id)); }
+  catch (e) { d.innerHTML = '<div class="err">' + esc(e.message) + "</div>"; return; }
+  const results = job.results ? job.results : [];
+  d.innerHTML = "<h2>" + esc(job.id) + " <span class='badge'>" + esc(job.state) + "</span></h2>" +
+    '<div class="sub">foreman ' + esc(job.foreman_id || "-") + " · attempts " + job.attempts +
+    " · created " + esc(job.created_at) + " · updated " + esc(job.updated_at) +
+    (job.last_error ? " · <span style='color:var(--bad)'>last error: " + esc(job.last_error) + "</span>" : "") + "</div>" +
+    "<h3>spec</h3><pre>" + esc(JSON.stringify(job.spec, null, 2)) + "</pre>" +
+    "<h3>usage</h3><pre>" + esc(JSON.stringify(job.usage || null, null, 2)) + "</pre>" +
+    "<h3>results (" + results.length + ")</h3>" +
+    (results.length ? '<pre>' + esc(JSON.stringify(results, null, 2)) + "</pre>" : '<div class="empty">no results yet</div>') +
+    '<div class="actions"><button onclick="jobBack()">← all jobs</button></div>';
+  for (const tr of $("list").querySelectorAll("tr[data-id]")) tr.classList.toggle("selected", tr.dataset.id === id);
+}
+
+function jobBack() { selectedJob = null; $("detail").style.display = "none"; }
+window.jobBack = jobBack;
+
+$("createjob").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const note = $("job-note");
+  note.textContent = "";
+  const body = { task: $("job-task").value.trim() };
+  if ($("job-requires").value.trim()) body.requires = $("job-requires").value.split(",").map(s => s.trim()).filter(Boolean);
+  if ($("job-timeout").value) body.timeout_s = parseInt($("job-timeout").value, 10);
+  if ($("job-priority").value) body.priority = parseInt($("job-priority").value, 10);
+  if ($("job-cron").value.trim()) body.schedule_cron = $("job-cron").value.trim();
+  if ($("job-schema").value.trim()) {
+    try { body.result_schema = JSON.parse($("job-schema").value); }
+    catch (e) { note.style.color = "var(--bad)"; note.textContent = "result schema is not valid JSON: " + e.message; return; }
+  }
+  try {
+    const created = await postJSON("/v1/jobs", body);
+    note.style.color = "var(--ok)";
+    note.textContent = "created " + created.job_id + " → " + created.state + (created.foreman ? " (foreman " + created.foreman + ")" : " (no matching foreman; pending)");
+    $("job-task").value = "";
+    await loadJobs();
+  } catch (e) {
+    note.style.color = "var(--bad)";
+    note.textContent = e.message;
+  }
+};
 
 window.foremanBack = foremanBack;
 window.inboxBack = inboxBack;

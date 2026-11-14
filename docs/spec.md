@@ -383,6 +383,8 @@ factory planner's list view carries summaries only (#7, #19).
 | Method & path | Notes |
 |---|---|
 | `GET /v1/jobs?state=&foreman=` | filter by state and foreman (#9) |
+| `POST /v1/jobs` | UI twin of the MCP `create_job` tool (§9.4): body `{task, requires[], result_schema, timeout_s, priority, schedule_cron}`; runs the same spend breaker + capability match (no match -> `pending`); `201 + {job_id, state, foreman}` |
+| `POST /v1/foremen/{id}/messages` | UI twin of the MCP `message_foreman` tool (§9.4): body `{type, job_id?, payload?}` posted from the planner identity; `201` + envelope |
 | `GET /v1/jobs/{id}` | (#9) |
 | `GET /v1/foremen` | returns `id, online, capabilities` (#9) |
 | `GET /v1/deadletter` | job + `last_error` + results (#10) |

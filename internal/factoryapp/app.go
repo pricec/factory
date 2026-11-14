@@ -64,6 +64,8 @@ type App struct {
 	sweeper    *jobs.Sweeper
 	scheduler  *jobs.Scheduler
 	picker     *jobs.RetryPicker
+	matcher    *registry.CapabilityMatcher
+	budget     budgets.Config
 	handler    http.Handler
 	advertise  string
 	plannerTok string
@@ -149,6 +151,8 @@ func New(cfg Config) (*App, error) {
 	a.hub.AttachTo(a.inbox)
 
 	matcher := &registry.CapabilityMatcher{Source: &foremanSource{store: a.jobs}}
+	a.matcher = matcher
+	a.budget = cfg.Budget
 	a.sweeper = jobs.NewSweeper(a.jobs)
 	a.scheduler = jobs.NewScheduler(a.jobs, matcher)
 	a.picker = jobs.NewRetryPicker(a.jobs)
@@ -254,6 +258,10 @@ func buildMux(a *App, mcpH http.Handler) http.Handler {
 	mux.HandleFunc("GET /{$}", a.handleUI)
 	mux.HandleFunc("GET /v1/inboxes", a.handleInboxSummaries)
 	mux.HandleFunc("GET /v1/inboxes/{id}/recent", a.handleInboxRecent)
+	// Brain drive surface (spec §6.9): UI twins of the MCP create_job and
+	// message_foreman tools (§9.4) - same stores, same matcher, same breaker.
+	mux.HandleFunc("POST /v1/jobs", a.handleCreateJob)
+	mux.HandleFunc("POST /v1/foremen/{id}/messages", a.handleMessageForeman)
 	// Onboarding surfaces (#24): top-level, outside /v1. /install.sh is
 	// planner-authed; downloads are unauthenticated per spec §7.5.
 	mux.HandleFunc("GET /install.sh", a.handleInstall)
