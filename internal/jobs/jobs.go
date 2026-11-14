@@ -366,13 +366,17 @@ func scanJob(row rowScanner) (Job, bool, error) {
 
 // UpsertForeman registers or refreshes a foreman's capabilities (pairing
 // and refresh path, spec §6.7; #12 wires the matching, #11 the pairing).
+// Every upsert is a liveness signal too (spec §6.3): the conflict branch
+// bumps last_seen and marks the foreman online, so the foreman's steady
+// 60s capabilities push keeps it online even with no other traffic.
 func (s *Store) UpsertForeman(ctx context.Context, id string, capabilities json.RawMessage) error {
 	if len(capabilities) == 0 {
 		capabilities = json.RawMessage("{}")
 	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO foremen (id, capabilities, last_seen, online) VALUES (?, ?, ?, 1)
-		 ON CONFLICT(id) DO UPDATE SET capabilities = excluded.capabilities`,
+		 ON CONFLICT(id) DO UPDATE SET capabilities = excluded.capabilities,
+			last_seen = excluded.last_seen, online = 1`,
 		id, string(capabilities), s.now())
 	return err
 }

@@ -21,10 +21,29 @@ type mcpBlock struct {
 	Servers map[string]*remoteMCPServer `json:"servers"`
 }
 
+// permissionRule is one opencode V2 permission rule (opencode
+// docs/permissions): allow/deny/ask for one action on one resource.
+type permissionRule struct {
+	Action   string `json:"action"`
+	Resource string `json:"resource"`
+	Effect   string `json:"effect"`
+}
+
+// headlessPermissions pins the generated child's permission policy. A
+// headless `opencode run` has no client to answer an "ask": any prompt is
+// auto-declined and the whole session aborts mid-flight (exit status 1,
+// work already done discarded). The child runs with the service user's
+// authority either way, so an explicit allow-all is the only sound policy;
+// gating machine-run children is the enclosing service's job.
+var headlessPermissions = []permissionRule{
+	{Action: "*", Resource: "*", Effect: "allow"},
+}
+
 // openCODEConfig is the generated opencode config (§8.4).
 type openCODEConfig struct {
-	Model string   `json:"model,omitempty"`
-	MCP   mcpBlock `json:"mcp"`
+	Model       string           `json:"model,omitempty"`
+	MCP         mcpBlock         `json:"mcp"`
+	Permissions []permissionRule `json:"permissions"`
 }
 
 // newOpenCODEConfig builds the generated config from cfg (§8.4): the remote
@@ -44,6 +63,7 @@ func newOpenCODEConfig(cfg Config) openCODEConfig {
 				OAuth:   false,
 			},
 		}},
+		Permissions: headlessPermissions,
 	}
 }
 

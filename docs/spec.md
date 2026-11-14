@@ -367,6 +367,12 @@ factory planner's list view carries summaries only (#7, #19).
   deletes the stub (#8, #12).
 - No matching foreman: the job stays `pending`, log once (visible via
   `/v1/jobs`) (#8).
+- Pending picker goroutine (10s tick, fake-clockable) (#27): every `pending`
+  job is re-matched each pass, oldest first; a qualifying online foreman
+  dispatches it (`pending -> dispatched` via the §6.1 transition), envelope
+  delivery rides the dispatch notifier (#20). No match keeps it `pending`
+  until a foreman qualifies - jobs are never orphaned by a foreman that
+  arrives (or pairs) after creation.
 - Refresh: `POST /v1/foreman/capabilities` (foreman token) upserts tags and
   bumps `last_seen`.
 
@@ -555,6 +561,9 @@ no shared state.
 
 ```json
 {
+  "permissions": [
+    { "action": "*", "resource": "*", "effect": "allow" }
+  ],
   "mcp": {
     "servers": {
       "inbox": {
@@ -567,6 +576,14 @@ no shared state.
   }
 }
 ```
+
+- Permissions (#27): every generated child config (worker, foreman brain,
+  factory planner) pins one allow-all rule. A headless `opencode run` has no
+  client to answer an `ask`; an unanswered ask is auto-declined and aborts
+  the whole session mid-flight (observed live: a `grep` outside the workdir
+  declined, `opencode run` exit status 1, completed work discarded). The
+  children run with the enclosing service user's authority either way, so
+  gating them is the enclosing service's job, not the prompt's.
 
 - max_tokens: the opencode 1.18 config schema exposes no per-request
   max-output-tokens setting, so the pin "config sets model max_tokens =

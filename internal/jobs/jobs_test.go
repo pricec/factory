@@ -350,6 +350,52 @@ func TestLivenessAndOfflineMarking(t *testing.T) {
 	}
 }
 
+// TestUpsertForemanRefreshKeepsForemanAlive: the capabilities refresh
+// (spec §6.7) doubles as a heartbeat - the upsert's conflict branch must
+// bump last_seen and mark the foreman online, so a silent-but-connected
+// foreman is revived by its 60s push instead of staying offline forever.
+func TestUpsertForemanRefreshKeepsForemanAlive(t *testing.T) {
+	s := openStore(t)
+	now := clock()
+	s.Now = func() time.Time { return *now }
+	ctx := context.Background()
+
+	if err := s.UpsertForeman(ctx, "foreman:alpha", json.RawMessage(`{"gpu":"true"}`)); err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.Foremen(ctx)
+	if err != nil || len(before) != 1 {
+		t.Fatalf("foremen: %v (%v)", before, err)
+	}
+
+	// 46s of silence: the sweep marks the foreman offline (spec §6.3).
+	*now = now.Add(46 * time.Second)
+	if err := NewSweeper(s).Pump(ctx); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := s.Foremen(ctx)
+	if after[0].Online {
+		t.Fatal("sweeper left the foreman online past the 45s threshold")
+	}
+
+	// The capabilities push revives it: last_seen bumped, online again,
+	// capabilities updated (spec §6.7 refresh path).
+	*now = now.Add(60 * time.Second) // the foreman's 60s ticker
+	if err := s.UpsertForeman(ctx, "foreman:alpha", json.RawMessage(`{"gpu":"true","tools":"docker"}`)); err != nil {
+		t.Fatal(err)
+	}
+	refreshed, _ := s.Foremen(ctx)
+	if !refreshed[0].Online {
+		t.Error("capabilities refresh did not mark the foreman online")
+	}
+	if refreshed[0].LastSeen == before[0].LastSeen {
+		t.Errorf("last_seen = %s, want bumped from %s", refreshed[0].LastSeen, before[0].LastSeen)
+	}
+	if !strings.Contains(refreshed[0].Capabilities, "docker") {
+		t.Errorf("capabilities = %q, want the refreshed tags", refreshed[0].Capabilities)
+	}
+}
+
 func TestRestartPreservesState(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "jobs.db")
 

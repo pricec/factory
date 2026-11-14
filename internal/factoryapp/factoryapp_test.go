@@ -568,6 +568,85 @@ func TestForemanOffline(t *testing.T) {
 	})
 }
 
+// TestCapsRefreshKeepsForemanOnline: a connected-but-silent foreman goes
+// offline after 45s (spec §6.3); its 60s capabilities push (spec §6.7)
+// must revive the registry row - last_seen bumped, online again - so a
+// healthy foreman never shows offline to the operator.
+func TestCapsRefreshKeepsForemanOnline(t *testing.T) {
+	e := newEnv(t)
+	bearer := e.pair("alpha", map[string]string{"gpu": "true"})
+
+	var before []jobs.Foreman
+	_ = e.do("GET", "/v1/foremen", "", nil, &before)
+
+	// 46s silent: the sweep marks it offline...
+	e.clock.Advance(46 * time.Second)
+	waitFor(t, "foreman offline after 46s of silence", 12*time.Second, func() bool {
+		var foremen []jobs.Foreman
+		_ = e.do("GET", "/v1/foremen", "", nil, &foremen)
+		return len(foremen) == 1 && !foremen[0].Online
+	})
+
+	// ...and the capabilities push brings it back (204 NoContent).
+	if status := e.do("POST", "/v1/foreman/capabilities", bearer,
+		map[string]any{"capabilities": map[string]string{"gpu": "true"}}, nil); status != http.StatusNoContent {
+		t.Fatalf("caps refresh status = %d, want 204", status)
+	}
+	var after []jobs.Foreman
+	_ = e.do("GET", "/v1/foremen", "", nil, &after)
+	if len(after) != 1 || !after[0].Online {
+		t.Fatalf("foremen after refresh = %v, want foreman:alpha online", after)
+	}
+	if after[0].LastSeen == before[0].LastSeen {
+		t.Errorf("last_seen = %s, want bumped from %s", after[0].LastSeen, before[0].LastSeen)
+	}
+}
+
+// TestPendingJobDispatchesWhenForemanArrives: a job created while no
+// foreman is registered stays pending (spec §6.7); the pending picker loop
+// re-matches it once a foreman pairs, and the dispatch notifier delivers
+// the job.request to the foreman inbox (spec §6.9).
+func TestPendingJobDispatchesWhenForemanArrives(t *testing.T) {
+	e := newEnv(t)
+
+	// No foreman yet: create_job matches nothing and leaves the job
+	// pending.
+	var created struct {
+		JobID string `json:"job_id"`
+		State string `json:"state"`
+	}
+	if status := e.do("POST", "/v1/jobs", "", map[string]any{"task": "smoke test"}, &created); status != http.StatusCreated {
+		t.Fatalf("POST /v1/jobs status = %d, want 201", status)
+	}
+	if created.State != jobs.StatePending {
+		t.Fatalf("created state = %s, want pending (no foreman yet)", created.State)
+	}
+
+	// The foreman pairs (and pushes capabilities): the pending picker
+	// dispatches the backlog within its 10s tick.
+	e.pair("alpha", nil)
+
+	waitFor(t, "pending job dispatched to foreman:alpha", 15*time.Second, func() bool {
+		var job jobs.Job
+		_ = e.do("GET", "/v1/jobs/"+created.JobID, "", nil, &job)
+		return job.State == jobs.StateDispatched && job.ForemanID == "foreman:alpha"
+	})
+
+	// The notifier delivered the job.request envelope at-least-once.
+	waitFor(t, "job.request in foreman inbox", 5*time.Second, func() bool {
+		envs, err := e.a.Inbox().Get(e.ctx, "foreman:alpha", 10, 0)
+		if err != nil {
+			e.t.Fatalf("inbox.Get: %v", err)
+		}
+		for _, env := range envs {
+			if env.Type == "job.request" && env.JobID == created.JobID {
+				return true
+			}
+		}
+		return false
+	})
+}
+
 func TestEnvPlannerToken(t *testing.T) {
 	const envTok = "env-supplied-planner-secret-0123456789"
 	t.Setenv("FACTORY_PLANNER_TOKEN", envTok)

@@ -25,7 +25,8 @@ func TestGeneratedConfigGolden(t *testing.T) {
 			"with model",
 			"anthropic/claude-sonnet-4-5",
 			map[string]any{
-				"model": "anthropic/claude-sonnet-4-5",
+				"model":       "anthropic/claude-sonnet-4-5",
+				"permissions": []any{map[string]any{"action": "*", "resource": "*", "effect": "allow"}},
 				"mcp": map[string]any{
 					"servers": map[string]any{
 						"inbox": map[string]any{
@@ -42,6 +43,7 @@ func TestGeneratedConfigGolden(t *testing.T) {
 			"without model",
 			"",
 			map[string]any{
+				"permissions": []any{map[string]any{"action": "*", "resource": "*", "effect": "allow"}},
 				"mcp": map[string]any{
 					"servers": map[string]any{
 						"inbox": map[string]any{
@@ -124,6 +126,9 @@ func TestWriteConfig(t *testing.T) {
 	}
 	if got.Model != "" {
 		t.Errorf("model = %q, want empty when unset", got.Model)
+	}
+	if len(got.Permissions) != 1 || got.Permissions[0] != (permissionRule{Action: "*", Resource: "*", Effect: "allow"}) {
+		t.Errorf("permissions = %+v, want one allow-all rule (headless runs die on asks)", got.Permissions)
 	}
 }
 

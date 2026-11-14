@@ -126,6 +126,7 @@ func (b *PlannerBrain) writeConfig() (string, error) {
 				OAuth:   false,
 			},
 		}},
+		Permissions: plannerPermissions,
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -159,9 +160,27 @@ type plannerMCPBlock struct {
 	Servers map[string]*plannerRemoteMCPServer `json:"servers"`
 }
 
+// plannerPermissionRule is one opencode V2 permission rule (docs/
+// permissions); plannerPermissions pins allow-all for the headless child.
+type plannerPermissionRule struct {
+	Action   string `json:"action"`
+	Resource string `json:"resource"`
+	Effect   string `json:"effect"`
+}
+
+// plannerPermissions is the planner child's permission policy: a headless
+// `opencode run` has no client to answer an "ask", so any prompt
+// auto-declines and aborts the whole session mid-flight (exit status 1,
+// work already done discarded - observed live). The child already runs
+// with the service user's authority; an explicit allow-all keeps it alive.
+var plannerPermissions = []plannerPermissionRule{
+	{Action: "*", Resource: "*", Effect: "allow"},
+}
+
 type plannerOpenCODEConfig struct {
-	Model string          `json:"model,omitempty"`
-	MCP   plannerMCPBlock `json:"mcp"`
+	Model       string                  `json:"model,omitempty"`
+	MCP         plannerMCPBlock         `json:"mcp"`
+	Permissions []plannerPermissionRule `json:"permissions"`
 }
 
 // withEnvValue returns base with key set to value, replacing any earlier

@@ -124,6 +124,7 @@ func (b *BrainRunner) writeConfig() (string, error) {
 				OAuth:   false,
 			},
 		}},
+		Permissions: brainPermissions,
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -158,8 +159,26 @@ type brainMCPBlock struct {
 }
 
 type brainOpenCODEConfig struct {
-	Model string        `json:"model,omitempty"`
-	MCP   brainMCPBlock `json:"mcp"`
+	Model       string                `json:"model,omitempty"`
+	MCP         brainMCPBlock         `json:"mcp"`
+	Permissions []brainPermissionRule `json:"permissions"`
+}
+
+// brainPermissionRule is one opencode V2 permission rule (docs/
+// permissions); brainPermissions pins allow-all for the headless child.
+type brainPermissionRule struct {
+	Action   string `json:"action"`
+	Resource string `json:"resource"`
+	Effect   string `json:"effect"`
+}
+
+// brainPermissions is the brain child's permission policy: a headless
+// `opencode run` has no client to answer an "ask", so any prompt
+// auto-declines and aborts the whole session mid-flight (exit status 1,
+// work already done discarded). The child already runs with the foreman
+// user's authority; an explicit allow-all keeps it alive.
+var brainPermissions = []brainPermissionRule{
+	{Action: "*", Resource: "*", Effect: "allow"},
 }
 
 // withEnvValue returns base with key set to value, replacing any earlier

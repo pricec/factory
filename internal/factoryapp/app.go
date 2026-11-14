@@ -64,6 +64,7 @@ type App struct {
 	sweeper    *jobs.Sweeper
 	scheduler  *jobs.Scheduler
 	picker     *jobs.RetryPicker
+	pending    *jobs.PendingPicker
 	matcher    *registry.CapabilityMatcher
 	budget     budgets.Config
 	planner    *PlannerBrain
@@ -157,6 +158,7 @@ func New(cfg Config) (*App, error) {
 	a.sweeper = jobs.NewSweeper(a.jobs)
 	a.scheduler = jobs.NewScheduler(a.jobs, matcher)
 	a.picker = jobs.NewRetryPicker(a.jobs)
+	a.pending = jobs.NewPendingPicker(a.jobs, matcher)
 
 	mcpH, err := mcpfactory.Handler(mcpfactory.Config{
 		Auth:    a.auth,
@@ -221,6 +223,7 @@ func (a *App) Run(ctx context.Context) error {
 	run("sweeper", func() error { return a.sweeper.Run(ctx) })
 	run("scheduler", func() error { return a.scheduler.Run(ctx) })
 	run("retry picker", func() error { return a.picker.Run(ctx) })
+	run("pending picker", func() error { return a.pending.Run(ctx) })
 	run("consumer", func() error { a.consumeLoop(ctx); return nil })
 	run("planner", func() error { a.plannerLoop(ctx); return nil })
 	run("dispatch notifier", func() error { a.notifyLoop(ctx); return nil })
