@@ -74,6 +74,17 @@ func route(msgType string) Action {
 	}
 }
 
+// DelegatesToBrain reports whether the v1 rule table (spec §3.3) hands
+// msgType to the brain: job.question, brain.wake, and anything unmatched.
+// The foreman integration uses it to split its consume loop: these
+// envelopes go to the background brain queue (spec §3.3, 2026-11-15
+// amendment) so the hot paths never wait on an LLM session, while
+// everything else routes inline. The rule table stays the single source
+// of truth - this must never disagree with route().
+func DelegatesToBrain(msgType string) bool {
+	return route(msgType) == ActionBrain
+}
+
 func (r *Router) questionSla() time.Duration {
 	if r.QuestionTimeout > 0 {
 		return r.QuestionTimeout

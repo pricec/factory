@@ -317,6 +317,32 @@ func TestRouteTable(t *testing.T) {
 	}
 }
 
+func TestDelegatesToBrain(t *testing.T) {
+	// DelegatesToBrain must agree with the rule table exactly: it is the
+	// consume loop's partition signal (spec §3.3, 2026-11-15 amendment).
+	tests := []struct {
+		msgType string
+		want    bool
+	}{
+		{"job.request", false},
+		{"job.result", false},
+		{"job.event", false},
+		{"job.question", true},
+		{"brain.wake", true},
+		{"chat.message", true},
+		{"anything.else", true},
+		{"", true},
+	}
+	for _, tt := range tests {
+		if got := DelegatesToBrain(tt.msgType); got != tt.want {
+			t.Errorf("DelegatesToBrain(%q) = %v, want %v", tt.msgType, got, tt.want)
+		}
+		if got := route(tt.msgType) == ActionBrain; got != tt.want {
+			t.Errorf("route(%q) disagrees with DelegatesToBrain", tt.msgType)
+		}
+	}
+}
+
 func TestRecordBrainConcurrency(t *testing.T) {
 	brain := NewRecordBrain()
 	var wg sync.WaitGroup

@@ -1,7 +1,7 @@
 // Package foremanapp wires the foreman binary (issue #21): the local inbox,
 // auth, notify, routing, worker harness, and the worker + brain MCP surfaces
 // composed into one HTTP mux plus the background loops (remote inbox client,
-// local inbox consumer, capabilities refresh).
+// local inbox consumer, brain queue drain, capabilities refresh).
 package foremanapp
 
 import (
@@ -87,6 +87,12 @@ type App struct {
 	brain  *BrainRunner
 	poster *Poster
 	client *notify.Client
+	// brainInboxID is the foreman's local durable brain queue (spec §3.3,
+	// 2026-11-15 amendment): the sub-inbox "<inboxID>:brain" on the same
+	// inbox store. Brain-delegated envelopes are enqueued here and acked
+	// from their source by the consume loop; brainQueueLoop drains it one
+	// envelope at a time, so no LLM session ever blocks the hot paths.
+	brainInboxID string
 
 	// workerCtx is the lifetime context of spawned workers. Spawns arrive
 	// on request-scoped contexts (the mcpforeman spawn_worker HTTP handler,
@@ -178,6 +184,10 @@ func New(cfg Config) (*App, error) {
 	if a.paired.InboxID != "" {
 		a.inboxID = a.paired.InboxID
 	}
+	// The brain queue rides the foreman's own inbox id (spec §3.3,
+	// 2026-11-15 amendment) - compute it after the pairing override so a
+	// stored pairing's inbox id wins.
+	a.brainInboxID = a.inboxID + ":brain"
 
 	// Brain credential: a local foreman:{id} credential on the foreman's
 	// own auth store, valid for its own inbox. The factory-paired bearer
@@ -290,16 +300,23 @@ func (a *App) BrainToken() string { return a.brainToken }
 // Brain returns the wired brain runner (test seam: replace its Exec).
 func (a *App) Brain() *BrainRunner { return a.brain }
 
+// BrainInboxID returns the local durable brain queue inbox id
+// ("<inboxID>:brain", spec §3.3 2026-11-15 amendment). Test/integration
+// accessor: the queue is internal - only handleBatch enqueues into it and
+// brainQueueLoop drains it.
+func (a *App) BrainInboxID() string { return a.brainInboxID }
+
 // Run runs the background loops: the remote inbox client, the local inbox
-// consumer, the parent forwarder, and the capabilities refresh (startup
-// push + 60s ticker). It blocks until ctx is done. v1 fails fast: a
-// definitive remote-loop error is logged and the loop ends.
+// consumer, the brain queue drain, the parent forwarder, and the
+// capabilities refresh (startup push + 60s ticker). It blocks until ctx is
+// done. v1 fails fast: a definitive remote-loop error is logged and the
+// loop ends.
 func (a *App) Run(ctx context.Context) error {
 	if err := a.pushCapabilities(ctx); err != nil {
 		log.Printf("foremanapp: initial capabilities push: %v", err)
 	}
 	var wg sync.WaitGroup
-	wg.Add(4)
+	wg.Add(5)
 	go func() {
 		defer wg.Done()
 		if err := a.client.Run(ctx); err != nil && ctx.Err() == nil {
@@ -313,6 +330,10 @@ func (a *App) Run(ctx context.Context) error {
 	go func() {
 		defer wg.Done()
 		a.localLoop(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		a.brainQueueLoop(ctx)
 	}()
 	go func() {
 		defer wg.Done()
@@ -347,12 +368,24 @@ func (a *App) handleRemoteBatch(ctx context.Context, envs []wire.MessageEnvelope
 }
 
 // handleBatch routes each envelope through the rule table (spec §3.3),
-// acks the successfully routed ids, and revokes the worker credential of
+// acks the successfully handled ids, and revokes the worker credential of
 // any terminal job.result observed (spec §7.4 analog: the result IS the
-// terminal signal the foreman sees).
+// terminal signal the foreman sees). Brain-delegated envelopes (spec §3.3,
+// 2026-11-15 amendment) are the exception: they are handed to the local
+// durable brain queue (enqueueBrain) and acked on successful enqueue, so
+// the consume loop - and with it the hot paths job.request -> spawn_worker
+// and job.result -> forward - never waits on an LLM session.
 func (a *App) handleBatch(ctx context.Context, envs []wire.MessageEnvelope, ack func(context.Context, []string) error) error {
 	var ids []string
 	for _, env := range envs {
+		if routing.DelegatesToBrain(env.Type) {
+			if err := a.enqueueBrain(ctx, env); err != nil {
+				log.Printf("foremanapp: brain queue %s %s: %v (not acked; redelivered)", env.Type, env.ID, err)
+				continue
+			}
+			ids = append(ids, env.ID)
+			continue
+		}
 		if err := a.router.Handle(ctx, env); err != nil {
 			log.Printf("foremanapp: route %s %s: %v (not acked; redelivered)", env.Type, env.ID, err)
 			continue
@@ -370,9 +403,87 @@ func (a *App) handleBatch(ctx context.Context, envs []wire.MessageEnvelope, ack 
 	return ack(ctx, ids)
 }
 
+// enqueueBrain durably hands one brain-delegated envelope to the brain
+// queue (spec §3.3, 2026-11-15 amendment): the copy keeps type, job id,
+// sender, and payload verbatim - only the id and ts are re-assigned by the
+// store, exactly like any other inbox post. The caller acks the source
+// copy only when this succeeds; a failure leaves it unacked and
+// redelivered (at-least-once, §4).
+func (a *App) enqueueBrain(ctx context.Context, env wire.MessageEnvelope) error {
+	posted, err := a.inbox.Post(ctx, a.brainInboxID, wire.MessageEnvelope{
+		Type:    env.Type,
+		JobID:   env.JobID,
+		From:    env.From,
+		Payload: env.Payload,
+	})
+	if err != nil {
+		return err
+	}
+	log.Printf("foremanapp: brain queue %s %s queued as %s (async)", env.Type, env.ID, posted.ID)
+	return nil
+}
+
+// brainQueueLoop drains the local durable brain queue one envelope at a
+// time (spec §3.3, 2026-11-15 amendment): each envelope runs a full brain
+// session - bounded by the brain runner's own session timeout - and the
+// ack lands only after the session returns, so a crash mid-session leaves
+// the queue copy unacked and redelivered on restart (at-least-once, no
+// loss). Handling one envelope per Get iteration and acking before the
+// next Get means an in-flight envelope is never re-read within a process:
+// no double-handling. Brain failures are logged inside the router (and
+// reported upstream by any brain-failure wrapper wired as Router.Brain)
+// and never surface as errors here - a poison envelope is consumed, not
+// redelivered forever, so it cannot block later brain work.
+func (a *App) brainQueueLoop(ctx context.Context) {
+	for {
+		envs, err := a.inbox.Get(ctx, a.brainInboxID, 1, 5*time.Second)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("foremanapp: brain queue: get: %v", err)
+			if !sleepCtx(ctx, time.Second) {
+				return
+			}
+			continue
+		}
+		if len(envs) == 0 {
+			continue
+		}
+		env := envs[0]
+		// The full rule table applies, but handleBatch only ever
+		// enqueues brain-delegated types, so this always lands on the
+		// brain action (job.question keeps its 60s SLA there).
+		if err := a.router.Handle(ctx, env); err != nil {
+			// Unreachable for brain-delegated types (the router logs
+			// brain errors and returns nil); kept at-least-once:
+			// leave unacked and retry rather than drop.
+			log.Printf("foremanapp: brain queue: route %s %s: %v (redelivered)", env.Type, env.ID, err)
+			if !sleepCtx(ctx, time.Second) {
+				return
+			}
+			continue
+		}
+		if ctx.Err() != nil {
+			// Shutdown interrupted the session (the router logged the
+			// canceled-session error): leave the copy unacked so the
+			// next start redelivers it - an interrupted session never
+			// consumes its envelope (at-least-once, no loss).
+			log.Printf("foremanapp: brain queue: %s %s interrupted by shutdown (redelivered)", env.Type, env.ID)
+			return
+		}
+		if err := a.inbox.Ack(ctx, a.brainInboxID, []string{env.ID}); err != nil {
+			log.Printf("foremanapp: brain queue: ack %s: %v (redelivered)", env.ID, err)
+		}
+	}
+}
+
 // localLoop drains the foreman's own local inbox via the library API (no
 // HTTP): job.result and job.question posted by in-process workers, plus
-// brain.wake posted locally. Routed envelopes are acked locally.
+// brain.wake posted locally. Hot-path envelopes are routed inline and
+// acked locally; brain-delegated ones are handed to the durable brain
+// queue (handleBatch, spec §3.3 2026-11-15 amendment) so this loop never
+// waits on an LLM session.
 func (a *App) localLoop(ctx context.Context) {
 	for {
 		envs, err := a.inbox.Get(ctx, a.inboxID, 50, 5*time.Second)
