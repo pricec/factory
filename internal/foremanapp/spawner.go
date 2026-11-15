@@ -27,6 +27,15 @@ func (f spawnerFunc) Spawn(ctx context.Context, spec wire.JobSpec) error { retur
 // dispatched JobSpec, and runs the harness in a background goroutine
 // (spec §8): it returns immediately - spawn never blocks. accepted and
 // started job.event envelopes are posted to the factory (spec §6.2).
+//
+// ctx is the CALLER's context (the mcpforeman spawn_worker HTTP request or
+// the inbox consumer loop). It is used only for the synchronous work here;
+// the worker itself runs under a.workerCtx. Deriving the worker's context
+// from ctx killed spawned workers instantly on the spawn_worker path:
+// net/http cancels the MCP request context the moment the tool call
+// returns, the harness's run timeout inherited the cancellation, and the
+// freshly started opencode child was killed while the dispatch had already
+// returned {job_id} - a silent fake success (2026-11-15 bug report).
 func (a *App) SpawnWorker(ctx context.Context, spec wire.JobSpec) error {
 	bearer, err := a.auth.MintWorkerToken(ctx, a.inboxID, spec.ID)
 	if err != nil {
@@ -47,13 +56,7 @@ func (a *App) SpawnWorker(ctx context.Context, spec wire.JobSpec) error {
 
 	hcfg := a.BuildHarnessConfig(spec, bearer)
 	log.Printf("foremanapp: spawning worker for %s (model %q)", spec.ID, hcfg.Model)
-	go func() {
-		if err := workerharness.Run(ctx, hcfg); err != nil {
-			log.Printf("foremanapp: worker %s: %v", spec.ID, err)
-		} else {
-			log.Printf("foremanapp: worker %s: finished", spec.ID)
-		}
-	}()
+	go a.runWorker(spec, hcfg)
 
 	for _, event := range []string{"accepted", "started"} {
 		if err := a.postJobEvent(ctx, spec.ID, event); err != nil {
@@ -61,6 +64,70 @@ func (a *App) SpawnWorker(ctx context.Context, spec wire.JobSpec) error {
 		}
 	}
 	return nil
+}
+
+// runWorker runs the harness for one spawned job under a.workerCtx (never
+// the spawner's request context - see SpawnWorker).
+//
+// It is LOUD on failure: when the harness returns an error while the foreman
+// is still up, a failed job.result is posted into the foreman's own inbox
+// (spec §8.5 fallback analog), which the router forwards to the factory
+// byte-identically - the factory transitions the running job to failed with
+// the spawn error (spec §6.2) and the retry policy re-arms it (spec §6.4).
+// A worker that dies instantly therefore surfaces as a visible job failure,
+// never a silent fake success. The factory applies results
+// terminal-idempotently, so a synthesized report after one the harness
+// itself delivered is ignored as a duplicate. No report is synthesized when
+// the foreman itself is stopping (a.workerCtx done): the App is going away.
+func (a *App) runWorker(spec wire.JobSpec, hcfg workerharness.Config) {
+	if err := workerharness.Run(a.workerCtx, hcfg); err != nil {
+		if a.workerCtx.Err() != nil {
+			log.Printf("foremanapp: worker %s: %v (foreman stopping)", spec.ID, err)
+			return
+		}
+		log.Printf("foremanapp: worker %s: %v", spec.ID, err)
+		a.postSpawnFailure(spec, err)
+		return
+	}
+	log.Printf("foremanapp: worker %s: finished", spec.ID)
+}
+
+// noOutputSummary is the fallback summary when there is nothing to report
+// (spec §8.5, §11 - the workerharness pinned twin).
+const noOutputSummary = "(no output)"
+
+// postSpawnFailure posts a failed job.result for spec into the foreman's
+// own inbox as the worker identity ("worker:{job_id}", the §3.2 sender
+// shape the harness fallback uses): the local loop forwards it to the
+// factory's main inbox, where it is applied like any worker report.
+func (a *App) postSpawnFailure(spec wire.JobSpec, cause error) {
+	res := wire.JobResult{
+		JobID:   spec.ID,
+		Status:  wire.StatusFailed,
+		Summary: noOutputSummary,
+		Error: &wire.JobError{
+			Kind:    wire.KindOther,
+			Message: fmt.Sprintf("spawn failure for %s: %v", spec.ID, cause),
+		},
+	}
+	if err := res.Validate(spec.ResultSchema); err != nil {
+		log.Printf("foremanapp: spawn failure report for %s: invalid: %v", spec.ID, err)
+		return
+	}
+	payload, err := json.Marshal(res)
+	if err != nil {
+		log.Printf("foremanapp: spawn failure report for %s: %v", spec.ID, err)
+		return
+	}
+	env := wire.MessageEnvelope{
+		Type:    "job.result",
+		JobID:   spec.ID,
+		From:    "worker:" + spec.ID,
+		Payload: payload,
+	}
+	if _, err := a.inbox.Post(a.workerCtx, a.inboxID, env); err != nil {
+		log.Printf("foremanapp: spawn failure report for %s: %v", spec.ID, err)
+	}
 }
 
 // postJobEvent posts a job.event envelope {job_id, event} to the factory's

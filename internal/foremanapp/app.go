@@ -88,6 +88,17 @@ type App struct {
 	poster *Poster
 	client *notify.Client
 
+	// workerCtx is the lifetime context of spawned workers. Spawns arrive
+	// on request-scoped contexts (the mcpforeman spawn_worker HTTP handler,
+	// the notify.Client batch handler), and net/http cancels those the
+	// moment the call returns - a worker that inherited one died instantly
+	// on a canceled context while the dispatch looked successful. Workers
+	// run under this context instead; it ends only when the App stops
+	// (Close).
+	workerCtx context.Context
+	// workerCancel ends workerCtx.
+	workerCancel context.CancelFunc
+
 	// BuildHarnessConfig builds the workerharness.Config the spawner runs
 	// for one job. A field so tests can replace the opencode binary and
 	// URLs; the default derives them from cfg (see defaultHarnessConfig).
@@ -139,6 +150,10 @@ func New(cfg Config) (*App, error) {
 	if a.advertise == "" {
 		a.advertise = defaultAdvertiseURL(cfg.Addr)
 	}
+
+	// Worker lifetime context: created in New (a spawn may arrive as soon
+	// as the mux serves) and canceled in Close.
+	a.workerCtx, a.workerCancel = context.WithCancel(context.Background())
 
 	// Stores: open both or none.
 	var err error
@@ -307,8 +322,12 @@ func (a *App) Run(ctx context.Context) error {
 	return nil
 }
 
-// Close closes the local stores.
+// Close stops the App: spawned workers are ended (their lifetime context)
+// and the local stores close.
 func (a *App) Close() error {
+	if a.workerCancel != nil {
+		a.workerCancel()
+	}
 	var errs []error
 	if a.inbox != nil {
 		errs = append(errs, a.inbox.Close())
