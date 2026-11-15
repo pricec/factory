@@ -117,6 +117,26 @@ implementation recording calls; the real LLM brain lands with #18 (#4).
 `spawn_worker` enqueues the JobSpec to the worker harness queue; `forward`
 posts to the parent inbox (#4).
 
+Brain-delegated envelopes (`job.question`, `brain.wake`, anything unmatched)
+never block the foreman's inbox consume loop (2026-11-15 post-incident
+amendment). The consumer hands them to a durable local brain queue - the
+sub-inbox `foreman:{id}:brain` on the foreman's own inbox store (§7.3) - and
+acks the source copy once the enqueue lands; a dedicated drain loop runs one
+brain session at a time and acks each queue copy only after its session
+returns. The hot paths (`job.request` -> `spawn_worker`, `job.result` ->
+forward) therefore never wait on an LLM session, however long the §9.3
+session bound runs. Semantics stay at-least-once (§4): a crash before the
+drain loop acks leaves the queue copy unacked and redelivered on restart (no
+loss); a crash between enqueue and source ack can re-deliver from the source
+and enqueue twice - brain sessions are idempotent-by-judgment, and within a
+single process the one-at-a-time, ack-before-next-Get discipline means an
+in-flight envelope is never re-read, so no double-handling occurs in normal
+operation. A failed or timed-out session is logged by the router and the
+queue advances: a poison envelope is consumed, not redelivered forever, so
+it can never block later brain work. The queue copy carries type, job id,
+sender, and payload verbatim; only its message id and ts are re-assigned by
+the store (like any inbox post), so brain prompts show the queue copy's id.
+
 Summaries flow up, never transcripts - three enforcement points (#7):
 
 1. Worker reports: summary required, 1-240 chars (schema in #3; tool in #17)
@@ -533,6 +553,11 @@ Scope struct: `{inbox, may_read, may_post, job_id?}`.
   factory-side `factory:main` over HTTP and acking locally. Without the
   forwarder the staging copy is a dead end - brain replies never reached
   the factory.
+- The foreman also keeps a LOCAL brain queue sub-inbox
+  `foreman:{id}:brain` (spec §3.3, 2026-11-15 amendment): brain-delegated
+  envelopes are enqueued there by the consume loop and drained by the
+  brain queue loop. It is internal - no token is scoped to it, and
+  nothing outside the foreman process reads or writes it.
 - Worker tokens (resolution of TODO-2; corrected #11): post-only on
   `foreman:{id}` (job.result, job.question) and read-only on the per-job
   inbox `job:{job_id}` (job.answer; the foreman creates it at dispatch).
