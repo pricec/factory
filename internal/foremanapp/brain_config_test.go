@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pricec/factory/internal/models"
 )
@@ -56,5 +57,15 @@ func TestBrainConfig(t *testing.T) {
 	}
 	if strings.Contains(string(data), "brain-secret") {
 		t.Errorf("generated config leaks the bearer at rest:\n%s", data)
+	}
+}
+
+// TestBrainTimeoutBound pins the brain session bound at 30m (2026-11-15
+// operator decision; previously 5m). Guards against an accidental revert
+// to the old 300s constant while keeping the bound finite.
+func TestBrainTimeoutBound(t *testing.T) {
+	t.Parallel()
+	if brainTimeout != 30*time.Minute {
+		t.Errorf("brainTimeout = %v, want 30m (1800s)", brainTimeout)
 	}
 }

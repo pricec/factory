@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pricec/factory/internal/models"
 )
@@ -82,4 +83,15 @@ func TestPlannerConfig(t *testing.T) {
 
 func containsSecret(data, secret string) bool {
 	return len(secret) >= 6 && strings.Contains(data, secret)
+}
+
+// TestPlannerBrainTimeoutBound pins the planner brain session bound at
+// 30m (2026-11-15 operator decision; previously 5m). Guards against an
+// accidental revert to the old 300s constant while keeping the bound
+// finite.
+func TestPlannerBrainTimeoutBound(t *testing.T) {
+	t.Parallel()
+	if plannerBrainTimeout != 30*time.Minute {
+		t.Errorf("plannerBrainTimeout = %v, want 30m (1800s)", plannerBrainTimeout)
+	}
 }

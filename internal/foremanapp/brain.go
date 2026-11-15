@@ -19,8 +19,10 @@ import (
 
 // Brain session constants (spec §9.1, §9.3, §9.4 harness pattern).
 const (
-	// brainTimeout bounds one brain opencode session.
-	brainTimeout = 300 * time.Second
+	// brainTimeout bounds one brain opencode session: 30m, headroom for
+	// long multi-tool foreman-brain turns (2026-11-15 operator decision;
+	// was 300s/5m).
+	brainTimeout = 1800 * time.Second
 	// brainConfigName is the generated opencode config written into
 	// WorkDir (spec §8.4): the V2 project-config name, discovered from
 	// the working directory. The V1-era OPENCODE_CONFIG env var is
@@ -73,7 +75,7 @@ func (b *BrainRunner) Handle(ctx context.Context, env wire.MessageEnvelope) erro
 // config in WorkDir (mcp.servers.foreman -> MCPURL, bearer via
 // {env:FOREMAN_BRAIN_TOKEN}, oauth off, pinned model, allow-all
 // permissions), then runs `opencode run <prompt>` non-interactively in
-// its own process group with a 300s timeout. The child discovers the
+// its own process group with a 30m timeout. The child discovers the
 // config from its working directory (V2 project config; the V1-era
 // OPENCODE_CONFIG env var is ignored by V2).
 func (b *BrainRunner) runOpencode(ctx context.Context, prompt string) (string, error) {

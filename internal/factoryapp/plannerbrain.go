@@ -19,8 +19,10 @@ import (
 
 // Planner brain session constants (spec §9.4 harness pattern, §9.5).
 const (
-	// plannerBrainTimeout bounds one planner opencode session.
-	plannerBrainTimeout = 300 * time.Second
+	// plannerBrainTimeout bounds one planner opencode session: 30m,
+	// headroom for long multi-tool planner turns (2026-11-15 operator
+	// decision; was 300s/5m).
+	plannerBrainTimeout = 1800 * time.Second
 	// plannerConfigName is the generated opencode config written into
 	// WorkDir (spec §8.4). It must be the V2 project-config name
 	// `opencode.json`: V2 discovers config from the working directory,
@@ -78,7 +80,7 @@ func (b *PlannerBrain) Handle(ctx context.Context, reason string, history, envs 
 // config in WorkDir (mcp.servers.factory -> MCPURL, bearer via
 // {env:FACTORY_PLANNER_TOKEN}, oauth off, pinned model, allow-all
 // permissions), then runs `opencode run <prompt>` non-interactively in
-// its own process group with a 300s timeout. The child discovers the
+// its own process group with a 30m timeout. The child discovers the
 // config from its working directory (V2 project config; OPENCODE_CONFIG
 // is ignored by V2). Mirrors foremanapp's BrainRunner (#9.3 pattern).
 func (b *PlannerBrain) runOpencode(ctx context.Context, prompt string) (string, error) {
