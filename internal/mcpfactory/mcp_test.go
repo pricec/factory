@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -269,8 +270,11 @@ func TestToolsListAndBudget(t *testing.T) {
 			t.Errorf("tools/list missing %q", name)
 		}
 	}
-	if budget >= 1536 {
-		t.Errorf("description budget = %d bytes, want < 1536", budget)
+	// Spec §9.1 budget: factory surface < 1.75KB (2026-11-15 amendment -
+	// create_job documents the requires tag-name forms after capability
+	// values parked two jobs pending ~7h).
+	if budget >= 1792 {
+		t.Errorf("description budget = %d bytes, want < 1792", budget)
 	}
 	t.Logf("description budget: %d bytes", budget)
 }
@@ -453,6 +457,115 @@ func TestCreateJobValidation(t *testing.T) {
 				t.Errorf("tool error = %q, want mention of %q", msg, tc.want)
 			}
 		})
+	}
+}
+
+// TestCreateJobRequiresValidation: creation-time requires validation
+// (spec §6.7, 2026-11-15 amendment) - entries are tag names (bare or
+// name:value), never capability values; an entry naming no registered tag
+// key is a tool error and creates nothing, and with no foremen registered
+// creation succeeds with a loud warning.
+func TestCreateJobRequiresValidation(t *testing.T) {
+	e := newEnv(t, budgets.DefaultConfig())
+	ctx := context.Background()
+
+	// No registered tag keys yet (alpha's caps are {}): cannot validate -
+	// create anyway, with a loud warning.
+	sc := structured(t, resultOf(t, e.callTool("create_job", map[string]any{
+		"task":     "needs linux",
+		"requires": []string{"os:linux"},
+	})))
+	jobID, _ := sc["job_id"].(string)
+	if jobID == "" {
+		t.Fatalf("create_job = %v, want a created job", sc)
+	}
+	warn, ok := sc["warnings"].([]any)
+	if !ok || len(warn) == 0 {
+		t.Fatalf("warnings = %v, want a loud warning", sc["warnings"])
+	}
+	if !strings.Contains(fmt.Sprint(warn), "no foremen registered") {
+		t.Errorf("warnings = %v, want the no-foremen warning", warn)
+	}
+
+	// Register the standard fleet tag keys.
+	if err := e.store.UpsertForeman(ctx, "alpha",
+		json.RawMessage(`{"os":"linux","arch":"amd64","tools":"git,docker"}`)); err != nil {
+		t.Fatalf("UpsertForeman: %v", err)
+	}
+
+	// Accept: bare and name:value tag names, no warnings.
+	sc = structured(t, resultOf(t, e.callTool("create_job", map[string]any{
+		"task":     "build the widget",
+		"requires": []string{"os:linux", "tools:git"},
+	})))
+	if sc["state"] != "dispatched" {
+		t.Fatalf("state = %v, want dispatched", sc["state"])
+	}
+	if _, exists := sc["warnings"]; exists {
+		t.Errorf("warnings = %v, want none for validated requires", sc["warnings"])
+	}
+
+	// Reject: capability VALUES are not tag names - the 2026-11-15
+	// incident. Tool error naming the offender and the known keys.
+	msg := toolError(t, "create_job", e.callTool("create_job", map[string]any{
+		"task":     "never matches",
+		"requires": []string{"linux", "amd64"},
+	}))
+	for _, want := range []string{"unknown requires", "linux", "amd64", "os:linux", "arch:amd64", "capability values"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("tool error = %q, want mention of %q", msg, want)
+		}
+	}
+	// Invented tag keys are rejected too.
+	msg = toolError(t, "create_job", e.callTool("create_job", map[string]any{
+		"task":     "never matches",
+		"requires": []string{"quantum"},
+	}))
+	if !strings.Contains(msg, "quantum") {
+		t.Errorf("tool error = %q, want mention of quantum", msg)
+	}
+
+	// The rejected calls created nothing: exactly the two accepted jobs.
+	listed, err := e.store.List(ctx, "", "", 100)
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
+	}
+	if len(listed) != 2 {
+		t.Errorf("jobs after accept+reject = %d, want 2 (rejected calls must not create)", len(listed))
+	}
+}
+
+// TestCreateJobDescription: the tool description must state the requires
+// tag-name semantics so the planner cannot invent capability values (spec
+// §9.4, 2026-11-15 amendment).
+func TestCreateJobDescription(t *testing.T) {
+	e := newEnv(t, budgets.DefaultConfig())
+	_, out := e.rpc(e.planner, "tools/list", nil)
+	var create struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	}
+	found := false
+	for _, tl := range resultOf(t, out)["tools"].([]any) {
+		tm := tl.(map[string]any)
+		if tm["name"] == "create_job" {
+			b, err := json.Marshal(tm)
+			if err != nil {
+				t.Fatalf("marshal tool: %v", err)
+			}
+			if err := json.Unmarshal(b, &create); err != nil {
+				t.Fatalf("unmarshal tool: %v", err)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("tools/list has no create_job")
+	}
+	for _, want := range []string{"tag NAMES", "os:linux", "arch:amd64", "tools:<tool>", "linux", "amd64", "unknown_requires"} {
+		if !strings.Contains(create.Description, want) {
+			t.Errorf("create_job description %q missing %q", create.Description, want)
+		}
 	}
 }
 

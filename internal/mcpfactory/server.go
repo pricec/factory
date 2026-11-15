@@ -56,8 +56,13 @@ func Handler(cfg Config) (http.Handler, error) {
 		Description: "List job summaries: {jobs: [{id, state, summary, usage, over_budget}]}.",
 	}, listJobsTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "create_job",
-		Description: "Create and dispatch a job; schedule_cron also creates a schedule. tier: flash (cheapest, default), default (Flash max-thinking, same price), hardest (strongest); pick the cheapest that works. Refused past the spend cap.",
+		Name: "create_job",
+		Description: "Create and dispatch a job; schedule_cron also creates a schedule. " +
+			"requires entries are capability tag NAMES - accepted forms: os:linux, arch:amd64, " +
+			"tools:<tool>, or a bare tag name (os, arch, tools); NEVER bare values like linux " +
+			"or amd64 (rejected as unknown_requires). " +
+			"tier: flash (cheapest, default), default (Flash max-thinking), hardest (strongest); " +
+			"pick the cheapest that works. Refused past the spend cap.",
 	}, createJobTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "read_result",

@@ -172,6 +172,15 @@ func createJobTool(cfg Config) mcp.ToolHandlerFor[createJobArgs, any] {
 			return nil, nil, err
 		}
 
+		// Creation-time requires validation (spec §6.7, 2026-11-15
+		// amendment): entries must be tag names - bare or name:value -
+		// never capability values; an entry naming no registered tag key
+		// can never match, and the job would park pending silently.
+		warnings, err := cfg.Store.ValidateRequires(ctx, spec.Requires)
+		if err != nil {
+			return nil, nil, err
+		}
+
 		// Ad hoc dispatch via the Matcher (spec §6.7): no matching foreman
 		// leaves the job pending.
 		state, foreman := "pending", ""
@@ -209,11 +218,17 @@ func createJobTool(cfg Config) mcp.ToolHandlerFor[createJobArgs, any] {
 		if foreman != "" {
 			foremanOut = foreman
 		}
-		return structuredResult(map[string]any{
+		out := map[string]any{
 			"job_id":  spec.ID,
 			"state":   state,
 			"foreman": foremanOut,
-		}), nil, nil
+		}
+		// Loud, non-fatal warnings (spec §6.7): e.g. requires could not be
+		// validated because no foremen are registered yet.
+		if len(warnings) > 0 {
+			out["warnings"] = warnings
+		}
+		return structuredResult(out), nil, nil
 	}
 }
 

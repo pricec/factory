@@ -397,6 +397,22 @@ factory planner's list view carries summaries only (#7, #19).
 - `Match(requires []string, foremen)`: online foremen whose tags are a
   superset of `requires` (AND semantics; no negation in v1). Deterministic
   pick: sort by `(running_jobs asc, id asc)`, take first.
+- Requires entry forms (2026-11-15 amendment): an entry is a capability
+  TAG NAME - bare (`os`, `arch`, `tools`, `gpu`) or `name:value`
+  (`os:linux`, `arch:amd64`, `tools:git`), where the tag's value or its
+  comma-separated value list must contain `value`. Capability VALUES
+  (`linux`, `amd64`) are not tag names and never match. `:` separates
+  name from value; tag names must not contain it.
+- Creation-time requires validation (2026-11-15 amendment): the create
+  paths (MCP `create_job`, `POST /v1/jobs`) validate every requires
+  entry's tag name against the union of registered foremen tag keys
+  (offline foremen count - only `online` filters dispatch). Unknown
+  entries are rejected - `unknown_requires`, 400 / MCP tool error - so a
+  job no registered foreman can ever match cannot park pending silently
+  (2026-11-15 incident: requires `["linux", "amd64"]` sat pending ~7h).
+  With no foremen registered the union is empty: creation succeeds but
+  the response carries a loud `warnings` array (the pending picker
+  dispatches when a matching foreman arrives).
 - v1 stub matcher: first online foreman; #12 swaps the real one in and
   deletes the stub (#8, #12).
 - No matching foreman: the job stays `pending`, log once (visible via
@@ -424,7 +440,7 @@ factory planner's list view carries summaries only (#7, #19).
 | Method & path | Notes |
 |---|---|
 | `GET /v1/jobs?state=&foreman=` | filter by state and foreman (#9) |
-| `POST /v1/jobs` | UI twin of the MCP `create_job` tool (§9.4): body `{task, requires[], result_schema, tier, timeout_s, priority, schedule_cron}`; runs the same spend breaker + capability match (no match -> `pending`); `201 + {job_id, state, foreman}` |
+| `POST /v1/jobs` | UI twin of the MCP `create_job` tool (§9.4): body `{task, requires[], result_schema, tier, timeout_s, priority, schedule_cron}`; runs the same spend breaker + capability match (no match -> `pending`); `201 + {job_id, state, foreman}`. `requires` entries are tag names, validated at creation against the union of registered foremen tag keys (§6.7, 2026-11-15 amendment): unknown tag names -> `400 unknown_requires`; a loud `warnings` array rides the 201 when nothing could be validated (no foremen registered) |
 | `POST /v1/foremen/{id}/messages` | UI twin of the MCP `message_foreman` tool (§9.4): body `{type, payload, job_id?}` posted from the planner identity; `201` + envelope. `{id}` accepts the bare foreman id or the full `foreman:{id}` form - both normalize to the same inbox (§7.3), never a double-prefixed one. `payload` is required (any JSON value; `{}` for an empty body); a null/missing payload is `400`. An id matching no registered foreman is `404 unknown_foreman` - posting never opens an inbox no foreman consumes (2026-11-14 amendment) |
 | `GET /v1/jobs/{id}` | (#9) |
 | `GET /v1/foremen` | returns `id, online, capabilities` (#9) |
@@ -689,7 +705,11 @@ Kill the entire process group at `timeout_s`; post a JobResult with
   section (#17, #15).
 - Tool descriptions stay tiny (per-turn token cost for every LLM caller,
   #6); byte budgets asserted by test: worker surface < 1KB total (#17);
-  foreman and factory surfaces < 1.5KB each (#18, #19). Names,
+  foreman surface < 1.5KB (#18); factory surface < 1.75KB (2026-11-15
+  amendment: `create_job` must state the requires tag-name forms -
+  §6.7 - because undocumented semantics let the planner pass capability
+  values as requires, parking two jobs pending for ~7h; worth ~170 bytes
+  per planner turn). Names,
   descriptions, and advertised input/output schemas all count toward the
   budget (2026-11-14 amendment: typed handlers advertise input schemas so
   callers can introspect argument names).
@@ -758,7 +778,15 @@ Tools (exact):
   over_budget}]}` (summaries only, per #7; record-wrapped per the
   `list_foremen` amendment).
 - `create_job(task, requires?, result_schema?, tier?, timeout_s?, priority?,
-  schedule_cron?)` - ad hoc dispatch via the Matcher interface; `tier`
+  schedule_cron?)` - ad hoc dispatch via the Matcher interface; `requires`
+  entries are capability tag names - accepted forms `os:linux`,
+  `arch:amd64`, `tools:<name>`, or a bare tag name (`os`, `arch`,
+  `tools`) - never capability values like `linux`/`amd64`; entries naming
+  no registered foreman tag key are rejected with error
+  `unknown_requires` at creation (2026-11-15 amendment: values parked
+  jobs pending silently for ~7h; the response carries a `warnings` array
+  when requires could not be validated because no foremen are
+  registered). `tier`
   selects the worker's model tier (§5.1, §6.5: flash -> GLM 5.3 Flash,
   the cheapest and the no-tier default; default -> GLM 5.3 Flash max-reasoning;
   hardest ->
@@ -840,8 +868,10 @@ Pinned status codes:
 | `403` | wrong scope (post to foreign inbox; read without `may_read`) | #11 |
 | `409` | duplicate `job.result` for the same `(inbox_id, job_id)`; response carries the original envelope id | #1 |
 | `404` | `POST /v1/foremen/{id}/messages` where `{id}` matches no registered foreman (`unknown_foreman`) | 2026-11-14 amendment |
+| `400` | job creation (`POST /v1/jobs`, MCP `create_job`) whose `requires` entries name no registered foreman tag key (`unknown_requires`) | 2026-11-15 amendment |
 
-Pinned error codes: `spend_cap_exceeded` (#13). Validation rejects anything
+Pinned error codes: `spend_cap_exceeded` (#13), `unknown_foreman`,
+`unknown_requires`. Validation rejects anything
 outside the `result_schema` subset at validation time (#3).
 
 ## 11. Normative constants (quick reference)

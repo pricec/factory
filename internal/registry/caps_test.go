@@ -15,15 +15,25 @@ import (
 
 func TestCapabilitiesHas(t *testing.T) {
 	t.Parallel()
-	caps := Capabilities{"os": "linux", "gpu": ""}
+	caps := Capabilities{"os": "linux", "gpu": "", "tools": "git,docker"}
 	tests := []struct {
 		name string
 		tag  string
 		want bool
 	}{
 		{"present non-empty", "os", true},
-		{"missing", "tools", false},
+		{"missing", "arch", false},
 		{"empty value counts as absent", "gpu", false},
+		{"name:value exact", "os:linux", true},
+		{"name:value mismatch", "os:darwin", false},
+		{"name:value missing tag", "arch:amd64", false},
+		{"name:value over empty-valued tag", "gpu:a100", false},
+		{"name:value comma-list member", "tools:git", true},
+		{"name:value comma-list second member", "tools:docker", true},
+		{"name:value not in comma-list", "tools:rust", false},
+		{"empty value part degrades to bare name", "os:", true},
+		{"empty value part over empty tag", "gpu:", false},
+		{"empty name part", ":linux", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -37,7 +47,7 @@ func TestCapabilitiesHas(t *testing.T) {
 
 func TestCapabilitiesHasAll(t *testing.T) {
 	t.Parallel()
-	caps := Capabilities{"os": "linux", "gpu": "a100"}
+	caps := Capabilities{"os": "linux", "arch": "amd64", "gpu": "a100", "tools": "git,docker"}
 	tests := []struct {
 		name     string
 		caps     Capabilities
@@ -48,8 +58,13 @@ func TestCapabilitiesHasAll(t *testing.T) {
 		{"empty requires matches no-cap foreman", Capabilities{}, []string{}, true},
 		{"nil caps, empty requires", nil, nil, true},
 		{"subset satisfied", caps, []string{"os", "gpu"}, true},
-		{"missing one tag", caps, []string{"os", "tools"}, false},
+		{"missing one tag", caps, []string{"os", "tools", "bigmem"}, false},
 		{"nil caps, non-empty requires", nil, []string{"os"}, false},
+		{"name:value entries satisfied", caps, []string{"os:linux", "arch:amd64", "tools:git"}, true},
+		{"name:value one mismatch", caps, []string{"os:linux", "arch:arm64"}, false},
+		{"name:value missing tag", caps, []string{"os:linux", "bigmem:yes"}, false},
+		{"bare values never match tag keys", caps, []string{"linux", "amd64"}, false},
+		{"nil caps, name:value requires", nil, []string{"os:linux"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
