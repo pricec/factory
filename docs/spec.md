@@ -407,6 +407,20 @@ factory planner's list view carries summaries only (#7, #19).
   delivery rides the dispatch notifier (#20). No match keeps it `pending`
   until a foreman qualifies - jobs are never orphaned by a foreman that
   arrives (or pairs) after creation.
+- Long-pending alert (2026-11-15 amendment): a `pending` job with no
+  matching online foreman for more than 30 minutes (§11) is not left
+  invisible - the 2026-11-15 incident left two jobs pending ~7h before
+  anyone noticed. A periodic check in the factory server (1-minute tick,
+  §11) re-runs the Matcher over the pending set; every job past the
+  threshold that still matches no online foreman posts one `notify.pending`
+  envelope to the operator inbox (§9.5) naming the job id, its requires,
+  and why nothing matched (required tags no foreman advertises, or the
+  tags living only on offline foremen). A pending job that DOES match an
+  online foreman is skipped: the pending picker dispatches it on its next
+  pass, so a job merely queued behind a deliberate hold never alerts.
+  Dedupe is per job per pending episode (process-local, at-least-once like
+  the dispatch notifier #20): one alert until the job leaves `pending`; a
+  deadletter requeue (§6.4) starts a fresh episode and re-alerts.
 - Refresh: `POST /v1/foreman/capabilities` (foreman token) upserts tags and
   bumps `last_seen`.
 
@@ -805,6 +819,16 @@ Envelope types in `planner:main`:
   state, foreman, last_error, over_budget, summary), posted on every
   terminal transition (done/failed/timed_out/dead) to bring completions
   and failures to the operator's attention.
+- `notify.pending` (from `factory`) - long-pending job alert (2026-11-15
+  amendment, §6.7): posted when a job has sat `pending` with no matching
+  online foreman for more than 30 minutes. Payload
+  `{job_id, requires, pending_since, pending_minutes, reason, missing_tags,
+  offline_foremen, foremen_online, foremen_total}`; `reason` states why
+  nothing matched - `no foremen are registered`, `no foreman advertises:
+  <tags>`, `only offline foremen have: <tags>` (with the offending foremen
+  and their `last_seen` in `offline_foremen`), `all foremen are offline`,
+  or `no single online foreman has all required tags`, joined with `; `
+  when several apply. Informational for the human: no planner wake.
 
 Planner loop (internal/factoryapp, twin of the consumer loop): drains
 `planner:main`; `chat.message` wakes one opencode planner session (§9.4
@@ -867,6 +891,7 @@ outside the `result_schema` subset at validation time (#3).
 | Inbox fetch limit | default 50, max 500 | #1 |
 | MCP description budgets | worker < 1KB; foreman < 1.5KB; factory < 1.5KB | #17, #18, #19 |
 | JobSpec defaults | `timeout_s` 300; `priority` 5 (1-9, 9 highest); `budget` `{max_prompt_bytes 32768, max_output_tokens 8192, max_cost_usd 5.0}` | #3 |
+| Long-pending alert | `pending` with no matching online foreman for > 30 min -> one `notify.pending` in `planner:main` (dedupe per job per pending episode); check tick 1 min | 2026-11-15 amendment |
 
 ---
 
