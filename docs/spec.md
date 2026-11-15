@@ -672,6 +672,18 @@ the agent actually sees.
 - Empty stdout: summary is `(no output)` (satisfies the 1-240 rule, #3).
 - Safety net: a second `job.result` for the same `(inbox_id, job_id)` is
   `409` with the original envelope id (#1).
+- Spawn-failure surfacing (2026-11-15 amendment): a spawned worker runs
+  under the foreman's lifetime context, never the spawner's request
+  context - the `spawn_worker` MCP request context is canceled the moment
+  the tool call returns, and a worker inheriting it died instantly while
+  the dispatch looked successful. When the harness errors without
+  delivering a report (and the foreman is still up), the foreman
+  synthesizes a `job.result` (`status=failed`, `error.kind=other`,
+  `summary=(no output)`, sender `worker:{job_id}`) into its own inbox,
+  which routes to the factory like any worker report; the factory applies
+  it terminal-idempotently, so it is ignored if the harness did deliver a
+  report. A worker death can therefore only ever surface as a visible job
+  failure, never a silent fake success.
 
 ### 8.6 Timeout (#5)
 
