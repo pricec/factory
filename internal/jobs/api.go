@@ -8,11 +8,13 @@ import (
 )
 
 // APIHandler exposes the control-plane API (spec §6.9):
-// GET /v1/jobs?state=&foreman=&limit=, GET /v1/jobs/{id}, GET /v1/foremen.
+// GET /v1/jobs?state=&foreman=&limit=, GET /v1/jobs/{id}, GET /v1/foremen,
+// POST /v1/jobs/{id}/cancel.
 func (s *Store) APIHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/jobs", s.handleListJobs)
 	mux.HandleFunc("GET /v1/jobs/{id}", s.handleGetJob)
+	mux.HandleFunc("POST /v1/jobs/{id}/cancel", s.handleCancelJob)
 	mux.HandleFunc("GET /v1/foremen", s.handleForemen)
 	return mux
 }

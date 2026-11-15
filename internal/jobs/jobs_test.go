@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -143,6 +144,11 @@ func TestTransitionTable(t *testing.T) {
 				continue
 			case StateDead:
 				err = s.MarkDead(ctx, spec.ID)
+			case StateCancelled, StateSuperseded:
+				_, err = s.Cancel(ctx, spec.ID, to, "table test")
+				if Terminal(from) && errors.Is(err, ErrTerminal) {
+					err = nil // terminal jobs reject the cancel (spec §6.1)
+				}
 			case StatePending:
 				continue // no method targets pending
 			}
