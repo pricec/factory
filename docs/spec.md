@@ -501,8 +501,12 @@ Onboarding endpoints (#24, #25) - all outside `/v1`:
   existing planner token from the prior unit file.
 - `GET /download/{kind}/{platform}` (#24, #25): serves the {kind} =
   `factory` | `foreman` binary from the factory's `-downloads` dir for
-  `{platform}` = `linux-amd64` | `linux-arm64` (400 otherwise, which is also
-  the traversal gate; 404 when the file is missing). Unauthenticated per the
+  `{platform}` = `{kind}-linux-amd64` | `{kind}-linux-arm64` (i.e. the full
+  servable name `factory-linux-amd64`, `foreman-linux-arm64`, ... - a bare
+  `linux-$GOARCH` platform is rejected with 400; 400 otherwise is also the
+  traversal gate; 404 when the file is missing). The onboarding scripts
+  curl exactly these names
+  (`/download/{kind}/{kind}-linux-$GOARCH`). Unauthenticated per the
   trusted-LAN posture (§7.5).
 
 Bootstrap rule (#25): the first factory in a deployment is installed

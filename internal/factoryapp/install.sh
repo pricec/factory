@@ -42,7 +42,7 @@ esac
 
 mkdir -p /opt/factory
 echo "downloading foreman (linux/$GOARCH) from $FACTORY_URL..."
-curl -fsSL "$FACTORY_URL/download/foreman/linux-$GOARCH" -o /opt/factory/foreman
+curl -fsSL "$FACTORY_URL/download/foreman/foreman-linux-$GOARCH" -o /opt/factory/foreman
 chmod 755 /opt/factory/foreman
 
 if ! id factory-foreman >/dev/null 2>&1; then

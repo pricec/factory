@@ -58,7 +58,7 @@ fi
 
 mkdir -p /opt/factory
 echo "downloading factory (linux/$GOARCH) from $FACTORY_URL..."
-curl -fsSL "$FACTORY_URL/download/factory/linux-$GOARCH" -o /opt/factory/factory
+curl -fsSL "$FACTORY_URL/download/factory/factory-linux-$GOARCH" -o /opt/factory/factory
 chmod 755 /opt/factory/factory
 
 if ! id factory >/dev/null 2>&1; then
@@ -69,7 +69,7 @@ fi
 # workers immediately; StateDirectory recreates /var/lib/factory at boot,
 # but the pre-seed happens before first boot. Non-fatal on failure.
 mkdir -p /var/lib/factory/downloads
-curl -fsSL "$FACTORY_URL/download/foreman/linux-$GOARCH" \
+curl -fsSL "$FACTORY_URL/download/foreman/foreman-linux-$GOARCH" \
 	-o /var/lib/factory/downloads/foreman-linux-$GOARCH ||
 	echo "warn: could not pre-seed foreman binary foreman-linux-$GOARCH (non-fatal; re-run the install script or fetch it manually later)"
 

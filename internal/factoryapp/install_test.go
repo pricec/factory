@@ -286,9 +286,13 @@ func TestInstallServer(t *testing.T) {
 	}
 
 	// Structural pins (spec §7.1, #25): what we ship, asserted verbatim.
+	// The download URLs must use the servable platform names the server's
+	// anchored regexp accepts: {kind}-linux-{arch} (a bare linux-$GOARCH
+	// path 400s - issue "install.sh downloads the foreman binary from the
+	// wrong URL").
 	for _, want := range []string{
-		"/download/factory/linux-$GOARCH",
-		"/download/foreman/linux-",
+		"/download/factory/factory-linux-$GOARCH",
+		"/download/foreman/foreman-linux-",
 		"FACTORY_PLANNER_TOKEN",
 		`sed -n 's/^Environment=FACTORY_PLANNER_TOKEN=\([a-f0-9]\{64\}\)$/\1/p'`,
 		"chmod 600 /etc/systemd/system/factory.service",
@@ -297,6 +301,17 @@ func TestInstallServer(t *testing.T) {
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("rendered script missing %q", want)
+		}
+	}
+
+	// The broken shape (bare linux-$GOARCH platform) must never come back -
+	// the server 400s it (unknown platform), which bricked all onboarding.
+	for _, bad := range []string{
+		"/download/factory/linux-$GOARCH",
+		"/download/foreman/linux-$GOARCH",
+	} {
+		if strings.Contains(script, bad) {
+			t.Fatalf("rendered script still uses unservable download URL %q", bad)
 		}
 	}
 
@@ -364,6 +379,66 @@ func TestDownloadFactoryBinary(t *testing.T) {
 				t.Fatalf("status = 200 for %q", platform)
 			}
 			_, _ = io.Copy(io.Discard, resp.Body)
+		})
+	}
+}
+
+// TestInstallScriptsDownloadServablePlatforms: every download URL rendered
+// into /install.sh and /install-server.sh must name a platform the server
+// actually serves - the same anchored set handleDownload enforces
+// (`^(factory|foreman)-(linux)-(amd64|arm64)$`, spec §7.1). A URL like
+// /download/foreman/linux-$GOARCH is rejected with 400 "unknown platform",
+// which made every fresh onboarding fail at the curl step.
+func TestInstallScriptsDownloadServablePlatforms(t *testing.T) {
+	e := newEnv(t)
+
+	fetch := func(path string) string {
+		t.Helper()
+		req, err := http.NewRequest("GET", e.ts.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+e.a.PlannerToken())
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s status = %d, want 200", path, resp.StatusCode)
+		}
+		b, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+
+	// Same platform set handleDownload serves (install.go downloadPattern).
+	servable := regexp.MustCompile(`^(factory|foreman)-(linux)-(amd64|arm64)$`)
+	// /download/{kind}/{...} URLs as the scripts curl them ($GOARCH still
+	// unexpanded - the shell substitutes amd64|arm64 at runtime).
+	urlRe := regexp.MustCompile(`/download/[a-z]+/[A-Za-z0-9.$_-]+`)
+
+	for _, tc := range []struct {
+		name   string
+		script string
+	}{
+		{"install.sh", fetch("/install.sh")},
+		{"install-server.sh", fetch("/install-server.sh")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seen := 0
+			for _, u := range urlRe.FindAllString(tc.script, -1) {
+				platform := u[strings.LastIndex(u, "/")+1:]
+				if !servable.MatchString(strings.ReplaceAll(platform, "$GOARCH", "amd64")) {
+					t.Fatalf("script curls unservable download URL %q (server serves only {kind}-linux-{amd64,arm64})", u)
+				}
+				seen++
+			}
+			if seen == 0 {
+				t.Fatal("no download URLs found in script")
+			}
 		})
 	}
 }
