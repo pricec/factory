@@ -30,6 +30,7 @@ import (
 	"github.com/pricec/factory/internal/notify"
 	"github.com/pricec/factory/internal/registry"
 	"github.com/pricec/factory/internal/tasks"
+	"github.com/pricec/factory/internal/throttle"
 	"github.com/pricec/factory/internal/wire"
 )
 
@@ -60,6 +61,8 @@ type Config struct {
 	Now func() time.Time
 	// Usage configures the S2 usage-window tracker (observe-only).
 	Usage UsageConfig
+	// Throttle configures the S3 dispatch gate (throttle.go).
+	Throttle ThrottleConfig
 }
 
 // App is the wired factory controller.
@@ -82,6 +85,7 @@ type App struct {
 	handler    http.Handler
 	usage      *usagewin.Tracker
 	usagePoll  *usagewin.Poller // nil unless Usage.Poll
+	gate       *throttle.Gate   // S3 dispatch gate (throttle.go)
 	advertise  string
 	plannerTok string
 	// downloadsDir backs GET /download/foreman/{platform} (#24).
@@ -239,6 +243,7 @@ func New(cfg Config) (*App, error) {
 	}
 	a.initUsage(cfg)
 	a.initTasks()
+	a.initThrottle(cfg)
 	a.handler = buildMux(a, mcpH)
 	return a, nil
 }
@@ -290,6 +295,7 @@ func (a *App) Run(ctx context.Context) error {
 	if a.usagePoll != nil {
 		run("usage poller", func() error { a.usagePoll.Run(ctx); return nil })
 	}
+	run("throttle releaser", func() error { a.releaserLoop(ctx); return nil })
 	run("task reaper", func() error { a.reaper.Run(ctx, taskReapInterval); return nil })
 	wg.Wait()
 	return nil
@@ -379,7 +385,9 @@ func buildMux(a *App, mcpH http.Handler) http.Handler {
 	mux.Handle("/v1/deadletter", a.jobs.DeadLetterHandler())
 	mux.Handle("/v1/deadletter/", a.jobs.DeadLetterHandler())
 	mux.Handle("/v1/spend", a.jobs.SpendHandler())
-	mux.HandleFunc("GET /v1/usage", a.handleUsage) // S2: window state (usage.go)
+	mux.HandleFunc("GET /v1/usage", a.handleUsage)            // S2: window state (usage.go)
+	mux.HandleFunc("GET /v1/throttle", a.handleGetThrottle)   // S3: gate (throttle.go)
+	mux.HandleFunc("POST /v1/throttle", a.handlePostThrottle) // S3: operator override
 	mux.Handle("/v1/mcp/factory", mcpH)
 	return mux
 }

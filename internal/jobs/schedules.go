@@ -274,6 +274,20 @@ func (s *Scheduler) Pump(ctx context.Context) (int, error) {
 		spec := sch.JobTemplate
 		spec.ID = wire.NewJobID()
 		spec.CreatedAt = runAt
+		// Dispatch gate (S3 token throttle): a held scheduled job waits in
+		// the held queue for the releaser instead of dispatching now.
+		if hold, reason := s.store.Admit(ctx, spec, ""); hold {
+			if err := s.store.CreateHeld(ctx, spec, reason); err != nil {
+				return enqueued, err
+			}
+			enqueued++
+			log.Printf("scheduler: job %s held: %s", spec.ID, reason)
+			if _, err := s.store.db.ExecContext(ctx,
+				`UPDATE schedules SET last_run_at = ? WHERE id = ?`, runAt, sch.ID); err != nil {
+				return enqueued, err
+			}
+			continue
+		}
 		if err := s.store.Create(ctx, spec); err != nil {
 			return enqueued, err
 		}

@@ -208,7 +208,8 @@ func (s *Store) ListDead(ctx context.Context, limit int) ([]Job, error) {
 	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, spec, state, foreman_id, attempts,
-		IFNULL(next_attempt_at, ''), IFNULL(last_error, ''), usage, results, over_budget, created_at, updated_at
+		IFNULL(next_attempt_at, ''), IFNULL(last_error, ''), usage, results, over_budget, created_at, updated_at,
+		IFNULL(held_reason, '')
 		FROM jobs WHERE state = ? ORDER BY created_at DESC LIMIT ?`, StateDead, limit)
 	if err != nil {
 		return nil, err
