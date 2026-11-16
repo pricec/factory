@@ -59,6 +59,9 @@ func TestEnvelopeTaskTitle(t *testing.T) {
 		{"error", wire.MessageEnvelope{Payload: json.RawMessage(`{"error":"brain died"}`)}, "brain died"},
 		{"json string", wire.MessageEnvelope{Payload: json.RawMessage(`"plain"`)}, "plain"},
 		{"raw", wire.MessageEnvelope{Payload: json.RawMessage(`{"n":1}`)}, `{"n":1}`},
+		{"stringified object payload", wire.MessageEnvelope{Payload: json.RawMessage(`"{\"text\":\"DEPLOY-18 CLOSED\",\"task_id\":\"task_1\"}"`)}, "DEPLOY-18 CLOSED"},
+		{"stringified object without text keeps the string", wire.MessageEnvelope{Payload: json.RawMessage(`"{\"n\":1}"`)}, `{"n":1}`},
+		{"string that only looks like an object", wire.MessageEnvelope{Payload: json.RawMessage(`"{not json"`)}, "{not json"},
 		{
 			"empty payload falls back to type/sender/job",
 			wire.MessageEnvelope{Type: "foreman.report", From: "foreman:x", JobID: "job_1", Payload: json.RawMessage(`{}`)},

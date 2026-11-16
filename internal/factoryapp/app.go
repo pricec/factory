@@ -348,6 +348,7 @@ func buildMux(a *App, mcpH http.Handler) http.Handler {
 	mux.Handle("/v1/foreman/capabilities", registry.RefreshHandlerWithAdvert(a.refreshAuthz(), a.upsertCaps, registry.NewAdvertiser(a.downloadsDir).Advert))
 	mux.Handle("/v1/jobs", a.jobs.APIHandler())
 	mux.Handle("/v1/jobs/", a.jobs.APIHandler())
+	mux.HandleFunc("GET /v1/jobs/{id}", a.handleGetJob) // + task_id (§9.5.2)
 	mux.Handle("/v1/foremen", a.jobs.APIHandler())
 	mux.Handle("/v1/schedules", a.jobs.SchedulesHandler())
 	mux.Handle("/v1/schedules/", a.jobs.SchedulesHandler())

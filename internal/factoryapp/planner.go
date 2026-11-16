@@ -160,6 +160,10 @@ func (a *App) runTaskWake(ctx context.Context, taskID string, wakers []wire.Mess
 func (a *App) plannerFailed(ctx context.Context, taskID string, err error) {
 	log.Printf("factoryapp: planner: task %s: %v", taskID, err)
 	text := "The planner could not run: " + err.Error() + ". Check the factory service logs (journalctl -u factory)."
+	// P0 alert (S5 glue): the failure note is chat, which the operator may
+	// not be watching; the alert is the loud, never-expiring channel.
+	defer a.raiseSystemAlertForTask(ctx, alertPriorityPlannerFailed,
+		"Planner session failed", err.Error(), "factory:planner", a.knownTask(ctx, taskID))
 	data, _ := json.Marshal(map[string]any{"text": text})
 	if _, perr := a.postToTask(ctx, taskID, wire.MessageEnvelope{
 		Type:    "brain.reply",
@@ -325,4 +329,16 @@ func (a *App) postChat(w http.ResponseWriter, r *http.Request, text, taskID stri
 type chatResponse struct {
 	wire.MessageEnvelope
 	TaskID string `json:"task_id"`
+}
+
+// knownTask returns taskID if the task store knows it, else "" (an alert
+// linked to an unknown task is rejected, and the failure alert must not be).
+func (a *App) knownTask(ctx context.Context, taskID string) string {
+	if taskID == "" || a.tasks == nil {
+		return ""
+	}
+	if _, err := a.tasks.GetTask(ctx, taskID); err != nil {
+		return ""
+	}
+	return taskID
 }

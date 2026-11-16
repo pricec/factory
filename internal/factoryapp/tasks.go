@@ -64,6 +64,19 @@ func payloadText(payload json.RawMessage) string {
 	}
 	var s string
 	if err := json.Unmarshal(payload, &s); err == nil {
+		// An object payload some clients deliver as a JSON string
+		// ("{\"text\":...}"): title from the inner object, not the raw JSON
+		// (deploy-18 follow-up). One level only; plain strings are unchanged.
+		if inner := strings.TrimSpace(s); strings.HasPrefix(inner, "{") && json.Valid([]byte(inner)) {
+			var m map[string]any
+			if json.Unmarshal([]byte(inner), &m) == nil {
+				for _, k := range []string{"text", "title", "summary", "message", "error"} {
+					if v, ok := m[k].(string); ok && strings.TrimSpace(v) != "" {
+						return v
+					}
+				}
+			}
+		}
 		return s
 	}
 	return string(payload)

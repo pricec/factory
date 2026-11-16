@@ -160,6 +160,11 @@ func (a *App) relayToPlanner(ctx context.Context, env wire.MessageEnvelope) {
 		} else {
 			relay.ThreadID = t.ID
 			log.Printf("factoryapp: consumer: unattributed %s from %s (job %q) opened task %s", env.Type, env.From, env.JobID, t.ID)
+			// S5 glue: also a P2 alert linked to the new task.
+			a.raiseSystemAlertForTask(ctx, alertPriorityUnattributed,
+				"Unattributed "+env.Type+": "+t.Title,
+				fmt.Sprintf("%s from %s (job %q) is not linked to any task; opened task %s.", env.Type, env.From, env.JobID, t.ID),
+				"factory:relay", t.ID)
 		}
 	}
 	if _, err := a.inbox.Post(ctx, auth.PlannerMainInbox, relay); err != nil {

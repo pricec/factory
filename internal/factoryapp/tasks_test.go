@@ -433,6 +433,30 @@ func TestRelayStampingAndWakes(t *testing.T) {
 	if th := e.thread(c.TaskID, false); len(th.Task.JobIDs) != 1 || th.Task.JobIDs[0] != created.JobID {
 		t.Errorf("task job_ids = %v", th.Task.JobIDs)
 	}
+	// GET /v1/jobs/{id} echoes the task link (deploy-18 follow-up).
+	var got map[string]any
+	if status := e.do("GET", "/v1/jobs/"+created.JobID, "", nil, &got); status != http.StatusOK {
+		t.Fatalf("get job status = %d", status)
+	}
+	if got["task_id"] != c.TaskID || got["id"] != created.JobID {
+		t.Errorf("GET job = %v, want task_id %q plus the job record", got, c.TaskID)
+	}
+	var unlinked struct {
+		JobID string `json:"job_id"`
+	}
+	if status := e.do("POST", "/v1/jobs", "", map[string]any{"task": "no task"}, &unlinked); status != http.StatusCreated {
+		t.Fatalf("create unlinked status = %d", status)
+	}
+	got = nil
+	if status := e.do("GET", "/v1/jobs/"+unlinked.JobID, "", nil, &got); status != http.StatusOK {
+		t.Fatalf("get unlinked job status = %d", status)
+	}
+	if _, has := got["task_id"]; has {
+		t.Errorf("unlinked job carries task_id: %v", got)
+	}
+	if status := e.do("GET", "/v1/jobs/job_nope", "", nil, &errResp); status != http.StatusNotFound {
+		t.Errorf("unknown job = %d, want 404", status)
+	}
 
 	post := func(typ, jobID string, payload any) {
 		t.Helper()
