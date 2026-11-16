@@ -123,13 +123,18 @@ func listJobsTool(cfg Config) mcp.ToolHandlerFor[listJobsArgs, any] {
 			if len(j.Usage) > 0 {
 				usage = j.Usage
 			}
-			out = append(out, map[string]any{
+			row := map[string]any{
 				"id":          j.ID,
 				"state":       j.State,
 				"summary":     lastSummary(j.Results),
 				"usage":       usage,
 				"over_budget": j.OverBudget,
-			})
+			}
+			// S3 dispatch gate: a held job says why it waits.
+			if j.HeldReason != "" {
+				row["held_reason"] = j.HeldReason
+			}
+			out = append(out, row)
 		}
 		// Record-wrapped ({"jobs": [...]}): MCP structured content is an
 		// object - a bare array is rejected by client harnesses.
@@ -242,7 +247,16 @@ func createJobTool(cfg Config) mcp.ToolHandlerFor[createJobArgs, any] {
 				}
 			}
 		}
-		if err := cfg.Store.Create(ctx, spec); err != nil {
+		// Dispatch gate (S3 token throttle, spec §6.10): a held job is
+		// created at once in state held - the id is returned now and the
+		// releaser dispatches it when usage allows.
+		hold, heldReason := cfg.Store.Admit(ctx, spec, taskID)
+		if hold {
+			state, foreman = jobs.StateHeld, ""
+			if err := cfg.Store.CreateHeld(ctx, spec, heldReason); err != nil {
+				return nil, nil, err
+			}
+		} else if err := cfg.Store.Create(ctx, spec); err != nil {
 			return nil, nil, err
 		}
 		// Link before dispatch: the job's first report must already
@@ -281,6 +295,9 @@ func createJobTool(cfg Config) mcp.ToolHandlerFor[createJobArgs, any] {
 		}
 		if taskID != "" {
 			out["task_id"] = taskID
+		}
+		if hold {
+			out["held_reason"] = heldReason
 		}
 		// Loud, non-fatal warnings (spec §6.7): e.g. requires could not be
 		// validated because no foremen are registered yet.
