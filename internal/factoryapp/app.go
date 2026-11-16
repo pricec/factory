@@ -185,10 +185,12 @@ func New(cfg Config) (*App, error) {
 		return nil, fmt.Errorf("factoryapp: planner MCP: %w", err)
 	}
 
-	// Conversational planner (spec §9.5): one-shot opencode sessions over
+	// Conversational planner (spec §9.5): one-shot CLI sessions over
 	// the planner MCP surface, woken by the planner loop on chat.message
-	// envelopes in the operator inbox. Model: FACTORY_PLANNER_MODEL
-	// overrides the pinned GLM tiering default (spec §6.5). The MCP URL
+	// envelopes in the operator inbox. The runner routes on the session
+	// model (spec §9.4, the §8.4 twin): claude-* models run the Claude
+	// Code CLI, everything else opencode. Model: FACTORY_PLANNER_MODEL
+	// overrides the pinned claude default (spec §6.5). The MCP URL
 	// is loopback, not the advertised URL: the child runs on this very
 	// host, and the MCP SDK's streamable-HTTP server rejects non-loopback
 	// Host headers (DNS-rebinding protection) - the advertised hostname
@@ -211,7 +213,7 @@ func (a *App) Handler() http.Handler { return a.handler }
 func (a *App) PlannerToken() string { return a.plannerTok }
 
 // SetPlannerExec is a test seam: it replaces the planner brain's session
-// runner so no test ever invokes a real opencode (the BrainRunner.Exec
+// runner so no test ever invokes a real child CLI (the BrainRunner.Exec
 // pattern of foremanapp, #9.3).
 func (a *App) SetPlannerExec(fn func(ctx context.Context, prompt string) (string, error)) {
 	a.planner.Exec = fn

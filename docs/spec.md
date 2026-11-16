@@ -416,15 +416,25 @@ env-overridable, and swapping a role's model stays a config change only:
 
 | Role | Pinned default | Env override |
 | --- | --- | --- |
-| factory planner | `openrouter/z-ai/glm-5.3` | `FACTORY_PLANNER_MODEL` |
+| factory planner | `claude-opus-5-5` (Claude Code CLI) | `FACTORY_PLANNER_MODEL` |
 | foreman brain | `openrouter/z-ai/glm-5.3` | `FACTORY_FOREMAN_BRAIN_MODEL` |
 | worker, `tier: "flash"` (and no-tier jobs) | `openrouter/z-ai/glm-5.3-flash` | `FACTORY_WORKER_FLASH_MODEL` |
 | worker, `tier: "default"` | `openrouter/z-ai/glm-5.3-flash#max` | `FACTORY_WORKER_MODEL` |
 | worker, `tier: "hardest"` | `openrouter/z-ai/glm-5.3` | `FACTORY_WORKER_HARDEST_MODEL` |
 
-The coordinator - factory planner and foreman brain - runs full GLM 5.3
-(#32): coordination is the factory's judgment layer, and its sessions
-are output-light, so the output price barely comes into play. The worker
+The coordinator - factory planner and foreman brain - runs full-strength
+models, coordination is the factory's judgment layer, and its sessions
+are output-light, so the output price barely comes into play. The
+factory planner runs Claude Opus 5.5 via the Claude Code CLI
+(2026-11-16 planner-claude amendment: Claude Code's default model for
+long-running agentic work, $4/$20 per M tokens in/out, exact snapshot id
+- the floating `opus` alias is accepted on overrides but never pinned;
+the Anthropic CLI's own auth is a second credential path alongside the
+OpenRouter key); the foreman brain stays on full GLM 5.3 (#32) until
+its own claude routing. The planner's runner follows its model
+(§9.4): a claude-* model runs the Claude Code CLI, everything else
+opencode - so an env override back to a GLM string also flips the
+runner back, no restart. The worker
 ladder is one GLM 5.3 generation across two price points (#30, #31):
 Flash (~$0.04/$0.08 per M tokens; the `default` tier is the same model
 at max reasoning effort - same token prices, the only extra spend is the
@@ -442,7 +452,9 @@ cheapest tier that can do the job - flash for routine work, escalate to
 flash#max or full GLM 5.3 only when the task needs it. A job that carries no
 tier runs flash (the cost-biased default). The tier rides JobSpec (§5.1)
 through `create_job`, `POST /v1/jobs`, schedules, and the job create UI.
-Model strings are injected via the generated child config (§8.4).
+Model strings reach the child via the generated config or its runner
+flags (§8.4; §9.4 for the planner's claude runner, where the model rides
+`--model`).
 
 Claude runner override (2026-11-16 amendment): a tier may also be pointed
 at a claude model through the SAME env override (`FACTORY_WORKER_*_MODEL`
@@ -615,9 +627,10 @@ Onboarding endpoints (#24, #25) - all outside `/v1`:
   restarts the service; it is idempotent, and a reinstall preserves the
   existing planner token from the prior unit file. It also installs BOTH
   worker CLIs exactly like `/install.sh` (2026-11-16 amendment, §8.4):
-  the factory machine itself runs the planner brain via opencode, and a
-  foreman onboarded here needs opencode plus the Claude Code CLI for its
-  spawned workers.
+  the factory machine itself runs the planner brain - routed on its
+  model per §9.4 (2026-11-16 planner-claude amendment: the pinned
+  default runs the Claude Code CLI) - and a foreman onboarded here needs
+  opencode plus the Claude Code CLI for its spawned workers.
 - `GET /download/{kind}/{platform}` (#24, #25): serves the {kind} =
   `factory` | `foreman` binary from the factory's `-downloads` dir for
   `{platform}` = `{kind}-linux-amd64` | `{kind}-linux-arm64` (i.e. the full
@@ -801,7 +814,9 @@ sentence stay byte-identical across runners.
   message - consistent with the §8.5 spawn-failure surfacing.
 - Config discovery (#28): the generated config is written to the V2
   project-config path `opencode.json` IN THE CHILD'S WORKING DIRECTORY
-  (worker: the per-job dir; planner/foreman brain: their WorkDir). V2
+  (worker: the per-job dir; foreman brain: its WorkDir; planner: its
+  WorkDir when routed to the opencode runner - a claude-runner planner
+  session writes §9.4's claude-mcp.json instead). V2
   opencode discovers `opencode.json` from the working directory - the
   V1-era `OPENCODE_CONFIG` env var (and the `.opencode.json` dotfile name)
   are IGNORED by V2 (upstream regression, umbrella issue #36990), and
@@ -913,8 +928,11 @@ Kill the entire process group at `timeout_s`; post a JobResult with
   budget (2026-11-14 amendment: typed handlers advertise input schemas so
   callers can introspect argument names).
 - LLM sessions (worker agent, foreman brain, factory planner) all reuse the
-  #5 opencode harness pattern (`OPENCODE_CONFIG` + generated config),
-  differing in MCP URL + prompt (#5, #18, #19).
+  #5 harness pattern - a generated per-child config plus one
+  non-interactive CLI session, differing in MCP URL + prompt (#5, #18,
+  #19). The child CLI routes on the pinned model: workers per §8.4
+  (claude-* ids via the Claude Code CLI, else opencode), the factory
+  planner per §9.4.
 - Decision (append-only, #17): implemented with
   `github.com/modelcontextprotocol/go-sdk` v1.8.0 (streamable-HTTP server,
   stateless + JSONResponse modes, bearer auth as wrapping middleware);
@@ -1072,7 +1090,66 @@ validation failures are tool errors. Advertised schemas count toward the
 instead of `payload` was silently dropped and dead-ended two operator
 feature requests in an inbox no consumer drains.
 
-Planner session mechanics: same opencode harness pattern as #5 (#19).
+Planner session mechanics: the #5 harness pattern (#19) with runner
+routing (2026-11-16 planner-claude amendment, the §8.4 worker twin):
+
+- Runner routing: the session model routes the child CLI - the §8.4
+  semantics exactly. A bare `claude-*` model id (or the bare `claude`
+  alias), optionally behind the `anthropic/` provider prefix, runs via
+  the Claude Code CLI in non-interactive mode (below); everything else
+  - including OpenRouter-hosted claude models (`openrouter/...`: the
+  OpenRouter key's credential path, not the Anthropic CLI's own auth) -
+  runs via opencode (§8.4: `opencode.json` in the planner WorkDir,
+  `--standalone`, `-m`, allow-all permissions, unchanged). The session
+  model resolves per session: `FACTORY_PLANNER_MODEL` > the §6.5 pinned
+  default (`claude-opus-5-5`), so the factory planner runs on the
+  claude runner out of the box and an env override to a non-claude
+  string flips the runner back without a restart.
+- Claude Code invocation (flags per §8.4, verified against the
+  installed CLI, 2.1.325): `claude -p [--model <model>] --mcp-config
+  <claude-mcp.json> --strict-mcp-config --permission-mode
+  bypassPermissions --no-session-persistence "<prompt>"` - the same
+  planner WorkDir, wake prompt (§9.5), 30m session bound, child env
+  (`FACTORY_PLANNER_TOKEN` guaranteed), and loopback MCP endpoint
+  (§9.5) as the opencode runner. The prompt is the FINAL positional
+  argument - `--mcp-config` is variadic and would otherwise swallow it
+  (observed live). The `anthropic/` prefix is stripped for `--model`
+  (the CLI takes bare ids and aliases); the pinned default is an exact
+  snapshot id, never the floating `opus` alias.
+- Claude Code generated config: the MCP injection lands at
+  `<WorkDir>/claude-mcp.json`, passed explicitly via `--mcp-config`
+  (never name-discovered; a non-`.mcp.json` name also keeps claude's
+  project scan from double-loading it), written 0600 before every run:
+
+```json
+{
+  "mcpServers": {
+    "factory": {
+      "type": "http",
+      "url": "FACTORY_PLANNER_MCP_URL",
+      "headers": { "Authorization": "Bearer ${FACTORY_PLANNER_TOKEN}" }
+    }
+  }
+}
+```
+
+  The server name `factory` is what Claude Code prefixes its tools
+  with (`mcp__<server>__<tool>`), so the §9.4 surface arrives as
+  `mcp__factory__create_job`, `mcp__factory__notify_operator`, and
+  friends - the opencode runner exposes the same tools as
+  `factory_<tool>` under its `<server>_<tool>` naming (§9.2).
+  `type: "http"` is Claude Code's streamable-HTTP transport (the
+  opencode `remote` analog). The token is referenced via Claude Code's
+  `${VAR}` env expansion (evaluated against the child env) so the
+  secret never lands in the file at rest. There is no generated model
+  field (the model rides `--model`) and no permissions block (the
+  headless policy rides `--permission-mode`).
+- Loud failures: Claude Code reports in-run failures - missing auth
+  among them - as the result on stdout with empty stderr and a
+  non-zero exit (observed live on 2.1.325), so the session error
+  surfaced to the operator (§9.5 brain.reply note) falls back to
+  stdout when stderr is empty; an unauthenticated claude planner
+  therefore names the auth error instead of failing silently.
 
 ### 9.5 Conversational surface: the operator inbox
 
@@ -1103,9 +1180,10 @@ Envelope types in `planner:main`:
   when several apply. Informational for the human: no planner wake.
 
 Planner loop (internal/factoryapp, twin of the consumer loop): drains
-`planner:main`; `chat.message` wakes one opencode planner session (§9.4
+`planner:main`; `chat.message` wakes one planner session (§9.4
 surface, planner bearer, model via `FACTORY_PLANNER_MODEL`, default
-per §6.5) with the recent
+per §6.5; the child CLI routes on that model - the Claude Code CLI for
+claude-* ids, opencode otherwise, §9.4) with the recent
 inbox history replayed into the prompt (per-payload 2KB caps, §6.6);
 everything else is informational and acked without a wake. A failed session
 posts a `brain.reply` error note so the operator is never left waiting.

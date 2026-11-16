@@ -66,9 +66,12 @@ if ! id factory >/dev/null 2>&1; then
 fi
 
 # Worker CLIs (spec §8.4, §7.1), same contract as install.sh: a factory
-# machine runs the planner brain via opencode (spec §8.4), and a foreman
-# onboarded here needs opencode (the pinned GLM tiers) plus the Claude Code
-# CLI (claude-* worker models) for its spawned workers. systemd runs the
+# machine runs the planner brain - routed on its model per spec §9.4
+# (2026-11-16 planner-claude amendment: the pinned default runs the
+# Claude Code CLI; a FACTORY_PLANNER_MODEL override can route back to
+# opencode) - and a foreman onboarded here needs opencode (the pinned
+# GLM tiers) plus the Claude Code CLI (claude-* worker models) for its
+# spawned workers. systemd runs the
 # unit with the DEFAULT service PATH below - the service user's
 # ~/.local/bin and ~/.opencode/bin are NOT on it (the 2026-11-15 user-unit
 # PATH gotcha) - so each CLI is installed as the service user (its

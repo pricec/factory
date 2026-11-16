@@ -19,9 +19,9 @@ import (
 
 // Planner brain session constants (spec §9.4 harness pattern, §9.5).
 const (
-	// plannerBrainTimeout bounds one planner opencode session: 30m,
-	// headroom for long multi-tool planner turns (2026-11-15 operator
-	// decision; was 300s/5m).
+	// plannerBrainTimeout bounds one planner session (either runner):
+	// 30m, headroom for long multi-tool planner turns (2026-11-15
+	// operator decision; was 300s/5m).
 	plannerBrainTimeout = 1800 * time.Second
 	// plannerConfigName is the generated opencode config written into
 	// WorkDir (spec §8.4). It must be the V2 project-config name
@@ -29,23 +29,38 @@ const (
 	// and the V1-era OPENCODE_CONFIG env var is ignored by V2 (upstream
 	// regression, umbrella issue #36990) - pointing the child at a temp
 	// file silently lost MCP injection, permissions, and the model pin.
+	// Written only by opencode-runner sessions (§9.4 runner routing).
 	plannerConfigName = "opencode.json"
+	// plannerClaudeConfigName is the generated Claude Code MCP config
+	// written into WorkDir (spec §9.4). It is passed to the child
+	// explicitly via --mcp-config, so the name is never discovered by
+	// claude's project scan; a non-`.mcp.json` name additionally keeps
+	// that scan from ever double-loading it (the workerharness
+	// claude-mcp.json twin).
+	plannerClaudeConfigName = "claude-mcp.json"
 	// envPlannerToken carries the planner bearer into the child so the
-	// generated config can reference it via {env:FACTORY_PLANNER_TOKEN}
-	// without the secret landing in the file at rest.
+	// generated config can reference it without the secret landing in
+	// the file at rest: {env:FACTORY_PLANNER_TOKEN} on the opencode
+	// runner, ${FACTORY_PLANNER_TOKEN} on the claude runner.
 	envPlannerToken = "FACTORY_PLANNER_TOKEN"
 )
 
-// PlannerBrain runs one-shot factory-planner LLM sessions (spec §9.5): an
-// opencode child configured with the factory's own MCP surface
+// PlannerBrain runs one-shot factory-planner LLM sessions (spec §9.5):
+// a CLI child configured with the factory's own MCP surface
 // (/v1/mcp/factory, planner bearer), woken with a prompt built from the
-// operator inbox history (spec §6.6: per-payload 2KB caps). The agent drives
-// the factory with the MCP tools (create_job, list_jobs, read_result,
-// message_foreman, list_foremen) and replies to the operator with
-// notify_operator. It implements routing.Brain semantics for planner:main.
+// operator inbox history (spec §6.6: per-payload 2KB caps). The runner
+// routes on the session model (spec §9.4, the §8.4 worker twin): a
+// claude-* model runs the Claude Code CLI, everything else opencode.
+// The agent drives the factory with the MCP tools (create_job,
+// list_jobs, read_result, message_foreman, list_foremen) and replies to
+// the operator with notify_operator. It implements routing.Brain
+// semantics for planner:main.
 type PlannerBrain struct {
-	// Model is the opencode model string; "" -> opencode default.
+	// Model is the child CLI model string; "" -> the CLI's default.
 	Model string
+	// ClaudeBin is the Claude Code CLI binary; "" means "claude" on
+	// PATH. Used only by sessions routed to the claude runner (§9.4).
+	ClaudeBin string
 	// MCPURL is the factory planner MCP endpoint (/v1/mcp/factory).
 	MCPURL string
 	// Bearer is the factory planner token.
@@ -53,8 +68,8 @@ type PlannerBrain struct {
 	// WorkDir is where the generated config temp file lives.
 	WorkDir string
 	// Exec runs one brain session for a prompt and returns its stdout.
-	// nil means the real opencode child. Tests replace it with a
-	// recorder; no test ever invokes a real opencode.
+	// nil means the real child CLI (routed on the session model, §9.4).
+	// Tests replace it with a recorder; no test ever invokes a real CLI.
 	Exec func(ctx context.Context, prompt string) (string, error)
 }
 
@@ -66,7 +81,11 @@ func (b *PlannerBrain) Handle(ctx context.Context, reason string, history, envs 
 	prompt := llmctx.BuildWakePrompt(reason, append(history, envs...))
 	exec := b.Exec
 	if exec == nil {
-		exec = b.runOpencode
+		if isClaudeModel(b.Model) {
+			exec = b.runClaude
+		} else {
+			exec = b.runOpencode
+		}
 	}
 	stdout, err := exec(ctx, prompt)
 	if err != nil {
@@ -76,7 +95,8 @@ func (b *PlannerBrain) Handle(ctx context.Context, reason string, history, envs 
 	return nil
 }
 
-// runOpencode is the default Exec: it regenerates the opencode project
+// runOpencode is the opencode-runner Exec (the non-claude route, spec
+// §9.4): it regenerates the opencode project
 // config in WorkDir (mcp.servers.factory -> MCPURL, bearer via
 // {env:FACTORY_PLANNER_TOKEN}, oauth off, pinned model, allow-all
 // permissions), then runs `opencode run <prompt>` non-interactively in
@@ -125,10 +145,109 @@ func (b *PlannerBrain) runOpencode(ctx context.Context, prompt string) (string, 
 	return stdout.String(), nil
 }
 
+// isClaudeModel reports whether the planner session model routes to the
+// Claude Code CLI (spec §9.4, the §8.4 worker routing twin): bare
+// `claude-*` ids (or the bare `claude` alias), optionally behind the
+// `anthropic/` provider prefix. OpenRouter-hosted claude models
+// (`openrouter/anthropic/claude-...`) stay on opencode - a different
+// credential path (the OpenRouter key), not the Anthropic CLI's own
+// auth.
+func isClaudeModel(model string) bool {
+	m := strings.TrimPrefix(model, "anthropic/")
+	return m == "claude" || strings.HasPrefix(m, "claude-")
+}
+
+// claudeModelArg maps the session model onto the `claude --model` flag
+// value: the Anthropic CLI takes bare model ids and aliases, so the
+// `anthropic/` provider prefix (accepted on the model string for
+// uniformity with the opencode shape) is stripped. The rest passes
+// through verbatim - operators pin exact claude ids or aliases.
+func claudeModelArg(model string) string {
+	return strings.TrimPrefix(model, "anthropic/")
+}
+
+// claudeArgs builds the claude-runner argument vector (spec §9.4): -p,
+// the pinned model on --model (omitted when unset - the CLI default),
+// the generated config via --mcp-config plus the isolation, permission,
+// and persistence flags, and the prompt as the FINAL argument -
+// --mcp-config is variadic and would otherwise swallow it.
+func claudeArgs(model, configPath, prompt string) []string {
+	args := []string{"-p"}
+	if model != "" {
+		args = append(args, "--model", claudeModelArg(model))
+	}
+	return append(args,
+		"--mcp-config", configPath,
+		"--strict-mcp-config",
+		"--permission-mode", "bypassPermissions",
+		"--no-session-persistence",
+		prompt,
+	)
+}
+
+// runClaude is the claude-runner Exec (spec §9.4, 2026-11-16
+// planner-claude amendment): it regenerates the Claude Code MCP config
+// in WorkDir (mcpServers.factory -> MCPURL, bearer via
+// ${FACTORY_PLANNER_TOKEN}), then runs the Claude Code CLI
+// non-interactively in its own process group under the 30m planner
+// bound. Flag semantics (verified against the installed CLI, 2.1.325):
+// -p is the non-interactive mode; --strict-mcp-config makes the
+// generated config the ONLY MCP source (the isolation analog of
+// opencode --standalone); --permission-mode bypassPermissions is the
+// headless analog of the opencode allow-all permissions (a headless
+// run has no one to answer a permission prompt); --no-session-persistence
+// keeps the one-shot planner from persisting sessions. The model rides
+// --model, never a config field. The ${FACTORY_PLANNER_TOKEN} header
+// expansion happens in the child against cmd.Env - the bearer never
+// lands in the file at rest.
+func (b *PlannerBrain) runClaude(ctx context.Context, prompt string) (string, error) {
+	configPath, err := b.writeClaudeConfig()
+	if err != nil {
+		return "", err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, plannerBrainTimeout)
+	defer cancel()
+	// CommandContext (not Command): cmd.Cancel below requires it.
+	bin := b.ClaudeBin
+	if bin == "" {
+		bin = "claude"
+	}
+	cmd := exec.CommandContext(ctx, bin, claudeArgs(b.Model, configPath, prompt)...)
+	cmd.Dir = b.WorkDir
+	cmd.Env = withEnvValue(os.Environ(), envPlannerToken, b.Bearer)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return stdout.String(), fmt.Errorf("planner session exceeded %s", plannerBrainTimeout)
+		}
+		if detail := snippet(stderr.String()); detail != "" {
+			return stdout.String(), fmt.Errorf("claude run: %w; stderr: %s", err, detail)
+		}
+		// Claude Code reports in-run failures - missing auth among
+		// them - as the result on stdout with empty stderr and a
+		// non-zero exit (observed live on 2.1.325), so the error text
+		// falls back to stdout there (the §8.5 claude-runner
+		// semantics).
+		return stdout.String(), fmt.Errorf("claude run: %w; stdout: %s", err, snippet(stdout.String()))
+	}
+	return stdout.String(), nil
+}
+
 // writeConfig regenerates the opencode project config at
 // WorkDir/opencode.json, 0600 (the §8.4 pattern; foremanapp.BrainRunner
 // twin). The file persists across runs - each run rewrites it, so the
-// child always starts from the freshly generated config.
+// child always starts from the freshly generated config. Written only
+// by opencode-runner sessions (§9.4 runner routing).
 func (b *PlannerBrain) writeConfig() (string, error) {
 	if err := os.MkdirAll(b.WorkDir, 0o755); err != nil {
 		return "", fmt.Errorf("planner work dir: %w", err)
@@ -146,6 +265,35 @@ func (b *PlannerBrain) writeConfig() (string, error) {
 		}},
 		Permissions: plannerPermissions,
 	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	data = append(data, '\n')
+	return path, os.WriteFile(path, data, 0o600)
+}
+
+// writeClaudeConfig regenerates the Claude Code MCP config at
+// WorkDir/claude-mcp.json, 0600 (spec §9.4; the workerharness
+// claude-mcp.json twin). The file persists across runs - each run
+// rewrites it. It carries only the MCP injection: the model rides
+// --model and the headless permission policy rides --permission-mode
+// (the analog of the opencode runner's generated allow-all block).
+func (b *PlannerBrain) writeClaudeConfig() (string, error) {
+	if err := os.MkdirAll(b.WorkDir, 0o755); err != nil {
+		return "", fmt.Errorf("planner work dir: %w", err)
+	}
+	path := filepath.Join(b.WorkDir, plannerClaudeConfigName)
+	cfg := plannerClaudeConfig{MCPServers: map[string]plannerClaudeHTTPMCPServer{
+		// Server name "factory": Claude Code exposes an MCP server's
+		// tools as `mcp__<server>__<tool>`, so the §9.4 surface
+		// arrives as mcp__factory__create_job and friends.
+		"factory": {
+			Type:    "http",
+			URL:     b.MCPURL,
+			Headers: map[string]string{"Authorization": "Bearer ${" + envPlannerToken + "}"},
+		},
+	}}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return "", err
@@ -188,6 +336,26 @@ type plannerOpenCODEConfig struct {
 	Model       string                  `json:"model,omitempty"`
 	MCP         plannerMCPBlock         `json:"mcp"`
 	Permissions []plannerPermissionRule `json:"permissions"`
+}
+
+// plannerClaudeHTTPMCPServer is one generated Claude Code MCP server
+// entry (spec §9.4; the workerharness claudeconfig twin): type "http"
+// is the streamable-HTTP transport (the opencode "remote" analog) and
+// headers ride the server.
+type plannerClaudeHTTPMCPServer struct {
+	Type    string            `json:"type"`
+	URL     string            `json:"url"`
+	Headers map[string]string `json:"headers"`
+}
+
+// plannerClaudeConfig is the generated Claude Code config (spec §9.4).
+// It carries only the MCP injection: the token is referenced via
+// Claude Code's ${VAR} env expansion (the opencode runner's
+// {env:...} twin) so the secret never lands in the file at rest; no
+// model field (the model rides --model) and no permissions block (the
+// headless permission policy rides --permission-mode).
+type plannerClaudeConfig struct {
+	MCPServers map[string]plannerClaudeHTTPMCPServer `json:"mcpServers"`
 }
 
 // withEnvValue returns base with key set to value, replacing any earlier
