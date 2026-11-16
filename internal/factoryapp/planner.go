@@ -28,12 +28,13 @@ const (
 )
 
 // plannerLoop drains the operator inbox (planner:main, spec §9.5):
-// chat.message envelopes from the conversational UI and foreman reports
-// (foreman.report, brain.failed, relayed from factory:main) wake the LLM
-// planner - ONE session per touched task, in parallel across tasks,
-// serialized and coalesced within a task (spec §9.5.2, wakeDispatcher);
-// everything else (brain.reply, notify.*) is informational and is acked
-// without a wake. Envelopes are acked once handed to the dispatcher; the
+// chat.message envelopes from the conversational UI, foreman reports
+// (foreman.report, brain.failed, relayed from factory:main) and terminal
+// notify.job envelopes threaded to a task wake the LLM planner - ONE
+// session per touched task, in parallel across tasks, serialized and
+// coalesced within a task (spec §9.5.2, wakeDispatcher); everything else
+// (brain.reply, unthreaded or planner-initiated notify.job, other
+// notify.*) is informational and is acked without a wake. Envelopes are acked once handed to the dispatcher; the
 // dispatcher persists its in-flight set so a restart re-runs interrupted
 // wakes (recoverWakes). Acked history stays replayable - acking never
 // deletes.
@@ -59,7 +60,7 @@ func (a *App) plannerLoop(ctx context.Context) {
 		}
 		var wakers []wire.MessageEnvelope
 		for _, env := range envs {
-			if wakesPlanner(env.Type) {
+			if wakesPlanner(env) {
 				wakers = append(wakers, env)
 			}
 		}
@@ -76,15 +77,36 @@ func (a *App) plannerLoop(ctx context.Context) {
 	}
 }
 
-// wakesPlanner reports whether an operator-inbox envelope type wakes the
-// planner (spec §9.5): operator chat, an operator close, and reports from
-// foremen that need the operator's attention.
-func wakesPlanner(typ string) bool {
-	switch typ {
+// wakesPlanner reports whether an operator-inbox envelope wakes the
+// planner (spec §9.5): operator chat, an operator close, reports from foremen that need the
+// operator's attention, and a terminal notify.job so the operator hears
+// the outcome without asking. notify.job wakes only when it is threaded
+// to a task (an unattributed one must not open a task) and was not
+// initiated by the planner itself (cancel_job, see notifyOperatorJob).
+// notify.job is only posted on terminal transitions, so non-terminal
+// events never reach here. The legacy notify.pending is no longer
+// produced (long-pending jobs raise a P1 alert, §9.5.3, which is
+// deliberately not a wake) and stays informational.
+func wakesPlanner(env wire.MessageEnvelope) bool {
+	switch env.Type {
 	case "chat.message", foremanReportType, brainFailedType, taskClosedByOperatorType:
 		return true
+	case notifyJobType:
+		return env.ThreadID != "" && !selfInitiatedJob(env)
 	}
 	return false
+}
+
+// notifyJobType is the terminal-job envelope type (spec §9.5).
+const notifyJobType = "notify.job"
+
+// selfInitiatedJob reports whether a notify.job payload is marked as the
+// planner's own cancel_job (nothing new to tell the operator).
+func selfInitiatedJob(env wire.MessageEnvelope) bool {
+	var p struct {
+		SelfInitiated bool `json:"self_initiated"`
+	}
+	return json.Unmarshal(env.Payload, &p) == nil && p.SelfInitiated
 }
 
 // dispatchWakers groups waking envelopes by task (spec §9.5.2) and hands
@@ -122,7 +144,7 @@ func (a *App) dispatchWakers(ctx context.Context, wakers []wire.MessageEnvelope)
 // task's own thread (last plannerThreadCap messages, internal included),
 // with the triggering envelopes named. The wake reason names the trigger:
 // operator chat needs a reply; a foreman report must be relayed and
-// acted on.
+// acted on; a terminal job must be reported and followed up.
 func (a *App) runTaskWake(ctx context.Context, taskID string, wakers []wire.MessageEnvelope) error {
 	t, err := a.tasks.GetTask(ctx, taskID)
 	if err != nil {
@@ -137,18 +159,7 @@ func (a *App) runTaskWake(ctx context.Context, taskID string, wakers []wire.Mess
 	if err != nil {
 		log.Printf("factoryapp: planner: priority criteria: %v", err)
 	}
-	reason := "planner: foreman reports arrived on this task; tell the operator what they need and act on them"
-	for _, env := range wakers {
-		if env.Type == taskClosedByOperatorType {
-			reason = closedByOperatorReason
-		}
-	}
-	for _, env := range wakers {
-		if env.Type == "chat.message" {
-			reason = "planner: new chat from the operator on this task needs a reply"
-			break
-		}
-	}
+	reason := wakeReason(wakers)
 	return a.planner.HandleTask(ctx, PlannerWake{
 		Reason:   reason,
 		Task:     t,
@@ -163,6 +174,52 @@ func (a *App) runTaskWake(ctx context.Context, taskID string, wakers []wire.Mess
 const closedByOperatorReason = "planner: the operator closed this task (see the task.closed_by_operator message for the reason). " +
 	"Cancel its running, pending and held jobs with cancel_job (leave terminal ones alone), " +
 	"do not reopen the task, and do not message the operator unless a job could not be cancelled"
+
+// Wake reasons, one per trigger kind. A mixed batch joins the reasons of
+// every kind present (chat first) so no trigger goes uncovered.
+const (
+	reasonChat   = "planner: new chat from the operator on this task needs a reply"
+	reasonReport = "planner: foreman reports arrived on this task; tell the operator what they need and act on them"
+	reasonJob    = "planner: a job on this task reached a terminal state (done/failed/dead/cancelled): tell the operator the outcome in plain words, then take the next step (e.g. dispatch the follow-up, or ask for approval to merge/deploy)"
+)
+
+// wakeReason names why a task session wakes, from the batch's envelope types.
+func wakeReason(wakers []wire.MessageEnvelope) string {
+	var chat, job, report, closed bool
+	for _, env := range wakers {
+		switch env.Type {
+		case taskClosedByOperatorType:
+			closed = true
+		case "chat.message":
+			chat = true
+		case notifyJobType:
+			job = true
+		default:
+			report = true
+		}
+	}
+	var parts []string
+	if chat {
+		parts = append(parts, reasonChat)
+	}
+	if closed {
+		parts = append(parts, closedByOperatorReason)
+	}
+	if job {
+		parts = append(parts, reasonJob)
+	}
+	if report || len(parts) == 0 {
+		parts = append(parts, reasonReport)
+	}
+	return strings.Join(parts, " ALSO: ")
+}
+
+// markSelfCancel records that the planner is about to cancel jobID itself
+// (cancel_job); the returned func withdraws the mark when the cancel fails.
+func (a *App) markSelfCancel(jobID string) func() {
+	a.selfCancels.Store(jobID, struct{}{})
+	return func() { a.selfCancels.Delete(jobID) }
+}
 
 // plannerFailed is the dispatcher's failure path: the brain.reply error
 // note, posted INTO the task, so the operator is never left waiting on a
@@ -241,15 +298,23 @@ func (a *App) notifyOperatorJob(ctx context.Context, jobID string) {
 	if err != nil || !ok {
 		return
 	}
-	a.notifyOperatorThreaded(ctx, a.jobThread(ctx, job.ID), job.ID, "notify.job", map[string]any{
-		"job_id":      job.ID,
-		"state":       job.State,
-		"foreman_id":  job.ForemanID,
-		"last_error":  job.LastError,
-		"over_budget": job.OverBudget,
-		"summary":     lastJobSummary(job.Results),
-		"created_at":  job.CreatedAt,
-		"updated_at":  job.UpdatedAt,
+	// A cancel the planner made itself (cancel_job) is tagged so it does
+	// not wake the planner; the mark is consumed only by a cancel/supersede
+	// terminal, never by a racing natural completion.
+	self := false
+	if job.State == "cancelled" || job.State == "superseded" {
+		_, self = a.selfCancels.LoadAndDelete(job.ID)
+	}
+	a.notifyOperatorThreaded(ctx, a.jobThread(ctx, job.ID), job.ID, notifyJobType, map[string]any{
+		"self_initiated": self,
+		"job_id":         job.ID,
+		"state":          job.State,
+		"foreman_id":     job.ForemanID,
+		"last_error":     job.LastError,
+		"over_budget":    job.OverBudget,
+		"summary":        lastJobSummary(job.Results),
+		"created_at":     job.CreatedAt,
+		"updated_at":     job.UpdatedAt,
 	})
 }
 

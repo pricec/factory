@@ -1460,19 +1460,27 @@ never stored: only `chat.message` and `brain.reply` are operator-visible,
 | `brain.reply` | `factory:brain` or `factory`, `{text}` | no | no | the planner's `notify_operator` (§9.4), the planner-failure note, and the alert seed of §9.5.3 |
 | `foreman.report` | `foreman:{id}`, free-form (typically `{text}`) | yes | yes | relayed verbatim from `factory:main`, stamped with its task (§9.5.2 relay stamping) |
 | `brain.failed` | `foreman:{id}`, `{envelope_id, envelope_type, error}` | yes | yes | a foreman brain session failed on a delegated envelope (§3.3); relayed exactly like `foreman.report`, so a failed delegation is never silent |
-| `notify.job` | `factory`, `{id, state, foreman, last_error, over_budget, summary}` and `job_id` | yes | no | terminal job transition (done/failed/timed_out/dead/cancelled/superseded); stamped with its task when attributable, else unthreaded; hidden by default, no chips (operator DECISION 2) |
+| `notify.job` | `factory`, `{id, state, foreman, last_error, over_budget, summary}` and `job_id`, plus `self_initiated` | yes | **yes, when threaded** (2026-11-16 wake-on-terminal) | terminal job transition (done/failed/timed_out/dead/cancelled/superseded); stamped with its task when attributable, else unthreaded; hidden by default, no chips (operator DECISION 2). Wakes the planner on its task so the operator hears the outcome unasked. NO wake when unthreaded (never opens a task) or when `self_initiated` is true (the planner's own `cancel_job`, §9.4: it already knows) |
 | `task.changed`, `alert.changed` | synthetic, payload = Task / Alert | n/a | no | SSE hints only, NOT persisted (§9.5.2, §9.5.3) |
 | `notify.pending`, `notify.unhandled` | `factory` | yes | no | **legacy**: no longer produced; since the redesign they are P1 and P2 alerts (§9.5.3). Old rows stay readable (backfilled into the legacy task) |
 
 Planner loop (internal/factoryapp, twin of the consumer loop): drains
-`planner:main`; `chat.message`, `foreman.report` and `brain.failed` wake the
-planner, ONE session per touched task with that task's thread as context
+`planner:main`; `chat.message`, `foreman.report`, `brain.failed` and a
+threaded, not self-initiated terminal `notify.job` wake the planner, ONE session per touched task with that task's thread as context
 (§9.5.2). A session is the §9.4 surface with the planner bearer and the model
 from `FACTORY_PLANNER_MODEL` (default per §6.5; the child CLI routes on the
 model: the Claude Code CLI for claude-* ids, opencode otherwise, §9.4).
 Per-payload 2KB caps apply (§6.6). The wake reason names the trigger:
 operator chat needs a reply; a foreman report must be relayed to the operator
-and acted on. Everything else is informational and acked without a wake. A
+and acted on; a terminal job (done/failed/dead/cancelled) must be reported in
+plain words and followed up (dispatch the next job, or ask approval to
+merge/deploy). A batch mixing kinds joins the reasons (chat first), so every
+trigger is covered. Terminal jobs finishing together coalesce into ONE session
+per task (§9.5.2). Wakes are never throttled by the token gate. `notify.pending`
+and long-pending alerts do NOT wake (a pending job raises the §9.5.3 P1 alert,
+which is the operator-facing channel); non-terminal job events never wake.
+Restart recovery (§9.5.2) re-runs an interrupted job wake with the same reason,
+since the reason derives from the persisted envelope types. Everything else is informational and acked without a wake. A
 failed session is never silent: a `brain.reply` note INTO the task AND a P0
 alert (§9.5.4). The child's MCP endpoint is the factory's loopback address,
 NOT the advertised URL (#28): the child runs on the factory's own host, and

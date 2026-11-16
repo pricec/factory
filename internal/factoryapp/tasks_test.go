@@ -514,7 +514,9 @@ func TestRelayStampingAndWakes(t *testing.T) {
 		t.Errorf("unattributed task = %+v / %+v", th.Task, th.Messages)
 	}
 
-	// notify.job on terminal: stamped onto the task, internal, no wake.
+	// notify.job on terminal: stamped onto the task, internal, and WAKES
+	// the planner there with the job reason (TestTerminalJobWakes covers
+	// the detail).
 	post("job.event", created.JobID, map[string]any{"event": "started"})
 	post("job.result", created.JobID, map[string]any{
 		"job_id": created.JobID, "status": "done", "summary": "built",
@@ -528,9 +530,10 @@ func TestRelayStampingAndWakes(t *testing.T) {
 		}
 		return false
 	})
-	time.Sleep(300 * time.Millisecond)
-	if n := w.count(); n != 4 {
-		t.Errorf("notify.job woke the planner: %d sessions", n)
+	waitFor(t, "terminal job wake", 5*time.Second, func() bool { return w.count() == 5 })
+	tasksSeen, prompts = w.snapshot()
+	if tasksSeen[4] != c.TaskID || !strings.Contains(prompts[4], "reached a terminal state") {
+		t.Errorf("terminal wake: task %s prompt %q", tasksSeen[4], snippetOf(prompts[4], 200))
 	}
 }
 
