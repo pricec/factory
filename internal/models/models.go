@@ -4,8 +4,9 @@
 // an explicit bias towards the cheapest one that can do the job, while
 // the coordinator runs full-strength models (2026-11-16 planner-claude
 // amendment: the factory planner runs Claude Opus 5.5 via the Claude
-// Code CLI; the foreman brain stays on full GLM 5.3 per #32 until its
-// own claude routing). Every opencode string was verified reachable
+// Code CLI; the foreman brain stays on full GLM 5.3 per #32 by default,
+// and an env pin to a claude-* id routes it to the Claude Code CLI - the
+// 2026-11-16 foreman-brain-claude amendment, spec §9.3). Every opencode string was verified reachable
 // against the running opencode install and the claude string against
 // the installed Claude Code CLI (2.1.325); each role stays
 // env-overridable (spec §6.5: swapping a role's model is a config
@@ -34,7 +35,9 @@ func Resolve(override, fallback string) string {
 const PlannerDefault = "claude-opus-5-5"
 
 // ForemanBrainDefault is the foreman brain's model (same coordinator
-// tier as the planner, #32).
+// tier as the planner, #32). It stays the GLM pin: the claude-* route is
+// opt-in via FACTORY_FOREMAN_BRAIN_MODEL (spec §9.3) until the remote
+// foremen's binaries carry the claude runner.
 const ForemanBrainDefault = "openrouter/z-ai/glm-5.3"
 
 // WorkerFlash is the worker's cheap tier (spec §5.1 `tier: "flash"`, also
