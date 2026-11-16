@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pricec/factory/internal/claudecli"
 	"github.com/pricec/factory/internal/llmctx"
 	"github.com/pricec/factory/internal/routing"
 	"github.com/pricec/factory/internal/wire"
@@ -20,28 +21,40 @@ import (
 
 // Brain session constants (spec §9.1, §9.3, §9.4 harness pattern).
 const (
-	// brainTimeout bounds one brain opencode session: 30m, headroom for
-	// long multi-tool foreman-brain turns (2026-11-15 operator decision;
-	// was 300s/5m).
+	// brainTimeout bounds one brain session (either runner): 30m, headroom
+	// for long multi-tool foreman-brain turns (2026-11-15 operator
+	// decision; was 300s/5m).
 	brainTimeout = 1800 * time.Second
 	// brainConfigName is the generated opencode config written into
 	// WorkDir (spec §8.4): the V2 project-config name, discovered from
 	// the working directory. The V1-era OPENCODE_CONFIG env var is
-	// ignored by V2 (upstream regression, umbrella issue #36990).
+	// ignored by V2 (upstream regression, umbrella issue #36990). Written
+	// only by opencode-runner sessions (§9.3 runner routing).
 	brainConfigName = "opencode.json"
+	// brainClaudeServer is the MCP server name in the generated Claude
+	// Code config (spec §9.3): Claude Code prefixes its tools with it, so
+	// the foreman surface arrives as mcp__foreman__<tool>.
+	brainClaudeServer = "foreman"
 	// envBrainToken carries the brain bearer into the child so the
-	// generated config can reference it via {env:FOREMAN_BRAIN_TOKEN}
-	// without the secret landing in the file at rest.
+	// generated config can reference it without the secret landing in
+	// the file at rest: {env:FOREMAN_BRAIN_TOKEN} on the opencode runner,
+	// ${FOREMAN_BRAIN_TOKEN} on the claude runner.
 	envBrainToken = "FOREMAN_BRAIN_TOKEN"
 )
 
-// BrainRunner runs one-shot foreman-brain LLM sessions (spec §9.3): an
-// opencode child configured with the foreman MCP surface, woken with a
-// prompt built from the triggering envelope (spec §6.6). It implements
+// BrainRunner runs one-shot foreman-brain LLM sessions (spec §9.3): a CLI
+// child configured with the foreman MCP surface, woken with a prompt built
+// from the triggering envelope (spec §6.6). The runner routes on the
+// session model (spec §9.3, the §8.4 worker twin): a claude-* model runs
+// the Claude Code CLI, everything else opencode. It implements
 // routing.Brain.
 type BrainRunner struct {
-	// Model is the opencode model string; "" -> opencode default.
+	// Model is the child CLI model string; "" -> the CLI's default. A
+	// claude-* model selects the claude runner (FACTORY_FOREMAN_BRAIN_MODEL).
 	Model string
+	// ClaudeBin is the Claude Code CLI binary; "" means "claude" on PATH.
+	// Used only by sessions routed to the claude runner.
+	ClaudeBin string
 	// MCPURL is the foreman brain MCP endpoint (/v1/mcp/foreman).
 	MCPURL string
 	// Bearer is the brain token (a local foreman:{id} credential).
@@ -49,8 +62,8 @@ type BrainRunner struct {
 	// WorkDir is where the generated config temp file lives.
 	WorkDir string
 	// Exec runs one brain session for a prompt and returns its stdout.
-	// nil means the real opencode child. Tests replace it with a
-	// recorder; no test ever invokes a real opencode.
+	// nil means the real child CLI, routed on the session model (§9.3).
+	// Tests replace it with a recorder; no test ever invokes a real CLI.
 	Exec func(ctx context.Context, prompt string) (string, error)
 }
 
@@ -62,7 +75,11 @@ func (b *BrainRunner) Handle(ctx context.Context, env wire.MessageEnvelope) erro
 	prompt := llmctx.BuildWakePrompt("New messages need decisions.", []wire.MessageEnvelope{env})
 	exec := b.Exec
 	if exec == nil {
-		exec = b.runOpencode
+		if claudecli.IsModel(b.Model) {
+			exec = b.runClaude
+		} else {
+			exec = b.runOpencode
+		}
 	}
 	stdout, err := exec(ctx, prompt)
 	if err != nil {
@@ -72,13 +89,46 @@ func (b *BrainRunner) Handle(ctx context.Context, env wire.MessageEnvelope) erro
 	return nil
 }
 
-// runOpencode is the default Exec: it regenerates the opencode project
-// config in WorkDir (mcp.servers.foreman -> MCPURL, bearer via
-// {env:FOREMAN_BRAIN_TOKEN}, oauth off, pinned model, allow-all
-// permissions), then runs `opencode run <prompt>` non-interactively in
-// its own process group with a 30m timeout. The child discovers the
-// config from its working directory (V2 project config; the V1-era
-// OPENCODE_CONFIG env var is ignored by V2).
+// runClaude is the claude-runner Exec (spec §9.3, 2026-11-16
+// foreman-brain-claude amendment): it regenerates the Claude Code MCP
+// config in WorkDir (mcpServers.foreman -> MCPURL, bearer via
+// ${FOREMAN_BRAIN_TOKEN}) and runs the Claude Code CLI through the shared
+// claudecli runner under the 30m brain bound - the same flags and error
+// semantics as the planner's claude runner (spec §9.4). Missing CLI and
+// missing auth fail the session loudly; the router surfaces the error.
+func (b *BrainRunner) runClaude(ctx context.Context, prompt string) (string, error) {
+	configPath, err := b.writeClaudeConfig()
+	if err != nil {
+		return "", err
+	}
+	return claudecli.Exec(ctx, claudecli.Session{
+		Bin:        b.ClaudeBin,
+		Model:      b.Model,
+		ConfigPath: configPath,
+		Dir:        b.WorkDir,
+		TokenEnv:   envBrainToken,
+		Token:      b.Bearer,
+		Prompt:     prompt,
+		Timeout:    brainTimeout,
+		Label:      "brain session",
+	})
+}
+
+// writeClaudeConfig regenerates the Claude Code MCP config at
+// WorkDir/claude-mcp.json, 0600 (spec §9.3). The model rides --model and
+// the headless permission policy rides --permission-mode; the file carries
+// only the MCP injection.
+func (b *BrainRunner) writeClaudeConfig() (string, error) {
+	return claudecli.WriteConfig(b.WorkDir, brainClaudeServer, b.MCPURL, envBrainToken)
+}
+
+// runOpencode is the opencode-runner Exec (the non-claude route, spec
+// §9.3): it regenerates the opencode project config in WorkDir
+// (mcp.servers.foreman -> MCPURL, bearer via {env:FOREMAN_BRAIN_TOKEN},
+// oauth off, pinned model, allow-all permissions), then runs
+// `opencode run <prompt>` non-interactively in its own process group with
+// a 30m timeout. The child discovers the config from its working directory
+// (V2 project config; the V1-era OPENCODE_CONFIG env var is ignored by V2).
 func (b *BrainRunner) runOpencode(ctx context.Context, prompt string) (string, error) {
 	if _, err := b.writeConfig(); err != nil {
 		return "", err

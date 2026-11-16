@@ -421,7 +421,7 @@ env-overridable, and swapping a role's model stays a config change only:
 | Role | Pinned default | Env override |
 | --- | --- | --- |
 | factory planner | `claude-opus-5-5` (Claude Code CLI) | `FACTORY_PLANNER_MODEL` |
-| foreman brain | `openrouter/z-ai/glm-5.3` | `FACTORY_FOREMAN_BRAIN_MODEL` |
+| foreman brain | `openrouter/z-ai/glm-5.3` (opencode; a `claude-*` pin runs the Claude Code CLI, §9.3) | `FACTORY_FOREMAN_BRAIN_MODEL` |
 | worker, `tier: "flash"` (and no-tier jobs) | `openrouter/z-ai/glm-5.3-flash` | `FACTORY_WORKER_FLASH_MODEL` |
 | worker, `tier: "default"` | `openrouter/z-ai/glm-5.3-flash#max` | `FACTORY_WORKER_MODEL` |
 | worker, `tier: "hardest"` | `openrouter/z-ai/glm-5.3` | `FACTORY_WORKER_HARDEST_MODEL` |
@@ -434,11 +434,13 @@ factory planner runs Claude Opus 5.5 via the Claude Code CLI
 long-running agentic work, $4/$20 per M tokens in/out, exact snapshot id
 - the floating `opus` alias is accepted on overrides but never pinned;
 the Anthropic CLI's own auth is a second credential path alongside the
-OpenRouter key); the foreman brain stays on full GLM 5.3 (#32) until
-its own claude routing. The planner's runner follows its model
-(§9.4): a claude-* model runs the Claude Code CLI, everything else
-opencode - so an env override back to a GLM string also flips the
-runner back, no restart. The worker
+OpenRouter key); the foreman brain stays on full GLM 5.3 (#32) by default
+(2026-11-16 foreman-brain-claude amendment: an env pin to a claude-* id
+routes the brain sessions to the Claude Code CLI, §9.3, and a foreman is
+pinned to one only once its binary carries the claude runner). Each
+coordinator's runner follows its model (§9.3, §9.4): a claude-* model runs
+the Claude Code CLI, everything else opencode - so an env override back to a
+GLM string also flips the runner back, no restart. The worker
 ladder is one GLM 5.3 generation across two price points (#30, #31):
 Flash (~$0.04/$0.08 per M tokens; the `default` tier is the same model
 at max reasoning effort - same token prices, the only extra spend is the
@@ -1042,12 +1044,65 @@ Tools (exact):
   (GLM 5.3) - bias towards the cheapest tier that can do the job (#29).
 - `answer_worker(job_id, answer)` - posts `job.answer` to the job inbox.
 
-Brain session mechanics: the foreman runtime spawns opencode with
-`OPENCODE_CONFIG` pointing here - same code path as #5, different MCP URL +
-prompt (#18). The brain token is a LOCAL foreman credential on the foreman's
-own auth store (the factory-paired bearer lives in the factory's store and
-cannot authenticate against the foreman's local endpoints); the foreman
-mints it at startup (#21).
+Brain session mechanics: the #5 harness pattern (#18) - same code path as
+the worker harness, different MCP URL + prompt - with runner routing
+(2026-11-16 foreman-brain-claude amendment, the §9.4 planner twin). The brain
+token is a LOCAL foreman credential on the foreman's own auth store (the
+factory-paired bearer lives in the factory's store and cannot authenticate
+against the foreman's local endpoints); the foreman mints it at startup (#21).
+
+- Runner routing: the brain session model (`FACTORY_FOREMAN_BRAIN_MODEL`,
+  §6.5) routes the child CLI with the §8.4 semantics exactly. A bare
+  `claude-*` id (or the bare `claude` alias), optionally behind the
+  `anthropic/` provider prefix, runs via the Claude Code CLI in
+  non-interactive mode (below). Everything else - including OpenRouter-hosted
+  claude models (`openrouter/...`, the OpenRouter key's credential path) -
+  runs via opencode, unchanged: `opencode.json` in the brain WorkDir,
+  `opencode run --standalone -m <model>`, allow-all permissions.
+- The default stays the GLM pin (`openrouter/z-ai/glm-5.3`); the claude route
+  is opt-in by env pin. A foreman is not pinned to a claude-* model until its
+  binary carries the claude runner: an older foreman would run the pin on
+  opencode, where the model cannot resolve.
+- Claude Code invocation (flags as §9.4, verified against the installed CLI,
+  2.1.325): `claude -p [--model <model>] --mcp-config <claude-mcp.json>
+  --strict-mcp-config --permission-mode bypassPermissions
+  --no-session-persistence "<wake prompt>"`. The wake prompt (§6.6) is the
+  FINAL argument. The session has the same brain WorkDir, 30m bound, child
+  env (`FOREMAN_BRAIN_TOKEN` guaranteed), and loopback endpoint
+  `/v1/mcp/foreman` as the opencode runner. The `anthropic/` prefix is
+  stripped for `--model`.
+- Claude Code generated config: `<WorkDir>/claude-mcp.json`, passed
+  explicitly via `--mcp-config` (never name-discovered), written 0600 before
+  every run:
+
+```json
+{
+  "mcpServers": {
+    "foreman": {
+      "type": "http",
+      "url": "FOREMAN_BRAIN_MCP_URL",
+      "headers": { "Authorization": "Bearer ${FOREMAN_BRAIN_TOKEN}" }
+    }
+  }
+}
+```
+
+  The server name `foreman` makes the surface arrive as
+  `mcp__foreman__<tool>` (e.g. `mcp__foreman__inbox_next`); the opencode
+  runner exposes the same tools as `foreman_<tool>`. The model rides
+  `--model`, and the headless policy rides `--permission-mode`: the config has
+  no model field and no permissions block.
+- Shared code: both coordinator runners (§9.3 brain, §9.4 planner) run
+  through one helper (`internal/claudecli`: the routing predicate, the
+  argument vector, the config writer, and the bounded run with its error
+  semantics). The worker harness keeps its §8.4 copy.
+- Loud failures: a missing Claude Code binary fails the session by name
+  (`claude CLI not found`). An unauthenticated run surfaces Claude Code's
+  auth text (on stdout with empty stderr, §9.4). A session past its 30m bound
+  reports `brain session exceeded`; a caller deadline (the job.question SLA)
+  reports as cancellation, not as the bound. Every failure is returned from
+  the brain session, and the router logs it (`routing: <type> <id>: brain:
+  <error>`). No failure is reported as success.
 
 The `spawn_worker` seam is shared (2026-11-15 sub-spawning amendment): the
 worker surface's `spawn_child` (§9.2) enqueues through the same Spawn seam,
