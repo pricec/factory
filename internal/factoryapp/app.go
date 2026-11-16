@@ -325,7 +325,7 @@ func buildMux(a *App, mcpH http.Handler) http.Handler {
 	mux.HandleFunc("POST /v1/pairing-tokens", a.handlePairingTokens)
 	mux.Handle("/v1/inboxes/", inbox.NewHandler(a.inbox, a.authn))
 	mux.Handle("GET /v1/inboxes/{id}/stream", notify.StreamHandler(a.hub, a.authn))
-	mux.Handle("/v1/foreman/capabilities", registry.RefreshHandler(a.refreshAuthz(), a.upsertCaps))
+	mux.Handle("/v1/foreman/capabilities", registry.RefreshHandlerWithAdvert(a.refreshAuthz(), a.upsertCaps, registry.NewAdvertiser(a.downloadsDir).Advert))
 	mux.Handle("/v1/jobs", a.jobs.APIHandler())
 	mux.Handle("/v1/jobs/", a.jobs.APIHandler())
 	mux.Handle("/v1/foremen", a.jobs.APIHandler())

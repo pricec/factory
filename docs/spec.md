@@ -510,6 +510,21 @@ factory planner's list view carries summaries only (#7, #19).
   With no foremen registered the union is empty: creation succeeds but
   the response carries a loud `warnings` array (the pending picker
   dispatches when a matching foreman arrives).
+- Refresh response + foreman update advert (2026-11-16 auto-update
+  amendment): `POST /v1/foreman/capabilities` (the foreman's 60s caps
+  push) answers `204` as before, or `200 application/json`
+  `{"foreman_update":{"build":"<BUILD_ID>","platforms":{"linux-amd64":
+  {"sha256":"<hex>","path":"/download/foreman/foreman-linux-amd64"},
+  "linux-arm64":{...}}}}` when the `-downloads` dir holds a valid
+  `manifest.json` (§8.4). The factory hashes each manifest-listed
+  `foreman-linux-*` file itself (cache keyed by path+size+mtime, so
+  re-hashing happens only when the file changes) and advertises a platform
+  only when that hash equals the manifest's sha256; a missing/unreadable/
+  malformed manifest, an empty build, an invalid sha or a mismatch/missing
+  file omits that platform (the problem is logged loudly once per change,
+  not per push). Nothing advertisable -> `204`. Old foremen ignore the
+  body. The foreman reports its own build as the `build` capability tag,
+  shown in the UI foremen list.
 - v1 stub matcher: first online foreman; #12 swaps the real one in and
   deletes the stub (#8, #12).
 - No matching foreman: the job stays `pending`, log once (visible via
@@ -657,6 +672,17 @@ Onboarding endpoints (#24, #25) - all outside `/v1`:
   curl exactly these names
   (`/download/{kind}/{kind}-linux-$GOARCH`). Unauthenticated per the
   trusted-LAN posture (§7.5).
+- Release manifest (2026-11-16 auto-update amendment): `make release` /
+  `make release-docker` stamp every binary with a build id
+  (`<UTC commit time YYYYMMDDTHHMMSSZ>-<12-char git sha>`, via `-ldflags -X
+  .../internal/buildinfo.ID`; release-docker computes it on the host since
+  the container has no `.git`) and write `dist/manifest.json` with
+  `internal/tools/mkmanifest` (stdlib only):
+  `{"build":"<id>","files":{"foreman-linux-amd64":{"sha256":"<hex>"},
+  "foreman-linux-arm64":{...},"factory-linux-amd64":{...},
+  "factory-linux-arm64":{...}}}`. Deploy copies the manifest into the
+  `-downloads` dir after the binaries (manifest last); the factory
+  advertises per §6.7 only what verifies against it.
 
 Bootstrap rule (#25): the first factory in a deployment is installed
 manually (`make release` + provision); thereafter factories serve

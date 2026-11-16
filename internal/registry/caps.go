@@ -93,6 +93,13 @@ type AuthzFunc func(r *http.Request, identity *string) error
 // The registry package imports neither auth nor jobs; integration wires
 // the authz and upsert closures.
 func RefreshHandler(authz AuthzFunc, upsert func(ctx context.Context, identity string, caps map[string]string) error) http.Handler {
+	return RefreshHandlerWithAdvert(authz, upsert, nil)
+}
+
+// RefreshHandlerWithAdvert is RefreshHandler plus the foreman_update
+// advert (spec §6.7): when advert returns non-nil the refresh answers 200
+// {"foreman_update":...}; nil advert or nil result keeps the 204.
+func RefreshHandlerWithAdvert(authz AuthzFunc, upsert func(ctx context.Context, identity string, caps map[string]string) error, advert AdvertFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "POST required", false)
@@ -116,7 +123,19 @@ func RefreshHandler(authz AuthzFunc, upsert func(ctx context.Context, identity s
 			writeError(w, http.StatusInternalServerError, "internal", err.Error(), true)
 			return
 		}
-		w.WriteHeader(http.StatusNoContent)
+		var fu *ForemanUpdate
+		if advert != nil {
+			fu = advert()
+		}
+		if fu == nil {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if err := json.NewEncoder(w).Encode(map[string]any{"foreman_update": fu}); err != nil {
+			log.Printf("registry: encode refresh response: %v", err)
+		}
 	})
 }
 
