@@ -87,10 +87,14 @@ response is the full envelope with server-assigned `id` and `ts` (#1).
 | `job.question` | Worker: via `ask_parent` (#17), posted to the foreman's own inbox `foreman:{id}` (§3.2) | Foreman brain via routing, 60s SLA, default answer on timeout (#4) | #4, #11, #17 |
 | `job.answer` | Foreman brain: via `answer_worker` (#18) | Worker: `ask_parent` long-polls the job inbox (#17); `answer_worker` posts to the job inbox (#18) | #17, #18 |
 | `brain.wake` | Not pinned in any body | Routing -> brain (#4) | #4 |
-| any other type | `post_to_factory(type, ...)` (#18), `message_foreman(..., type, ...)` (#19) | Routing -> brain ("anything unmatched -> brain") (#4) | #4, #18, #19 |
+| `foreman.report` | Foreman brain: `post_to_factory("foreman.report", payload)` (§9.3); the operator report | Factory `factory:main` consumer: relayed verbatim into `planner:main` with a planner wake (§7.3, §9.5) | 2026-11-16 report-routing amendment |
+| `brain.failed` | Foreman: the brain reporter, when a non-question brain session fails (§3.3) | Factory `factory:main` consumer: relayed into `planner:main` with a planner wake (§9.5) | 2026-11-15 amendment |
+| any other type | `post_to_factory(type, ...)` (#18), `message_foreman(..., type, ...)` (#19) | Routing -> brain ("anything unmatched -> brain") (#4) on the foreman; on `factory:main`, no handler: the factory posts `notify.unhandled` to `planner:main` and acks (§9.5) | #4, #18, #19 |
 
 The type set is open: `post_to_factory` and `message_foreman` accept arbitrary
-type strings, and unmatched types route to the brain (#4).
+type strings, and unmatched types route to the brain (#4). An envelope that
+reaches `factory:main` with no handler is never acked silently: the operator
+gets a `notify.unhandled` notice (2026-11-16 amendment, §9.5).
 
 Inbox destinations for the worker conversation flow (resolution of TODO-2;
 transcribed from #17, #18, with the corrected #11 scope model): a worker's
@@ -606,7 +610,12 @@ Onboarding endpoints (#24, #25) - all outside `/v1`:
   (its self-updater keeps working) and symlinked into `/usr/local/bin`,
   because systemd runs the unit with the default service PATH and the
   service user's `~/.local/bin` / `~/.opencode/bin` are NOT on it (the
-  2026-11-15 user-unit PATH gotcha). A service-visible install is kept
+  2026-11-15 user-unit PATH gotcha). 2026-11-16 amendment: the unit also
+  pins `Environment=PATH=` to `<service-home>/.opencode/bin:<service-home>/.local/bin`
+  followed by the default service dirs, and the install-time verification uses
+  that same value, so a CLI resolves in every unit-spawned process whether or
+  not a symlink exists. `GET /install-server.sh` pins its `factory.service`
+  the same way (its service home is `/var/lib/factory`). A service-visible install is kept
   (idempotent); every step verifies with `command -v` against the service
   PATH - the same lookup the harness's exec performs - and a failed or
   unverifiable install aborts the onboarding loudly (before the unit file
@@ -669,6 +678,15 @@ Scope struct: `{inbox, may_read, may_post, job_id?}`.
   factory-side `factory:main` over HTTP and acking locally. Without the
   forwarder the staging copy is a dead end - brain replies never reached
   the factory.
+- Foreman report routing (2026-11-16 amendment): `post_to_factory`'s `to`
+  is optional, and the only destination it routes is `factory:main` (§9.3). Any
+  other `to` - notably `factory:planner`, which is the planner's auth identity
+  and not an inbox, or `planner:main`, the operator inbox that foreman
+  credentials cannot write - is refused at post time with `unroutable_address`;
+  nothing is staged. The factory consumer relays `foreman.report` and
+  `brain.failed` verbatim into `planner:main` and wakes the planner (§9.5), so a
+  foreman reaches the operator through `post_to_factory` alone; the foreman
+  holds no new inbox scope, and the relay is factory-side.
 - The foreman also keeps a LOCAL brain queue sub-inbox
   `foreman:{id}:brain` (spec §3.3, 2026-11-15 amendment): brain-delegated
   envelopes are enqueued there by the consume loop and drained by the
@@ -1010,7 +1028,12 @@ Tools (exact):
 
 - `inbox_next(wait_seconds=0)` - oldest unacked envelope.
 - `inbox_ack(ids)`.
-- `post_to_factory(type, payload)` - envelope to the parent inbox.
+- `post_to_factory(type, payload, job_id?, to?)` - envelope to the parent
+  inbox. 2026-11-16 report-routing amendment: `to` is optional and accepts only
+  `factory:main` (the default); any other value is a tool error
+  `unroutable_address` that names the routable path and is never staged
+  (`factory:planner` and `planner:main` get targeted hints). A `foreman.report`
+  requires a `payload` and reaches the operator via the factory relay (§9.5).
 - `spawn_worker(task, result_schema?, tier?, timeout_s?, budget?)` - creates a local
   JobSpec, enqueues it to the harness, returns `job_id` immediately (never
   blocks). `tier` picks the worker model (§5.1, §6.5): flash (GLM 5.3
@@ -1164,6 +1187,19 @@ Envelope types in `planner:main`:
   UI surface, §7.5).
 - `brain.reply` (from `factory:brain`, payload `{text}`) - the LLM
   planner's answer, posted by the `notify_operator` tool (§9.4).
+- `foreman.report` (from `foreman:{id}`, payload free-form, typically `{text}`)
+  - a foreman's report to the operator (2026-11-16 amendment). The factory
+  consumer relays it verbatim from `factory:main` into `planner:main` (same
+  type, `from`, `job_id`, and payload; the store assigns id and ts) and wakes the
+  planner. It arrives there with no direct `POST /v1/chat`.
+- `brain.failed` (from `foreman:{id}`, payload `{envelope_id, envelope_type,
+  error}`) - a foreman brain session failed on a delegated envelope (§3.3,
+  2026-11-15 amendment). Relayed and wakes the planner exactly like
+  `foreman.report`, so a failed delegation is never silent.
+- `notify.unhandled` (from `factory`) - an envelope reached `factory:main` with
+  no handler (2026-11-16 amendment). Payload `{envelope_id, type, from, job_id,
+  note}`. Informational: no planner wake. Without it the envelope would be acked
+  and parked unseen.
 - `notify.job` (from `factory`) - job terminal-state notification (id,
   state, foreman, last_error, over_budget, summary), posted on every
   terminal transition (done/failed/timed_out/dead/cancelled/superseded) to
@@ -1180,12 +1216,14 @@ Envelope types in `planner:main`:
   when several apply. Informational for the human: no planner wake.
 
 Planner loop (internal/factoryapp, twin of the consumer loop): drains
-`planner:main`; `chat.message` wakes one planner session (§9.4
-surface, planner bearer, model via `FACTORY_PLANNER_MODEL`, default
-per §6.5; the child CLI routes on that model - the Claude Code CLI for
-claude-* ids, opencode otherwise, §9.4) with the recent
-inbox history replayed into the prompt (per-payload 2KB caps, §6.6);
-everything else is informational and acked without a wake. A failed session
+`planner:main`; `chat.message`, `foreman.report`, and `brain.failed` wake one
+planner session (§9.4 surface, planner bearer, model via
+`FACTORY_PLANNER_MODEL`, default per §6.5; the child CLI routes on that model -
+the Claude Code CLI for claude-* ids, opencode otherwise, §9.4) with the recent
+inbox history replayed into the prompt (per-payload 2KB caps, §6.6). The wake
+reason names the trigger: operator chat needs a reply; a foreman report must be
+relayed to the operator and acted on. Everything else is informational and
+acked without a wake. A failed session
 posts a `brain.reply` error note so the operator is never left waiting.
 The child's MCP endpoint is the factory's loopback address, NOT the
 advertised URL (#28): the child runs on the factory's own host, and the

@@ -52,18 +52,22 @@ fi
 # Worker CLIs (spec §8.4, §7.1): spawned workers run opencode (the pinned
 # GLM tiers) or the Claude Code CLI (claude-* worker models, e.g.
 # FACTORY_WORKER_HARDEST_MODEL=claude-opus-4-6), so a foreman machine needs
-# both. systemd runs the unit with the DEFAULT service PATH below - the
-# service user's ~/.local/bin and ~/.opencode/bin are NOT on it (the
-# 2026-11-15 user-unit PATH gotcha) - so each CLI is installed as the
-# service user (its self-updater keeps working) and symlinked into
-# /usr/local/bin. Idempotent: a service-visible install is detected and
+# both. The unit pins PATH to SERVICE_PATH (below): systemd's default
+# service PATH omits the service user's ~/.local/bin and ~/.opencode/bin
+# (the 2026-11-15 user-unit PATH gotcha; a foreman whose unit lacked the pin
+# reported no opencode and could run neither brain nor workers). Each CLI
+# is installed as the service user (its self-updater keeps working) and
+# symlinked into /usr/local/bin. Idempotent: a service-visible install is detected and
 # kept. Every step verifies with command -v against the service PATH - the
 # same lookup the harness's exec performs at run time - and a failed or
 # unverifiable install aborts the onboarding loudly before the unit file is
 # written (re-run: idempotent).
 SERVICE_USER=factory-foreman
 SERVICE_HOME=/var/lib/factory-foreman
-SERVICE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# The pinned unit PATH (rendered into the unit below as Environment=PATH and
+# used for every verification here): the service user's own bins first, so a
+# CLI installed under its home resolves without a symlink.
+SERVICE_PATH=/var/lib/factory-foreman/.opencode/bin:/var/lib/factory-foreman/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 mkdir -p "$SERVICE_HOME"
 chown "$SERVICE_USER" "$SERVICE_HOME"
 if ! command -v su >/dev/null 2>&1; then
@@ -105,6 +109,7 @@ Wants=network-online.target
 Type=simple
 User=factory-foreman
 StateDirectory=factory-foreman
+Environment=PATH={{SERVICE_PATH}}
 ExecStart=/opt/factory/foreman -factory {{FACTORY_URL}} -id {{FOREMAN_ID}} -data /var/lib/factory-foreman -addr 127.0.0.1:8090
 Environment=FACTORY_PAIRING_TOKEN={{PAIRING_TOKEN}}
 Restart=always
@@ -116,6 +121,9 @@ EOF
 # {{FACTORY_URL}} and {{PAIRING_TOKEN}} were rendered server-side above;
 # the foreman id is local, so substitute it here (single-line string).
 sed -i "s|{{FOREMAN_ID}}|$FOREMAN_ID|" /etc/systemd/system/factory-foreman.service
+# The pinned PATH (see SERVICE_PATH above): no ~/.opencode/bin or ~/.local/bin
+# would otherwise be on the service PATH (2026-11-16 foreman tools-cap gap).
+sed -i "s|{{SERVICE_PATH}}|$SERVICE_PATH|" /etc/systemd/system/factory-foreman.service
 # The unit carries the live pairing token until first boot pairs; keep it
 # root-only.
 chmod 600 /etc/systemd/system/factory-foreman.service

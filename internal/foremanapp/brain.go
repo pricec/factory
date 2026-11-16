@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/pricec/factory/internal/llmctx"
+	"github.com/pricec/factory/internal/routing"
 	"github.com/pricec/factory/internal/wire"
 )
 
@@ -202,4 +203,50 @@ func snippet(s string) string {
 		return string(r[:200])
 	}
 	return s
+}
+
+// BrainFailedType is the envelope a foreman posts upstream when a brain
+// session fails on a delegated envelope (spec §3.2). Without it the
+// router logs the failure and acks, and the operator waits forever on a
+// delegation that died silently.
+const BrainFailedType = "brain.failed"
+
+// brainReporter wraps the brain for the router (spec §3.3): a failed
+// non-question session posts a brain.failed envelope to the factory in
+// addition to the router's log, so the failure reaches the planner loop
+// (which relays it to the operator). job.question failures are exempt:
+// ask_parent's default answer is the pinned fallback there (spec §9.2),
+// so a report would only add noise.
+type brainReporter struct {
+	inner  routing.Brain
+	poster routing.Poster
+	from   string
+}
+
+// Handle runs the wrapped brain and reports non-question failures
+// upstream. The report is best-effort: a posting error logs and never
+// masks the brain's own error.
+func (b *brainReporter) Handle(ctx context.Context, env wire.MessageEnvelope) error {
+	err := b.inner.Handle(ctx, env)
+	if err == nil || env.Type == "job.question" {
+		return err
+	}
+	payload, merr := json.Marshal(map[string]string{
+		"envelope_id":   env.ID,
+		"envelope_type": env.Type,
+		"error":         snippet(err.Error()),
+	})
+	if merr != nil {
+		log.Printf("foremanapp: report brain failure for %s %s: %v", env.Type, env.ID, merr)
+		return err
+	}
+	if perr := b.poster.PostToParent(ctx, wire.MessageEnvelope{
+		Type:    BrainFailedType,
+		JobID:   env.JobID,
+		From:    b.from,
+		Payload: payload,
+	}); perr != nil {
+		log.Printf("foremanapp: report brain failure for %s %s: %v", env.Type, env.ID, perr)
+	}
+	return err
 }
