@@ -8,14 +8,17 @@ import (
 
 // MessageEnvelope is the wire envelope for every message (§3.1). ID and TS
 // are assigned by the server on POST; clients supply type, job_id, from, and
-// payload.
+// payload. ThreadID (optional, inbox redesign §9.5) files the message under a
+// task thread (a tasks.Task id); it is omitted from JSON when empty, so
+// envelopes without it are byte-identical to the pre-thread wire format.
 type MessageEnvelope struct {
-	ID      string          `json:"id"`
-	Type    string          `json:"type"`
-	JobID   string          `json:"job_id"`
-	From    string          `json:"from"`
-	Payload json.RawMessage `json:"payload,omitempty"`
-	TS      string          `json:"ts"`
+	ID       string          `json:"id"`
+	Type     string          `json:"type"`
+	JobID    string          `json:"job_id"`
+	From     string          `json:"from"`
+	Payload  json.RawMessage `json:"payload,omitempty"`
+	TS       string          `json:"ts"`
+	ThreadID string          `json:"thread_id,omitempty"`
 }
 
 // JobScoped reports whether msgType is job-scoped - prefixed "job." - and so

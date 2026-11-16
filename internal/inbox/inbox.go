@@ -19,6 +19,9 @@ import (
 // ErrClosed is returned by operations on a closed Service.
 var ErrClosed = errors.New("inbox: closed")
 
+// ErrNoMessage is returned by SetThread when no stored message has the id.
+var ErrNoMessage = errors.New("inbox: no such message")
+
 // DuplicateError reports a job.result POST whose (inbox_id, job_id) already
 // exists (spec §4.2). OriginalID is the id of the already-stored envelope;
 // it rides the 409 response (spec §10).
@@ -62,6 +65,10 @@ func Open(path string) (*Service, error) {
 	}, nil
 }
 
+// migrate brings the schema up to date in place. Every step is additive and
+// idempotent (spec §4.3): it runs on every Open, against fresh files and
+// against databases written by any earlier version, and never drops,
+// rewrites or deletes rows.
 func migrate(db *sql.DB) error {
 	const ddl = `
 CREATE TABLE IF NOT EXISTS messages (
@@ -81,9 +88,42 @@ CREATE INDEX IF NOT EXISTS idx_messages_inbox_unacked
 CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_result_dedupe
 	ON messages(inbox_id, job_id) WHERE type = 'job.result';
 `
-	_, err := db.Exec(ddl)
+	if _, err := db.Exec(ddl); err != nil {
+		return err
+	}
+	// v2 (inbox redesign, §9.5): nullable thread_id + (thread_id, seq)
+	// index. SQLite has no ADD COLUMN IF NOT EXISTS, so probe first.
+	if err := addColumnIfMissing(db, "messages", "thread_id", "TEXT NULL"); err != nil {
+		return err
+	}
+	_, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id, seq)`)
 	return err
 }
+
+// addColumnIfMissing runs ALTER TABLE ... ADD COLUMN unless the column is
+// already present (idempotent re-open).
+func addColumnIfMissing(db *sql.DB, table, column, decl string) error {
+	has, err := hasColumn(db, table, column)
+	if err != nil || has {
+		return err
+	}
+	_, err = db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + decl)
+	if err != nil && strings.Contains(err.Error(), "duplicate column") {
+		return nil // lost a race with another opener; same end state
+	}
+	return err
+}
+
+func hasColumn(db *sql.DB, table, column string) (bool, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&n)
+	return n > 0, err
+}
+
+// DB returns the underlying database handle so sibling stores that share
+// the inbox file (internal/tasks) can use the same single connection. The
+// handle is owned by the Service: do not Close it; Service.Close does.
+func (s *Service) DB() *sql.DB { return s.db }
 
 // Close stops all long-poll waiters and closes the database.
 func (s *Service) Close() error {
@@ -102,7 +142,8 @@ func (s *Service) Close() error {
 }
 
 // Post stores env in inboxID and returns the full envelope with
-// server-assigned id and ts (spec §4.1). Duplicate job.result posts for the
+// server-assigned id and ts (spec §4.1). A non-empty env.ThreadID is
+// persisted (empty stores NULL). Duplicate job.result posts for the
 // same (inboxID, job_id) return *DuplicateError and store nothing.
 func (s *Service) Post(ctx context.Context, inboxID string, env wire.MessageEnvelope) (wire.MessageEnvelope, error) {
 	env.ID = wire.NewMessageID()
@@ -123,9 +164,9 @@ func (s *Service) Post(ctx context.Context, inboxID string, env wire.MessageEnve
 		payload = string(env.Payload)
 	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO messages (id, inbox_id, type, job_id, sender, payload, ts)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		env.ID, inboxID, env.Type, env.JobID, env.From, payload, env.TS)
+		`INSERT INTO messages (id, inbox_id, type, job_id, sender, payload, ts, thread_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		env.ID, inboxID, env.Type, env.JobID, env.From, payload, env.TS, nullString(env.ThreadID))
 	if err != nil {
 		// Concurrent duplicate post lost the race; the unique partial index
 		// is the second line of defense (spec §4.2, §4.3).
@@ -212,25 +253,54 @@ func (s *Service) Get(ctx context.Context, inboxID string, limit int, wait time.
 
 func (s *Service) list(ctx context.Context, inboxID string, limit int) ([]wire.MessageEnvelope, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, type, job_id, sender, payload, ts
+		`SELECT `+envCols+`
 		 FROM messages WHERE inbox_id = ? AND acked = 0 ORDER BY seq LIMIT ?`,
 		inboxID, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	return scanEnvelopes(rows)
+}
 
+// envCols is the column list scanEnvelope expects.
+const envCols = `id, type, job_id, sender, payload, ts, IFNULL(thread_id, '')`
+
+type rowScanner interface{ Scan(dest ...any) error }
+
+func scanEnvelope(r rowScanner) (wire.MessageEnvelope, error) {
+	var env wire.MessageEnvelope
+	var payload string
+	if err := r.Scan(&env.ID, &env.Type, &env.JobID, &env.From, &payload, &env.TS, &env.ThreadID); err != nil {
+		return env, err
+	}
+	env.Payload = jsonRaw(payload)
+	return env, nil
+}
+
+func scanEnvelopes(rows *sql.Rows) ([]wire.MessageEnvelope, error) {
+	defer rows.Close()
 	var envs []wire.MessageEnvelope
 	for rows.Next() {
-		var env wire.MessageEnvelope
-		var payload string
-		if err := rows.Scan(&env.ID, &env.Type, &env.JobID, &env.From, &payload, &env.TS); err != nil {
+		env, err := scanEnvelope(rows)
+		if err != nil {
 			return nil, err
 		}
-		env.Payload = jsonRaw(payload)
 		envs = append(envs, env)
 	}
 	return envs, rows.Err()
+}
+
+func reverse(envs []wire.MessageEnvelope) {
+	for i, j := 0, len(envs)-1; i < j; i, j = i+1, j-1 {
+		envs[i], envs[j] = envs[j], envs[i]
+	}
+}
+
+func nullString(v string) any {
+	if v == "" {
+		return nil
+	}
+	return v
 }
 
 // InboxSummary is one row of the UI inbox listing (spec §4.1): aggregate
@@ -276,48 +346,77 @@ func (s *Service) Recent(ctx context.Context, inboxID string, limit int) ([]wire
 		limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, type, job_id, sender, payload, ts
+		`SELECT `+envCols+`
 		 FROM messages WHERE inbox_id = ? ORDER BY seq DESC LIMIT ?`,
 		inboxID, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var envs []wire.MessageEnvelope
-	for rows.Next() {
-		var env wire.MessageEnvelope
-		var payload string
-		if err := rows.Scan(&env.ID, &env.Type, &env.JobID, &env.From, &payload, &env.TS); err != nil {
-			return nil, err
-		}
-		env.Payload = jsonRaw(payload)
-		envs = append(envs, env)
-	}
-	if err := rows.Err(); err != nil {
+	envs, err := scanEnvelopes(rows)
+	if err != nil {
 		return nil, err
 	}
-	// Chronological: the query walked newest-first.
-	for i, j := 0, len(envs)-1; i < j; i, j = i+1, j-1 {
-		envs[i], envs[j] = envs[j], envs[i]
-	}
+	reverse(envs) // chronological: the query walked newest-first
 	return envs, nil
+}
+
+// ThreadMessages returns the last limit messages filed under threadID (a
+// task id), oldest to newest, across every inbox and including acked rows
+// (§9.5 storage). limit <= 0 returns the whole thread. An unknown or empty
+// threadID yields an empty (nil) slice. Served by idx_messages_thread.
+func (s *Service) ThreadMessages(ctx context.Context, threadID string, limit int) ([]wire.MessageEnvelope, error) {
+	if threadID == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = -1 // SQLite: negative LIMIT means unbounded
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+envCols+`
+		 FROM messages WHERE thread_id = ? ORDER BY seq DESC LIMIT ?`,
+		threadID, limit)
+	if err != nil {
+		return nil, err
+	}
+	envs, err := scanEnvelopes(rows)
+	if err != nil {
+		return nil, err
+	}
+	reverse(envs)
+	return envs, nil
+}
+
+// SetThread files the stored message msgID under threadID (an empty
+// threadID clears it back to NULL). It is a pure storage update: it does not
+// change ack state and does not fire the publish hook. Returns ErrNoMessage
+// when no message has that id.
+func (s *Service) SetThread(ctx context.Context, msgID, threadID string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE messages SET thread_id = ? WHERE id = ?`, nullString(threadID), msgID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNoMessage
+	}
+	return nil
 }
 
 // GetMessage returns the stored envelope with the given id (spec §4.1:
 // replay/UI path), including acked messages. ok is false when absent.
 func (s *Service) GetMessage(ctx context.Context, mid string) (env wire.MessageEnvelope, ok bool, err error) {
-	var payload string
-	err = s.db.QueryRowContext(ctx,
-		`SELECT id, type, job_id, sender, payload, ts FROM messages WHERE id = ?`, mid).
-		Scan(&env.ID, &env.Type, &env.JobID, &env.From, &payload, &env.TS)
+	env, err = scanEnvelope(s.db.QueryRowContext(ctx,
+		`SELECT `+envCols+` FROM messages WHERE id = ?`, mid))
 	if errors.Is(err, sql.ErrNoRows) {
-		return env, false, nil
+		return wire.MessageEnvelope{}, false, nil
 	}
 	if err != nil {
-		return env, false, err
+		return wire.MessageEnvelope{}, false, err
 	}
-	env.Payload = jsonRaw(payload)
 	return env, true, nil
 }
 

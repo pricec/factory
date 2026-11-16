@@ -163,6 +163,7 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 		},
 		{Type: "brain.wake", From: "foreman:alpha"},
 		{Type: "job.event", JobID: "job_01", From: "foreman:beta", Payload: raw(`null`)},
+		{Type: "chat.message", From: "human:operator", ThreadID: "task_01ABC"},
 	} {
 		t.Run(fmt.Sprintf("case %d", i), func(t *testing.T) {
 			t.Parallel()
@@ -540,5 +541,26 @@ func TestResultRoundTrip(t *testing.T) {
 			t.Parallel()
 			assertRoundTrip(t, r)
 		})
+	}
+}
+
+// ThreadID is optional and omitted when empty, so envelopes without it keep
+// the pre-thread wire bytes; old JSON (no thread_id) decodes to "".
+func TestEnvelopeThreadIDBackwardCompatible(t *testing.T) {
+	t.Parallel()
+	b, err := json.Marshal(MessageEnvelope{ID: "msg_1", Type: "chat.message", From: "x", TS: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"id":"msg_1","type":"chat.message","job_id":"","from":"x","ts":"t"}`; string(b) != want {
+		t.Errorf("marshal = %s, want %s", b, want)
+	}
+	var e MessageEnvelope
+	if err := json.Unmarshal([]byte(`{"id":"msg_1","type":"t","job_id":"","from":"x","ts":"t"}`), &e); err != nil || e.ThreadID != "" {
+		t.Errorf("legacy decode: %+v %v", e, err)
+	}
+	b, _ = json.Marshal(MessageEnvelope{Type: "t", From: "x", ThreadID: "task_9"})
+	if !strings.Contains(string(b), `"thread_id":"task_9"`) {
+		t.Errorf("thread_id missing: %s", b)
 	}
 }

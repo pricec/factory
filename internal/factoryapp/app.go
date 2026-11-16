@@ -25,6 +25,7 @@ import (
 	"github.com/pricec/factory/internal/models"
 	"github.com/pricec/factory/internal/notify"
 	"github.com/pricec/factory/internal/registry"
+	"github.com/pricec/factory/internal/tasks"
 	"github.com/pricec/factory/internal/wire"
 )
 
@@ -57,8 +58,12 @@ type Config struct {
 
 // App is the wired factory controller.
 type App struct {
-	jobs       *jobs.Store
-	inbox      *inbox.Service
+	jobs  *jobs.Store
+	inbox *inbox.Service
+	// tasks shares inbox.db (spec §9.5 storage): tasks, task_jobs,
+	// alerts, settings. Opened right after the inbox, which runs the
+	// one-time legacy backfill. Not closed separately (inbox owns the DB).
+	tasks      *tasks.Store
 	auth       *auth.Store
 	authn      *auth.Authenticator
 	hub        *notify.Hub
@@ -122,6 +127,11 @@ func New(cfg Config) (*App, error) {
 	if err != nil {
 		_ = a.Close()
 		return nil, fmt.Errorf("factoryapp: open inbox: %w", err)
+	}
+	a.tasks, err = tasks.New(context.Background(), a.inbox.DB())
+	if err != nil {
+		_ = a.Close()
+		return nil, fmt.Errorf("factoryapp: open tasks: %w", err)
 	}
 	a.auth, err = auth.Open(filepath.Join(cfg.DataDir, "auth.db"))
 	if err != nil {
