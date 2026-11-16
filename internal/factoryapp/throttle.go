@@ -78,6 +78,19 @@ func (a *App) initThrottle(cfg Config) {
 		EnvOff:     cfg.Throttle.Off,
 		Hysteresis: cfg.Throttle.Hysteresis,
 		Overrides:  settingsOverrides{a.tasks},
+		Pauses:     settingsOverrides{a.tasks},
+		OnPause: func(ctx context.Context, title, body string) {
+			if len(title) > maxAlertTitle {
+				title = title[:maxAlertTitle]
+			}
+			a.raiseSystemAlert(ctx, alertPriorityPause, title, body, "factory:throttle")
+		},
+		OnResume: func(ctx context.Context, title, body string) {
+			if len(title) > maxAlertTitle {
+				title = title[:maxAlertTitle]
+			}
+			a.raiseSystemAlert(ctx, alertPriorityResume, title, body, "factory:throttle")
+		},
 		OnAlert: func(ctx context.Context, level usagewin.State, title, body string) {
 			p := alertPriorityThrottleOrange
 			if level == usagewin.Red {
@@ -90,6 +103,10 @@ func (a *App) initThrottle(cfg Config) {
 		},
 	})
 	a.jobs.SetAdmission(a.admitNew)
+	// No dispatch of already-admitted pending jobs or due retries while the
+	// usage-limit pause is active (override off dispatches as usual).
+	hold := func(ctx context.Context) bool { return !a.gate.Dispatching(ctx) }
+	a.pending.Hold, a.picker.Hold = hold, hold
 }
 
 // admitNew is the jobs.Admission hook for NEW jobs. A new non-P0 job also

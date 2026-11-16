@@ -66,6 +66,9 @@ func (a *App) handleEnvelope(ctx context.Context, env wire.MessageEnvelope, seen
 		if res.JobID == "" {
 			res.JobID = env.JobID
 		}
+		if a.requeueLimited(ctx, res) {
+			return // usage-limit rejection: requeued held, no failure, no retry (S5)
+		}
 		if err := a.jobs.ApplyResult(ctx, res); err != nil {
 			log.Printf("factoryapp: consumer: apply result %s: %v", res.JobID, err)
 			return

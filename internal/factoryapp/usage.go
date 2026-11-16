@@ -75,6 +75,11 @@ func (a *App) initUsage(cfg Config) {
 // recordUsage appends the event and feeds any rate_limit_info to the state
 // cache as a stream reading.
 func (a *App) recordUsage(ctx context.Context, ev wire.UsageEvent) error {
+	// A hard rejection pauses dispatch (S5). Trip BEFORE the reading is
+	// ingested so the pause alert is the one alert for the event.
+	if rej, ok := usagewin.DetectRejection(ev.RateLimit, ev.Limit, a.clock()); ok && a.usage != nil {
+		a.onRejection(ctx, rej, ev.JobID)
+	}
 	if ev.RateLimit != "" && a.usage != nil {
 		a.usage.IngestRateLimit(ev.RateLimit)
 	}

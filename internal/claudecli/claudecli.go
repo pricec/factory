@@ -173,10 +173,10 @@ func Exec(parent context.Context, s Session) (string, Usage, error) {
 		// Our own bound names the session; a caller's deadline (e.g. the
 		// router's job.question SLA) is reported as the caller's, not ours.
 		if parent.Err() != nil {
-			return Text(stdout.String()), parseUsage(stdout.String()), fmt.Errorf("claude run cancelled: %w", parent.Err())
+			return Text(stdout.String()), parseUsageWithStderr(stdout.String(), stderr.String()), fmt.Errorf("claude run cancelled: %w", parent.Err())
 		}
 		if ctx.Err() == context.DeadlineExceeded {
-			return Text(stdout.String()), parseUsage(stdout.String()), fmt.Errorf("%s exceeded %s", s.Label, s.Timeout)
+			return Text(stdout.String()), parseUsageWithStderr(stdout.String(), stderr.String()), fmt.Errorf("%s exceeded %s", s.Label, s.Timeout)
 		}
 		// A bare name missing from PATH is exec.ErrNotFound; an explicit
 		// path that does not exist is fs.ErrNotExist.
@@ -184,15 +184,30 @@ func Exec(parent context.Context, s Session) (string, Usage, error) {
 			return "", Usage{}, fmt.Errorf("claude CLI not found (%s): install the Claude Code CLI on this host: %w", bin, err)
 		}
 		if detail := snippet(stderr.String()); detail != "" {
-			return Text(stdout.String()), parseUsage(stdout.String()), fmt.Errorf("claude run: %w; stderr: %s", err, detail)
+			return Text(stdout.String()), parseUsageWithStderr(stdout.String(), stderr.String()), fmt.Errorf("claude run: %w; stderr: %s", err, detail)
 		}
-		return Text(stdout.String()), parseUsage(stdout.String()), fmt.Errorf("claude run: %w; stdout: %s", err, snippet(Text(stdout.String())))
+		return Text(stdout.String()), parseUsageWithStderr(stdout.String(), stderr.String()), fmt.Errorf("claude run: %w; stdout: %s", err, snippet(Text(stdout.String())))
 	}
 	o := ParseOutput(stdout.String())
 	return o.Text, o.Usage, nil
 }
 
 func parseUsage(raw string) Usage { return ParseOutput(raw).Usage }
+
+// parseUsageWithStderr is parseUsage for a failed run: when the CLI wrote
+// its limit-reached message to stderr instead of the result object, the
+// stderr text is captured as Usage.Limit (S5 detects the rejection from it).
+func parseUsageWithStderr(stdout, stderr string) Usage {
+	return UsageWithStderr(parseUsage(stdout), stderr)
+}
+
+// UsageWithStderr adds the stderr limit text to u when u has none.
+func UsageWithStderr(u Usage, stderr string) Usage {
+	if u.Limit == "" && limitRe.MatchString(stderr) {
+		u.Limit = snippet(strings.TrimSpace(stderr))
+	}
+	return u
+}
 
 // withEnvValue returns base with key set to value, replacing any earlier
 // assignment.

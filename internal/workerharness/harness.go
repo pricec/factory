@@ -180,7 +180,7 @@ func Run(ctx context.Context, cfg Config) error {
 		// back to raw stdout when unparseable.
 		parsed := claudecli.ParseOutput(out)
 		out = parsed.Text
-		recordUsage(ctx, cfg, spec, parsed.Usage)
+		recordUsage(ctx, cfg, spec, claudecli.UsageWithStderr(parsed.Usage, errOut))
 	}
 
 	if _, err := os.Stat(filepath.Join(jobDir, flagFileName)); err == nil {

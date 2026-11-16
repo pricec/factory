@@ -79,6 +79,10 @@ type Config struct {
 	// OnAlert is called on entering ORANGE or RED, once per (level,
 	// window, reset) - i.e. deduped per usage window.
 	OnAlert func(ctx context.Context, level usagewin.State, title, body string)
+	// Pauses persists the S5 pause state (nil -> process-local).
+	Pauses PauseStore
+	// OnPause / OnResume raise the one alert per pause / resume.
+	OnPause, OnResume func(ctx context.Context, title, body string)
 	// Logf logs (nil -> log.Printf).
 	Logf func(format string, args ...any)
 }
@@ -99,6 +103,12 @@ type Eval struct {
 	Summary string `json:"summary,omitempty"`
 	// Bumped lists windows whose state was raised by the projection.
 	Bumped []usagewin.Window `json:"bumped,omitempty"`
+	// S5 pause: true while a hard limit rejection pauses dispatch (also
+	// reported while an operator override forces dispatch anyway).
+	Paused       bool       `json:"paused"`
+	PausedUntil  *time.Time `json:"paused_until,omitempty"`
+	PausedWindow string     `json:"paused_window,omitempty"`
+	PauseReason  string     `json:"pause_reason,omitempty"`
 }
 
 type sample struct {
@@ -116,18 +126,20 @@ type winHist struct {
 type Gate struct {
 	cfg Config
 
-	mu         sync.Mutex
-	level      usagewin.State
-	belowSince time.Time
-	peakBelow  usagewin.State
-	hist       map[usagewin.Window]*winHist
-	lastStart  time.Time
-	inflight   map[string]time.Time
-	alerted    map[string]time.Time // dedupe key -> window reset (pruned after)
-	override   *Override
-	loadedOv   bool
-	failOpen   bool
-	failLogged time.Time
+	mu          sync.Mutex
+	level       usagewin.State
+	belowSince  time.Time
+	peakBelow   usagewin.State
+	hist        map[usagewin.Window]*winHist
+	lastStart   time.Time
+	inflight    map[string]time.Time
+	alerted     map[string]time.Time // dedupe key -> window reset (pruned after)
+	override    *Override
+	loadedOv    bool
+	failOpen    bool
+	failLogged  time.Time
+	pause       *PauseState
+	pauseLoaded bool
 }
 
 // New builds a Gate.
@@ -193,6 +205,9 @@ func (g *Gate) Admit(ctx context.Context, jobID string, req Request, active func
 		load.ActiveNonP0 = len(set)
 	}
 	hold, why := Rule(level, req, load)
+	if hold && level == Paused {
+		return true, ev.PauseReason
+	}
 	if hold {
 		return true, fmt.Sprintf("usage %s: %s; %s", level, ev.Summary, why)
 	}
@@ -289,7 +304,37 @@ func (g *Gate) saveOverrideLocked(ctx context.Context) {
 	}
 }
 
+// evaluateLocked is the usage-state evaluation plus the S5 pause overlay.
 func (g *Gate) evaluateLocked(ctx context.Context) Eval {
+	ev := g.usageEvalLocked(ctx)
+	g.loadPauseLocked(ctx)
+	if g.pause != nil {
+		u := g.pause.Until
+		ev.Paused, ev.PausedUntil, ev.PausedWindow, ev.PauseReason = true, &u, g.pause.Window, g.pause.Reason
+		// A known rejection is never failed open (fail-open is only for
+		// "no reading").
+		ev.FailOpen = false
+		if ev.Mode == ModeAuto {
+			ev.Level = Paused
+		}
+		ev.Summary = g.pause.Reason
+	}
+	return ev
+}
+
+// modeLocked is the current mode (env kill switch / override).
+func (g *Gate) modeLocked(ctx context.Context) Mode {
+	g.loadOverrideLocked(ctx)
+	if g.cfg.EnvOff {
+		return ModeOff
+	}
+	if g.override != nil && g.cfg.Now().Before(g.override.Until) {
+		return ModeOff
+	}
+	return ModeAuto
+}
+
+func (g *Gate) usageEvalLocked(ctx context.Context) Eval {
 	now := g.cfg.Now()
 	g.loadOverrideLocked(ctx)
 	ev := Eval{Mode: ModeAuto, ModeSource: "default"}
@@ -387,6 +432,10 @@ func (g *Gate) applyHysteresis(raw usagewin.State, now time.Time) {
 }
 
 func (g *Gate) alertLocked(ctx context.Context, level usagewin.State, w usagewin.Window, v usagewin.WindowView, ev Eval, now time.Time) {
+	g.loadPauseLocked(ctx)
+	if g.pause != nil {
+		return // the pause alert covers it (one alert per event)
+	}
 	for k, reset := range g.alerted {
 		if now.After(reset) {
 			delete(g.alerted, k)

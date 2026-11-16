@@ -29,6 +29,9 @@ type PendingPicker struct {
 	matcher registry.Matcher
 	// Tick is the loop interval; default 10s.
 	Tick time.Duration
+	// Hold, when set and true, skips the whole pass: no dispatching while
+	// the usage-limit pause (token throttle S5) is active.
+	Hold func(ctx context.Context) bool
 }
 
 // NewPendingPicker creates a picker over store dispatching via matcher.
@@ -40,6 +43,9 @@ func NewPendingPicker(store *Store, matcher registry.Matcher) *PendingPicker {
 // list matches an online foreman is dispatched to the Matcher's pick; the
 // rest stay pending for the next pass. Returns how many were dispatched.
 func (p *PendingPicker) Pump(ctx context.Context) (int, error) {
+	if p.Hold != nil && p.Hold(ctx) {
+		return 0, nil
+	}
 	rows, err := p.store.db.QueryContext(ctx,
 		`SELECT id, spec FROM jobs WHERE state = ? ORDER BY created_at ASC LIMIT ?`,
 		StatePending, pendingMatchLimit)
