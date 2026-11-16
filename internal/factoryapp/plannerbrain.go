@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/pricec/factory/internal/claudecli"
 	"github.com/pricec/factory/internal/llmctx"
+	"github.com/pricec/factory/internal/tasks"
 	"github.com/pricec/factory/internal/wire"
 )
 
@@ -72,27 +74,174 @@ type PlannerBrain struct {
 	Exec func(ctx context.Context, prompt string) (string, error)
 }
 
-// Handle wakes the planner for envs (spec §9.5): prompt = wake reason +
-// recent operator-inbox history + the triggering envelopes, all
-// payload-capped via llmctx (spec §6.6). Errors are returned for the loop
-// to log and surface to the operator - the brain never panics.
+// Handle wakes the planner for envs without a task binding: prompt =
+// wake reason + history + the triggering envelopes, all payload-capped
+// via llmctx (spec §6.6). The planner loop uses HandleTask (spec §9.5.2);
+// Handle remains the unthreaded entry point. Errors are returned for the
+// caller to surface to the operator - the brain never panics.
 func (b *PlannerBrain) Handle(ctx context.Context, reason string, history, envs []wire.MessageEnvelope) error {
 	prompt := llmctx.BuildWakePrompt(reason, append(history, envs...))
-	exec := b.Exec
-	if exec == nil {
-		if isClaudeModel(b.Model) {
-			exec = b.runClaude
-		} else {
-			exec = b.runOpencode
-		}
-	}
-	stdout, err := exec(ctx, prompt)
+	stdout, err := b.exec()(ctx, prompt)
 	if err != nil {
 		return fmt.Errorf("planner session for %d envelope(s): %w", len(envs), err)
 	}
 	log.Printf("factoryapp: planner handled %d envelope(s); stdout: %s", len(envs), snippet(stdout))
 	return nil
 }
+
+// exec returns the session runner: Exec when set (tests), else the child
+// CLI routed on the session model (spec §9.4).
+func (b *PlannerBrain) exec() func(ctx context.Context, prompt string) (string, error) {
+	switch {
+	case b.Exec != nil:
+		return b.Exec
+	case isClaudeModel(b.Model):
+		return b.runClaude
+	default:
+		return b.runOpencode
+	}
+}
+
+// PlannerWake is one per-task planner wake (spec §9.5.2).
+type PlannerWake struct {
+	// Reason names the trigger (operator chat vs foreman report).
+	Reason string
+	// Task is the woken task (header: id, title, priority, status, jobs).
+	Task tasks.Task
+	// Criteria is the operator's priority_criteria text ("" = unset).
+	Criteria string
+	// Thread is the task's own thread, oldest first (last 40 messages,
+	// internal rows included so the planner sees job news).
+	Thread []wire.MessageEnvelope
+	// Triggers are the envelopes that caused this wake.
+	Triggers []wire.MessageEnvelope
+}
+
+// plannerTaskKey carries the woken task id on the session context.
+type plannerTaskKey struct{}
+
+// PlannerTaskFromContext returns the task a planner session was woken for
+// ("" outside a task wake). Session runners (and the test Exec seam) see
+// it on their context.
+func PlannerTaskFromContext(ctx context.Context) string {
+	id, _ := ctx.Value(plannerTaskKey{}).(string)
+	return id
+}
+
+// HandleTask runs one planner session for a task wake (spec §9.5.2). The
+// session is bound to the task: the child's MCP URL carries
+// ?task_id=<id> (the "woken task" that notify_operator and create_job
+// default to, mcpfactory.WokenTaskHeader) and it runs in its own per-task
+// work dir (<WorkDir>/../planner-tasks/<id>, removed afterwards) so
+// parallel sessions never share a generated config.
+func (b *PlannerBrain) HandleTask(ctx context.Context, w PlannerWake) error {
+	sb := b.forTask(w.Task.ID)
+	if b.Exec == nil {
+		defer func() {
+			if err := os.RemoveAll(sb.WorkDir); err != nil {
+				log.Printf("factoryapp: planner: clean %s: %v", sb.WorkDir, err)
+			}
+		}()
+	}
+	ctx = context.WithValue(ctx, plannerTaskKey{}, w.Task.ID)
+	stdout, err := sb.exec()(ctx, buildTaskWakePrompt(w))
+	if err != nil {
+		return fmt.Errorf("planner session for task %s (%d envelope(s)): %w", w.Task.ID, len(w.Triggers), err)
+	}
+	log.Printf("factoryapp: planner handled task %s (%d envelope(s)); stdout: %s", w.Task.ID, len(w.Triggers), snippet(stdout))
+	return nil
+}
+
+// forTask returns a copy of b bound to taskID: MCP URL with the task
+// query, per-task work dir.
+func (b *PlannerBrain) forTask(taskID string) *PlannerBrain {
+	c := *b
+	c.MCPURL = plannerTaskURL(b.MCPURL, taskID)
+	c.WorkDir = filepath.Join(filepath.Dir(filepath.Clean(b.WorkDir)), "planner-tasks", taskID)
+	return &c
+}
+
+// plannerTaskURL appends task_id=<id> to the MCP URL's query.
+func plannerTaskURL(base, taskID string) string {
+	u, err := url.Parse(base)
+	if err != nil {
+		return base
+	}
+	q := u.Query()
+	q.Set("task_id", taskID)
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// buildTaskWakePrompt renders a per-task wake prompt (spec §9.5.2): the
+// reason, the task header, the operator's priority criteria, then the
+// task thread oldest first with internal rows and the new triggers
+// marked. Payloads are llmctx-capped (2KB each, spec §6.6).
+func buildTaskWakePrompt(w PlannerWake) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "You are the factory planner. %s\n", w.Reason)
+
+	t := w.Task
+	sb.WriteString("\n=== task ===\n")
+	fmt.Fprintf(&sb, "id: %s\ntitle: %s\nstatus: %s\npriority: %d (0 = most urgent)\n", t.ID, t.Title, t.Status, t.Priority)
+	jobs := "none"
+	if len(t.JobIDs) > 0 {
+		jobs = strings.Join(t.JobIDs, ", ")
+	}
+	fmt.Fprintf(&sb, "job_ids: %s\n", jobs)
+
+	sb.WriteString("\n=== operator priority criteria ===\n")
+	if strings.TrimSpace(w.Criteria) == "" {
+		sb.WriteString("(none set; record them with set_priority_criteria when the operator states some)\n")
+	} else {
+		sb.WriteString(string(llmctx.Cap([]byte(w.Criteria))) + "\n")
+	}
+
+	isTrigger := map[string]bool{}
+	for _, e := range w.Triggers {
+		isTrigger[e.ID] = true
+	}
+	fmt.Fprintf(&sb, "\n=== task thread: last %d message(s), oldest first; [internal] rows are never shown to the operator, [new] rows woke you ===\n", len(w.Thread))
+	if len(w.Thread) == 0 {
+		sb.WriteString("(empty)\n")
+	}
+	inThread := map[string]bool{}
+	for i, env := range w.Thread {
+		inThread[env.ID] = true
+		fmt.Fprintf(&sb, "\n--- message %d%s ---\n%s", i+1, promptTags(env, isTrigger[env.ID]), llmctx.EnvelopeSnippet(env))
+	}
+	var missing []wire.MessageEnvelope
+	for _, env := range w.Triggers {
+		if !inThread[env.ID] {
+			missing = append(missing, env)
+		}
+	}
+	if len(missing) > 0 {
+		sb.WriteString("\n=== new messages not yet in the thread view ===\n")
+		for i, env := range missing {
+			fmt.Fprintf(&sb, "\n--- new message %d%s ---\n%s", i+1, promptTags(env, true), llmctx.EnvelopeSnippet(env))
+		}
+	}
+	fmt.Fprintf(&sb, taskWakeFooter, t.ID)
+	return sb.String()
+}
+
+// promptTags marks a thread row in the wake prompt.
+func promptTags(env wire.MessageEnvelope, trigger bool) string {
+	var tags string
+	if tasks.IsInternal(env.Type) {
+		tags += " [internal]"
+	}
+	if trigger {
+		tags += " [new]"
+	}
+	return tags
+}
+
+const taskWakeFooter = `
+This session is bound to task %s: notify_operator and create_job default to it. Reply to the operator ONLY with notify_operator. ` +
+	`Retitle or reprioritise with update_task; close it with update_task(status=closed) once its jobs are terminal and the operator has been told. ` +
+	`Handle the [new] messages with your tools, then finish; do not repeat work.`
 
 // runOpencode is the opencode-runner Exec (the non-claude route, spec
 // §9.4): it regenerates the opencode project

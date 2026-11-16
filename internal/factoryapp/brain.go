@@ -11,6 +11,7 @@ import (
 	"github.com/pricec/factory/internal/inbox"
 	"github.com/pricec/factory/internal/jobs"
 	"github.com/pricec/factory/internal/registry"
+	"github.com/pricec/factory/internal/tasks"
 	"github.com/pricec/factory/internal/wire"
 )
 
@@ -25,6 +26,9 @@ type createJobRequest struct {
 	TimeoutS     int             `json:"timeout_s,omitempty"`
 	Priority     int             `json:"priority,omitempty"`
 	ScheduleCron string          `json:"schedule_cron,omitempty"`
+	// TaskID files the job under a task (spec §9.5.2): recorded in
+	// task_jobs before dispatch, so the job's reports thread onto it.
+	TaskID string `json:"task_id,omitempty"`
 }
 
 // handleCreateJob serves POST /v1/jobs (spec §6.9): the UI-facing twin of the
@@ -36,6 +40,16 @@ func (a *App) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON: "+err.Error())
 		return
+	}
+	if in.TaskID != "" {
+		if _, err := a.tasks.GetTask(r.Context(), in.TaskID); err != nil {
+			if errors.Is(err, tasks.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "unknown_task", "unknown task "+in.TaskID)
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
 	}
 
 	// Breaker first (spec §6.5), same as the MCP tool.
@@ -87,6 +101,15 @@ func (a *App) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
+	// Link before dispatch (spec §9.5.2): the job's first report must
+	// already resolve to its task.
+	if in.TaskID != "" {
+		if err := a.tasks.LinkJob(r.Context(), in.TaskID, spec.ID); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal", "link task: "+err.Error())
+			return
+		}
+		defer a.publishTaskChanged(r.Context(), in.TaskID)
+	}
 	if state == "dispatched" {
 		if err := a.jobs.Dispatch(r.Context(), spec.ID, foreman); err != nil {
 			writeError(w, http.StatusInternalServerError, "internal", err.Error())
@@ -110,6 +133,9 @@ func (a *App) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		"job_id":  spec.ID,
 		"state":   state,
 		"foreman": foreman,
+	}
+	if in.TaskID != "" {
+		body["task_id"] = in.TaskID
 	}
 	// Loud, non-fatal warnings (spec §6.7): e.g. requires could not be
 	// validated because no foremen are registered yet.

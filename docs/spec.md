@@ -588,7 +588,8 @@ factory planner's list view carries summaries only (#7, #19).
 | `GET /v1/spend?day=` | daily totals `{total_usd, jobs}`; per-role deferred until jobs carry role tags (#13) |
 | `GET /v1/inboxes` | per-inbox aggregate listing `{inbox_id, total, unacked, last_ts}` (UI; §4.1) |
 | `GET /v1/inboxes/{id}/recent` | recent envelopes for one inbox, acked included (UI; §4.1) |
-| `POST /v1/chat` | `{text}` -> chat.message envelope in the operator inbox; wakes the LLM planner (§9.5) |
+| `POST /v1/chat` | `{text, task_id?}` -> chat.message envelope in the operator inbox, filed under a task (new without `task_id`; 404 for an unknown one); wakes the LLM planner (§9.5, §9.5.2) |
+| `GET /v1/tasks`, `GET /v1/tasks/{id}`, `POST /v1/tasks` | task list, task + thread, and the "new task" alias of chat (§9.5.2) |
 | `GET /v1/inboxes/planner:main/stream` | permissive SSE stream of the operator inbox for the chat UI (§9.5) |
 | `GET /` | operator web UI (single page; §4.1) |
 | `POST /v1/pairing-tokens` | planner-credential auth (v1: the planner token doubles as the operator credential); issues a one-time pairing token, `200 {pairing_token, expires_at}` (#23) |
@@ -1065,7 +1066,9 @@ orphaned, live, and local job ids.
   section (#17, #15).
 - Tool descriptions stay tiny (per-turn token cost for every LLM caller,
   #6); byte budgets asserted by test: worker surface < 1KB total (#17);
-  foreman surface < 1.5KB (#18); factory surface < 2KB (2026-11-15
+  foreman surface < 1.5KB (#18); factory surface < 4KB (2026-11-16
+  inbox redesign: raised from 2KB for the task tools of §9.5.2 and
+  the `task_id` arguments, with headroom for the alert tool; 2026-11-15
   amendments: raised from 1.5KB for the incident-driven `cancel_job` tool,
   and `create_job` must state the requires tag-name forms - §6.7 -
   because undocumented semantics let the planner pass capability
@@ -1266,7 +1269,11 @@ Tools (exact):
   GLM 5.3) - bias towards the cheapest tier that can do the job (#29);
   with `schedule_cron`, also creates a schedule via
   the #8 API (§6.8). Refused with error `spend_cap_exceeded` when the
-  daily spend breaker is open (#13).
+  daily spend breaker is open (#13). Optional `task_id` (inbox redesign
+  S2, §9.5.2) files the job under a task (`task_jobs`), defaulting to the
+  session's woken task; the link is written before dispatch, the result
+  carries `task_id`, and an unknown task is a tool error with no job
+  created.
 - `read_result(job_id)` - full result payload; the ONLY path by which full
   payloads enter LLM context (#19; #7 point 3).
 - `cancel_job(job_id, reason?, supersede?)` - terminal-cancels a
@@ -1282,9 +1289,18 @@ Tools (exact):
   (any JSON value) is required; an id matching no registered foreman is
   a tool error (2026-11-14 amendment: a mis-addressed relay must fail,
   not open an inbox nothing reads).
-- `notify_operator(text)` - posts a `brain.reply` envelope into the operator
-  inbox (`planner:main`, §9.5); the ONLY way the LLM planner talks back to
-  the human.
+- `notify_operator(text, task_id?)` - posts a `brain.reply` envelope into
+  the operator inbox (`planner:main`, §9.5); the ONLY way the LLM planner
+  talks back to the human. It is filed under `task_id`, else the woken
+  task, else a NEW task titled from the text (§9.5.2), so a reply is never
+  orphaned; an unknown task is a tool error. Returns `{ok, id, task_id}`.
+- Task tools (inbox redesign S2, §9.5.2): `list_tasks(status?=open|closed|
+  all (default open), q?, limit?=50)` -> `{tasks}`; `get_task(task_id)` ->
+  `{task, messages}` (the last 40 thread messages with an `internal` flag,
+  each payload 2KB-capped and rendered as a string); `update_task(task_id,
+  title?, priority?, status?=open|closed, reason?)` -> `{task}` (closing
+  defaults `reason` to `planner`; a reopen ignores it);
+  `set_priority_criteria(text)` -> `{ok}`.
 
 Input schemas (2026-11-14 amendment): every tool on this surface
 advertises a typed input schema - argument names and required fields are
@@ -1397,8 +1413,10 @@ Envelope types in `planner:main`:
   when several apply. Informational for the human: no planner wake.
 
 Planner loop (internal/factoryapp, twin of the consumer loop): drains
-`planner:main`; `chat.message`, `foreman.report`, and `brain.failed` wake one
-planner session (§9.4 surface, planner bearer, model via
+`planner:main`; `chat.message`, `foreman.report`, and `brain.failed` wake
+the planner - since the inbox redesign, ONE session per touched task with
+that task's thread as context (§9.5.2, which supersedes the "recent inbox
+history" wording below); historically one planner session (§9.4 surface, planner bearer, model via
 `FACTORY_PLANNER_MODEL`, default per §6.5; the child CLI routes on that model -
 the Claude Code CLI for claude-* ids, opencode otherwise, §9.4) with the recent
 inbox history replayed into the prompt (per-payload 2KB caps, §6.6). The wake
@@ -1455,6 +1473,111 @@ every start; existing files migrate in place.
   reaper live in the factory app, which uses the store's primitives
   (`ExpireAlerts(now)`, `TransitionAlert` compare-and-set, and so on).
 
+#### 9.5.2 Tasks and per-task planner wakes (inbox redesign S2, 2026-11-16)
+
+Every operator conversation is a task (§9.5.1 storage). Messages attach
+to a task through `messages.thread_id`.
+
+Chat and task API (unauthenticated, like the rest of the UI surface,
+§7.5):
+
+- `POST /v1/chat {text, task_id?}`: without `task_id` it opens a task
+  titled with the first 60 characters of the text (whitespace collapsed;
+  the planner may retitle). With `task_id` it posts into that task, and a
+  closed task is reopened. An unknown `task_id` returns 404
+  `unknown_task`; blank text returns 400. The response is 201 with the
+  stored envelope (every field it had before, `thread_id` included) plus
+  `task_id`.
+- `POST /v1/tasks {text}` is the same as chat without `task_id` (the "new
+  task" box).
+- Task JSON: `{id, title, status open|closed, priority int (0 = most
+  urgent), created_at, updated_at, closed_at?, close_reason?, job_ids[],
+  last_activity_at, preview}`. `preview` is the newest operator-visible
+  message (`chat.message`/`brain.reply`) of the thread, whitespace
+  collapsed, at most 120 characters, and "" if there is none.
+- `GET /v1/tasks?status=open|closed|all&q=&limit=` -> `{tasks}`. `status`
+  defaults to `all`, `limit` defaults to 200 (clamped at 1000), and a bad
+  status or limit returns 400. Ranking: open first, then priority ASC,
+  then last_activity_at DESC. `q` matches a title substring, an id prefix
+  or a `YYYY-MM-DD` date prefix.
+- `GET /v1/tasks/{id}?internal=1&limit=` -> `{task, messages: [{id, type,
+  from, job_id, ts, payload, internal}]}`: the thread oldest first,
+  limited to the last `limit` rows (default 500, max 5000). Internal rows
+  (every type except `chat.message` and `brain.reply`) are excluded
+  unless `internal=1` (or `true`). An unknown id returns 404.
+- `POST /v1/jobs` accepts `task_id` (the twin of `create_job`, §9.4). It
+  is linked before dispatch, echoed in the 201 body, and an unknown task
+  returns 404 `unknown_task`.
+- SSE (I5): every change to a task (creation through chat, a post into
+  it, reopen, close, update_task, job link, reaper close) publishes a
+  synthetic, NOT persisted envelope `{type: "task.changed", thread_id:
+  <task id>, payload: Task}` on the `planner:main` stream. Threaded
+  messages also stream as before. Clients treat both as "re-fetch this
+  task".
+
+Job -> task attribution (relay stamping): `foreman.report`,
+`brain.failed` and `notify.job` carry a job id. The job resolves to a task
+through `task_jobs`. If the job is not linked, resolution walks the job
+spec's `ParentJobID` (spawn_child children, which reach the factory
+through `RegisterSpawned`, §6.2), and a child resolved this way is linked
+itself. The relayed row is posted with that `thread_id` and stays internal
+(hidden by default). A `foreman.report`/`brain.failed` that cannot be
+attributed OPENS A NEW TASK, titled from its payload (the first
+non-empty `text`/`title`/`summary`/`message`/`error` field, else
+`<type> from <sender> (<job>)`), and the planner wakes on it there, so it
+is never lost. An unattributed `notify.job` is stored unthreaded and is
+hidden. `notify.job` envelopes also carry the job id in `job_id`.
+
+Per-task wakes (operator DECISION 1):
+
+- The planner loop maps every waking envelope (`chat.message`,
+  `foreman.report`, `brain.failed`) to a task. A thread that names an
+  existing task is used as is, and is reopened if closed: a report on a
+  closed task reopens it, and the planner may close it again. An envelope
+  with no thread, or with a thread naming no task (a legacy client, or a
+  relay whose task lookup failed), is attributed through its job, else
+  given a new task, and the stored row is re-threaded. If even that fails,
+  an unthreaded `brain.reply` note names the envelope.
+- Envelopes are grouped by task and run as ONE planner session per
+  touched task. Different tasks run IN PARALLEL with NO cap in v1. Two
+  sessions never run concurrently on the SAME task: envelopes arriving
+  while that task's session runs are coalesced (deduplicated by id) into
+  one follow-up session, which starts when the current one ends. The hand
+  off is decided under one lock, so no waker is lost.
+- Concurrency seam: `WakeLimiter interface{ Acquire(ctx) (release func(),
+  err error) }` gates every session at the dispatch point. The default is
+  unlimited. `App.SetWakeLimiter` installs a cap, and
+  `NewSemaphoreWakeLimiter(n)` is the ready-made one.
+- Prompt: the wake reason, then the task header (id, title, status,
+  priority, job ids), then the operator's `priority_criteria` text, then
+  the task's own thread (last 40 messages, oldest first, internal rows
+  included and marked `[internal]`, triggering rows marked `[new]`), each
+  payload capped at 2KB (§6.6). It is not the global history.
+- Woken-task binding: each session's MCP URL is the planner endpoint plus
+  `?task_id=<id>`. The planner MCP auth wrapper copies that into the
+  `X-Factory-Task-Id` header, which tools read (a client may also send the
+  header directly). `notify_operator` and `create_job` default to it. Each
+  session runs in its own work dir, `<DataDir>/planner-tasks/<id>`, which
+  holds the generated config and is removed after the session, so
+  parallel sessions never share a config file.
+- Failures are never silent. A session error, a limiter refusal or a
+  panic posts the `brain.reply` note "The planner could not run: ..."
+  INTO the task (unthreaded if that post fails).
+- Delivery: the loop acks envelopes once they are handed to the
+  dispatcher. The dispatcher persists its in-flight set (the running and
+  pending message ids per task) in `settings` key `planner_wake_inflight`
+  on every change. At start-up the planner loop re-dispatches whatever
+  that set still holds, so a restart mid-session re-runs the interrupted
+  wake (at least once). A shutdown posts no failure note.
+
+Reaper (operator DECISION 3): every 10 minutes, an open task whose
+`last_activity_at` is at least 24h old, that has no non-terminal job (a
+job id the jobs store does not know counts as terminal), and that has no
+planner session running or queued is closed with close_reason
+`idle-24h`, and task.changed is published. The planner normally closes
+tasks itself (`update_task(status=closed)`) once their jobs are terminal
+and the operator has been told; the reaper is the backstop.
+
 ## 10. Error model
 
 ```json
@@ -1476,6 +1599,7 @@ Pinned status codes:
 | `404` | `POST /v1/foremen/{id}/messages` where `{id}` matches no registered foreman (`unknown_foreman`) | 2026-11-14 amendment |
 | `400` | job creation (`POST /v1/jobs`, MCP `create_job`) whose `requires` entries name no registered foreman tag key (`unknown_requires`) | 2026-11-15 amendment |
 | `404` | cancel of an unknown job id (`POST /v1/jobs/{id}/cancel`) | 2026-11-15 amendment |
+| `404` | unknown task id (`POST /v1/chat` / `POST /v1/jobs` with `task_id`, `GET /v1/tasks/{id}`; code `unknown_task`) | 2026-11-16 inbox redesign S2 |
 
 Pinned error codes: `spend_cap_exceeded` (#13), `unknown_foreman`,
 `unknown_requires`. Validation rejects anything
@@ -1502,7 +1626,7 @@ outside the `result_schema` subset at validation time (#3).
 | Bearer token | 32B random, stored SHA-256 only | #11 |
 | Long-poll window | `wait_seconds` 0-60 | #1 |
 | Inbox fetch limit | default 50, max 500 | #1 |
-| MCP description budgets | worker < 1KB; foreman < 1.5KB; factory < 2KB (2026-11-15 amendment) | #17, #18, #19 |
+| MCP description budgets | worker < 1KB; foreman < 1.5KB; factory < 4KB (2026-11-16 inbox redesign; was 2KB) | #17, #18, #19 |
 | JobSpec defaults | `timeout_s` 300; `priority` 5 (1-9, 9 highest); `budget` `{max_prompt_bytes 32768, max_output_tokens 8192, max_cost_usd 5.0}` | #3 |
 | Long-pending alert | `pending` with no matching online foreman for > 30 min -> one `notify.pending` in `planner:main` (dedupe per job per pending episode); check tick 1 min | 2026-11-15 amendment |
 | Foreman orphan recovery | startup pass before any loop; listing 1000 rows per owner spelling; 5 attempts, 2s apart; orphan result kind `crash` | 2026-11-16 orphan-recovery amendment, §8.7 |

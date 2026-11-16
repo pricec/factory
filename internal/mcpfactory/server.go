@@ -1,6 +1,7 @@
 package mcpfactory
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"github.com/pricec/factory/internal/inbox"
 	"github.com/pricec/factory/internal/jobs"
 	"github.com/pricec/factory/internal/registry"
+	"github.com/pricec/factory/internal/tasks"
 )
 
 // Config wires the factory planner MCP server (spec §9.4).
@@ -32,6 +34,12 @@ type Config struct {
 	// Budget carries the daily spend cap and FACTORY_SPEND_OVERRIDE for the
 	// create_job breaker (spec §6.5).
 	Budget budgets.Config
+	// Tasks is the task store (spec §9.5.2). nil disables the task tools
+	// and task_id handling (notify_operator then posts unthreaded).
+	Tasks *tasks.Store
+	// TaskChanged, when set, is told about every task a tool creates or
+	// changes (the factory publishes task.changed on SSE, I5).
+	TaskChanged func(ctx context.Context, taskID string)
 }
 
 // Handler builds the factory planner MCP endpoint (spec §9.4): the five-tool
@@ -78,8 +86,9 @@ func Handler(cfg Config) (http.Handler, error) {
 	}, messageForemanTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "notify_operator",
-		Description: "Reply to the operator in the chat UI; ALWAYS answer this way.",
+		Description: "Reply to the operator on a task thread (task_id defaults to the woken task); ALWAYS answer this way.",
 	}, notifyOperatorTool(cfg))
+	addTaskTools(srv, cfg) // spec §9.5.2 (tasks_tools.go)
 
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
@@ -92,6 +101,12 @@ func Handler(cfg Config) (http.Handler, error) {
 // planner credentials carry none (spec §9.4).
 func plannerAuth(cfg Config, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Woken-task plumbing (spec §9.5.2): the planner session's MCP
+		// URL carries ?task_id=<id>; tools read it as a header, which the
+		// SDK hands them (RequestExtra.Header).
+		if id := r.URL.Query().Get("task_id"); id != "" {
+			r.Header.Set(WokenTaskHeader, id)
+		}
 		identity, _, err := cfg.Auth.Identify(r.Context(), bearerOf(r.Header.Get("Authorization")))
 		var ue *auth.UnauthorizedError
 		if errors.As(err, &ue) {

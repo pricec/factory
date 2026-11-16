@@ -10,6 +10,7 @@ import (
 	"github.com/pricec/factory/internal/auth"
 	"github.com/pricec/factory/internal/jobs"
 	"github.com/pricec/factory/internal/registry"
+	"github.com/pricec/factory/internal/tasks"
 	"github.com/pricec/factory/internal/wire"
 )
 
@@ -43,6 +44,7 @@ type (
 		TimeoutS     *int     `json:"timeout_s,omitempty"`
 		Priority     *int     `json:"priority,omitempty"`
 		ScheduleCron string   `json:"schedule_cron,omitempty"`
+		TaskID       string   `json:"task_id,omitempty"`
 	}
 	readResultArgs struct {
 		JobID string `json:"job_id"`
@@ -59,7 +61,8 @@ type (
 		JobID     string `json:"job_id,omitempty"`
 	}
 	notifyOperatorArgs struct {
-		Text string `json:"text"`
+		Text   string `json:"text"`
+		TaskID string `json:"task_id,omitempty"`
 	}
 )
 
@@ -146,7 +149,13 @@ func lastSummary(results json.RawMessage) string {
 }
 
 func createJobTool(cfg Config) mcp.ToolHandlerFor[createJobArgs, any] {
-	return func(ctx context.Context, _ *mcp.CallToolRequest, in createJobArgs) (*mcp.CallToolResult, any, error) {
+	return func(ctx context.Context, req *mcp.CallToolRequest, in createJobArgs) (*mcp.CallToolResult, any, error) {
+		// Task filing (spec §9.5.2): task_id, else the woken task.
+		taskID, err := jobTask(ctx, cfg, req, in.TaskID)
+		if err != nil {
+			return nil, nil, err
+		}
+
 		// Breaker first (spec §6.5): refuse with spend_cap_exceeded when the
 		// daily spend breaker is open.
 		if err := cfg.Store.RefuseIfSpendCap(ctx, cfg.Budget.DailySpendCapUSD, cfg.Budget.SpendOverride); err != nil {
@@ -202,6 +211,14 @@ func createJobTool(cfg Config) mcp.ToolHandlerFor[createJobArgs, any] {
 		if err := cfg.Store.Create(ctx, spec); err != nil {
 			return nil, nil, err
 		}
+		// Link before dispatch: the job's first report must already
+		// resolve to its task (spec §9.5.2 relay stamping).
+		if taskID != "" {
+			if err := cfg.Tasks.LinkJob(ctx, taskID, spec.ID); err != nil {
+				return nil, nil, fmt.Errorf("link job to task %s: %w", taskID, err)
+			}
+			cfg.taskChanged(ctx, taskID)
+		}
 		if state == "dispatched" {
 			if err := cfg.Store.Dispatch(ctx, spec.ID, foreman); err != nil {
 				return nil, nil, err
@@ -227,6 +244,9 @@ func createJobTool(cfg Config) mcp.ToolHandlerFor[createJobArgs, any] {
 			"job_id":  spec.ID,
 			"state":   state,
 			"foreman": foremanOut,
+		}
+		if taskID != "" {
+			out["task_id"] = taskID
 		}
 		// Loud, non-fatal warnings (spec §6.7): e.g. requires could not be
 		// validated because no foremen are registered yet.
@@ -338,26 +358,49 @@ func messageForemanTool(cfg Config) mcp.ToolHandlerFor[messageForemanArgs, any] 
 	}
 }
 
-// notifyOperatorTool serves the notify_operator tool (spec §9.4): posts the
-// planner's reply into the operator inbox (planner:main, spec §9.5) as a
-// brain.reply envelope. This is the ONLY way the LLM planner talks back -
-// the conversational UI renders planner:main, so every reply lands in the
-// operator's chat log (and streams to browsers via the SSE hub).
+// notifyOperatorTool serves the notify_operator tool (spec §9.4, §9.5.2):
+// posts the planner's reply into the operator inbox (planner:main) as a
+// brain.reply envelope filed under a task: task_id, else the woken task,
+// else (no task at all) a NEW task titled from the text, so the reply is
+// always visible in the task UI. An unknown task_id is a tool error. This
+// is the ONLY way the LLM planner talks back. Without a task store
+// (Config.Tasks nil) it posts unthreaded, as before tasks.
 func notifyOperatorTool(cfg Config) mcp.ToolHandlerFor[notifyOperatorArgs, any] {
-	return func(ctx context.Context, _ *mcp.CallToolRequest, in notifyOperatorArgs) (*mcp.CallToolResult, any, error) {
+	return func(ctx context.Context, req *mcp.CallToolRequest, in notifyOperatorArgs) (*mcp.CallToolResult, any, error) {
 		if in.Text == "" {
 			return nil, nil, fmt.Errorf("text: required")
 		}
+		taskID := ""
+		if cfg.Tasks != nil {
+			var err error
+			taskID, err = resolveTask(ctx, cfg, req, in.TaskID)
+			if err != nil {
+				return nil, nil, err
+			}
+			if taskID == "" {
+				t, err := cfg.Tasks.CreateTask(ctx, titleFrom(in.Text), tasks.DefaultPriority)
+				if err != nil {
+					return nil, nil, err
+				}
+				taskID = t.ID
+			}
+		}
 		env := wire.MessageEnvelope{
-			Type:    "brain.reply",
-			From:    auth.FactoryBrainIdentity,
-			Payload: json.RawMessage(`{"text":` + mustQuote(in.Text) + `}`),
+			Type:     "brain.reply",
+			From:     auth.FactoryBrainIdentity,
+			Payload:  json.RawMessage(`{"text":` + mustQuote(in.Text) + `}`),
+			ThreadID: taskID,
 		}
 		posted, err := cfg.Inbox.Post(ctx, auth.PlannerMainInbox, env)
 		if err != nil {
 			return nil, nil, err
 		}
-		return structuredResult(map[string]any{"ok": true, "id": posted.ID}), nil, nil
+		out := map[string]any{"ok": true, "id": posted.ID}
+		if taskID != "" {
+			out["task_id"] = taskID
+			cfg.taskChanged(ctx, taskID)
+		}
+		return structuredResult(out), nil, nil
 	}
 }
 

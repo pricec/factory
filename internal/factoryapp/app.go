@@ -71,6 +71,8 @@ type App struct {
 	matcher    *registry.CapabilityMatcher
 	budget     budgets.Config
 	planner    *PlannerBrain
+	wakes      *wakeDispatcher // per-task planner wakes (spec §9.5.2, tasks_wake.go)
+	reaper     *taskReaper     // idle-24h task auto-close (spec §9.5.2, tasks_reaper.go)
 	handler    http.Handler
 	advertise  string
 	plannerTok string
@@ -186,6 +188,9 @@ func New(cfg Config) (*App, error) {
 		Matcher: matcher,
 		Inbox:   a.inbox,
 		Budget:  cfg.Budget,
+		// Task tools + woken-task defaults (spec §9.5.2).
+		Tasks:       a.tasks,
+		TaskChanged: a.publishTaskChanged,
 	})
 	if err != nil {
 		_ = a.Close()
@@ -209,6 +214,7 @@ func New(cfg Config) (*App, error) {
 		Bearer:  a.plannerTok,
 		WorkDir: filepath.Join(cfg.DataDir, "planner"),
 	}
+	a.initTasks()
 	a.handler = buildMux(a, mcpH)
 	return a, nil
 }
@@ -256,6 +262,7 @@ func (a *App) Run(ctx context.Context) error {
 	run("planner", func() error { a.plannerLoop(ctx); return nil })
 	run("dispatch notifier", func() error { a.notifyLoop(ctx); return nil })
 	run("pending alert", func() error { a.pendingAlertLoop(ctx); return nil })
+	run("task reaper", func() error { a.reaper.Run(ctx, taskReapInterval); return nil })
 	wg.Wait()
 	return nil
 }
@@ -317,6 +324,7 @@ func buildMux(a *App, mcpH http.Handler) http.Handler {
 	// browser chat tab (no bearer: the UI surface is unauthenticated,
 	// §7.5); the literal pattern outranks the authed {id} wildcard.
 	mux.HandleFunc("POST /v1/chat", a.handleChat)
+	a.registerTaskRoutes(mux) // spec §9.5.2: /v1/tasks (tasks_http.go)
 	mux.Handle("GET /v1/inboxes/planner:main/stream", notify.StreamHandler(a.hub, nil))
 	// Brain drive surface (spec §6.9): UI twins of the MCP create_job and
 	// message_foreman tools (§9.4) - same stores, same matcher, same breaker.
