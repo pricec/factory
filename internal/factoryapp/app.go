@@ -17,6 +17,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pricec/factory/internal/usagewin"
+
+	"github.com/pricec/factory/internal/claudecli"
+
 	"github.com/pricec/factory/internal/auth"
 	"github.com/pricec/factory/internal/budgets"
 	"github.com/pricec/factory/internal/inbox"
@@ -54,6 +58,8 @@ type Config struct {
 	// auth stores (sweeper, liveness, pairing TTLs all become
 	// fake-clockable).
 	Now func() time.Time
+	// Usage configures the S2 usage-window tracker (observe-only).
+	Usage UsageConfig
 }
 
 // App is the wired factory controller.
@@ -74,6 +80,8 @@ type App struct {
 	wakes      *wakeDispatcher // per-task planner wakes (spec §9.5.2, tasks_wake.go)
 	reaper     *taskReaper     // idle-24h task auto-close (spec §9.5.2, tasks_reaper.go)
 	handler    http.Handler
+	usage      *usagewin.Tracker
+	usagePoll  *usagewin.Poller // nil unless Usage.Poll
 	advertise  string
 	plannerTok string
 	// downloadsDir backs GET /download/foreman/{platform} (#24).
@@ -217,6 +225,19 @@ func New(cfg Config) (*App, error) {
 		Bearer:  a.plannerTok,
 		WorkDir: filepath.Join(cfg.DataDir, "planner"),
 	}
+	a.planner.OnUsage = func(ctx context.Context, taskID string, u claudecli.Usage) {
+		ev := wire.UsageEvent{
+			Kind: wire.UsageKindPlanner, TaskID: taskID, Model: u.Model, Input: u.Input, Output: u.Output,
+			CacheCreate: u.CacheCreate, CacheRead: u.CacheRead, CostUSD: u.CostUSD, SessionID: u.SessionID, Limit: u.Limit, RateLimit: u.RateLimit,
+		}
+		if ev.Model == "" {
+			ev.Model = a.planner.Model
+		}
+		if err := a.recordUsage(ctx, ev); err != nil {
+			log.Printf("factoryapp: record planner usage: %v", err)
+		}
+	}
+	a.initUsage(cfg)
 	a.initTasks()
 	a.handler = buildMux(a, mcpH)
 	return a, nil
@@ -266,6 +287,9 @@ func (a *App) Run(ctx context.Context) error {
 	run("dispatch notifier", func() error { a.notifyLoop(ctx); return nil })
 	run("alert expiry", func() error { a.alertExpiryLoop(ctx); return nil })
 	run("pending alert", func() error { a.pendingAlertLoop(ctx); return nil })
+	if a.usagePoll != nil {
+		run("usage poller", func() error { a.usagePoll.Run(ctx); return nil })
+	}
 	run("task reaper", func() error { a.reaper.Run(ctx, taskReapInterval); return nil })
 	wg.Wait()
 	return nil
@@ -355,6 +379,7 @@ func buildMux(a *App, mcpH http.Handler) http.Handler {
 	mux.Handle("/v1/deadletter", a.jobs.DeadLetterHandler())
 	mux.Handle("/v1/deadletter/", a.jobs.DeadLetterHandler())
 	mux.Handle("/v1/spend", a.jobs.SpendHandler())
+	mux.HandleFunc("GET /v1/usage", a.handleUsage) // S2: window state (usage.go)
 	mux.Handle("/v1/mcp/factory", mcpH)
 	return mux
 }

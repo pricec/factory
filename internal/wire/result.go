@@ -101,3 +101,35 @@ func (r *JobResult) Validate(resultSchema json.RawMessage) error {
 	}
 	return nil
 }
+
+// UsageEvent is one CLI run's captured spend, recorded append-only by the
+// factory (envelope types job.usage from workers, usage.record from
+// planner/brain sessions). Kind is worker|planner|brain. Limit carries any
+// raw rate-limit text the CLI emitted.
+type UsageEvent struct {
+	Kind        string  `json:"kind"`
+	JobID       string  `json:"job_id,omitempty"`
+	TaskID      string  `json:"task_id,omitempty"`
+	ForemanID   string  `json:"foreman_id,omitempty"`
+	Model       string  `json:"model,omitempty"`
+	Tier        string  `json:"tier,omitempty"`
+	Input       int     `json:"input"`
+	Output      int     `json:"output"`
+	CacheCreate int     `json:"cache_create"`
+	CacheRead   int     `json:"cache_read"`
+	CostUSD     float64 `json:"cost_usd"`
+	SessionID   string  `json:"session_id,omitempty"`
+	Limit       string  `json:"limit,omitempty"`
+	// RateLimit is the raw rate_limit_event.rate_limit_info JSON (stream-json).
+	RateLimit string `json:"rate_limit,omitempty"`
+}
+
+// Usage event kinds and envelope types.
+const (
+	UsageKindWorker  = "worker"
+	UsageKindPlanner = "planner"
+	UsageKindBrain   = "brain"
+
+	TypeJobUsage    = "job.usage"
+	TypeUsageRecord = "usage.record"
+)

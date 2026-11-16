@@ -65,7 +65,7 @@ func ModelArg(model string) string {
 // FINAL positional argument - --mcp-config is variadic and would otherwise
 // swallow it.
 func Args(model, configPath, prompt string) []string {
-	args := []string{"-p"}
+	args := []string{"-p", "--output-format", "stream-json", "--verbose"}
 	if model != "" {
 		args = append(args, "--model", ModelArg(model))
 	}
@@ -142,13 +142,13 @@ type Session struct {
 }
 
 // Exec runs one session non-interactively in its own process group under
-// Timeout and returns the child's stdout. Errors keep the claude-runner
+// Timeout and returns the child's result text (the `result` field of the JSON output; raw stdout when unparseable) and the parsed usage. Errors keep the claude-runner
 // semantics (spec §8.5/§9.4): a missing CLI fails loudly by name; a
 // non-zero exit with stderr surfaces stderr; a non-zero exit with EMPTY
 // stderr surfaces stdout, because Claude Code reports in-run failures -
 // missing auth among them - as the result on stdout (observed live on
 // 2.1.325). Nothing here is silent: every failure returns an error.
-func Exec(parent context.Context, s Session) (string, error) {
+func Exec(parent context.Context, s Session) (string, Usage, error) {
 	ctx, cancel := context.WithTimeout(parent, s.Timeout)
 	defer cancel()
 	bin := s.Bin
@@ -173,23 +173,26 @@ func Exec(parent context.Context, s Session) (string, error) {
 		// Our own bound names the session; a caller's deadline (e.g. the
 		// router's job.question SLA) is reported as the caller's, not ours.
 		if parent.Err() != nil {
-			return stdout.String(), fmt.Errorf("claude run cancelled: %w", parent.Err())
+			return Text(stdout.String()), parseUsage(stdout.String()), fmt.Errorf("claude run cancelled: %w", parent.Err())
 		}
 		if ctx.Err() == context.DeadlineExceeded {
-			return stdout.String(), fmt.Errorf("%s exceeded %s", s.Label, s.Timeout)
+			return Text(stdout.String()), parseUsage(stdout.String()), fmt.Errorf("%s exceeded %s", s.Label, s.Timeout)
 		}
 		// A bare name missing from PATH is exec.ErrNotFound; an explicit
 		// path that does not exist is fs.ErrNotExist.
 		if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
-			return "", fmt.Errorf("claude CLI not found (%s): install the Claude Code CLI on this host: %w", bin, err)
+			return "", Usage{}, fmt.Errorf("claude CLI not found (%s): install the Claude Code CLI on this host: %w", bin, err)
 		}
 		if detail := snippet(stderr.String()); detail != "" {
-			return stdout.String(), fmt.Errorf("claude run: %w; stderr: %s", err, detail)
+			return Text(stdout.String()), parseUsage(stdout.String()), fmt.Errorf("claude run: %w; stderr: %s", err, detail)
 		}
-		return stdout.String(), fmt.Errorf("claude run: %w; stdout: %s", err, snippet(stdout.String()))
+		return Text(stdout.String()), parseUsage(stdout.String()), fmt.Errorf("claude run: %w; stdout: %s", err, snippet(Text(stdout.String())))
 	}
-	return stdout.String(), nil
+	o := ParseOutput(stdout.String())
+	return o.Text, o.Usage, nil
 }
+
+func parseUsage(raw string) Usage { return ParseOutput(raw).Usage }
 
 // withEnvValue returns base with key set to value, replacing any earlier
 // assignment.

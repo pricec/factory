@@ -78,6 +78,21 @@ func (a *App) handleEnvelope(ctx context.Context, env wire.MessageEnvelope, seen
 				log.Printf("factoryapp: consumer: retry scheduling for %s: %v", job.ID, err)
 			}
 		}
+	case wire.TypeJobUsage, wire.TypeUsageRecord:
+		var ev wire.UsageEvent
+		if err := json.Unmarshal(env.Payload, &ev); err != nil {
+			log.Printf("factoryapp: consumer: usage payload for %s: %v", env.JobID, err)
+			return
+		}
+		if ev.JobID == "" {
+			ev.JobID = env.JobID
+		}
+		if env.Type == wire.TypeJobUsage {
+			ev.Kind = wire.UsageKindWorker
+		}
+		if err := a.recordUsage(ctx, ev); err != nil {
+			log.Printf("factoryapp: consumer: record usage: %v", err)
+		}
 	case "job.event":
 		var p struct {
 			Event string        `json:"event"`

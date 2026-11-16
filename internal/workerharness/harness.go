@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pricec/factory/internal/claudecli"
+
 	"github.com/pricec/factory/internal/wire"
 )
 
@@ -81,6 +83,9 @@ type Config struct {
 	// Post delivers the fallback JobResult; nil means HTTP with Bearer
 	// auth. Retried at-least-once (§8.5).
 	Post PostFunc
+	// PostUsage delivers the captured usage event; nil means HTTP with
+	// Bearer auth. Best effort: failures are logged, never fatal.
+	PostUsage UsagePostFunc
 	// PostRetryBackoff is the delay between post attempts; zero means 1s.
 	PostRetryBackoff time.Duration
 	// Timeout overrides the spec's timeout_s. A test seam for sub-second
@@ -113,6 +118,9 @@ func (c *Config) defaults() error {
 	}
 	if c.Post == nil {
 		c.Post = httpPost
+	}
+	if c.PostUsage == nil {
+		c.PostUsage = httpPostUsage
 	}
 	if c.PostRetryBackoff <= 0 {
 		c.PostRetryBackoff = defaultPostRetryBackoff
@@ -165,6 +173,15 @@ func Run(ctx context.Context, cfg Config) error {
 		return harnessErr
 	}
 	out, errOut := stdout.String(), stderr.String()
+	if claude {
+		// Claude runs emit one JSON result object (--output-format json):
+		// the harness ALWAYS records the usage it parsed, before anything
+		// else, and it overrides whatever the agent reported. Text falls
+		// back to raw stdout when unparseable.
+		parsed := claudecli.ParseOutput(out)
+		out = parsed.Text
+		recordUsage(ctx, cfg, spec, parsed.Usage)
+	}
 
 	if _, err := os.Stat(filepath.Join(jobDir, flagFileName)); err == nil {
 		log.Printf("worker harness: job %s: agent reported via report_result; stdout: %s", spec.ID, snippet(out))
@@ -185,6 +202,25 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	log.Printf("worker harness: job %s: posted fallback result status=%s; stderr: %s", spec.ID, res.Status, snippet(errOut))
 	return nil
+}
+
+// recordUsage posts the parsed CLI usage as a job.usage envelope. Best
+// effort: a failed post is logged and never fails the job.
+func recordUsage(ctx context.Context, cfg Config, spec wire.JobSpec, u claudecli.Usage) {
+	if u.IsZero() {
+		return
+	}
+	ev := wire.UsageEvent{
+		Kind: wire.UsageKindWorker, JobID: spec.ID, Model: u.Model, Tier: spec.Tier,
+		Input: u.Input, Output: u.Output, CacheCreate: u.CacheCreate, CacheRead: u.CacheRead,
+		CostUSD: u.CostUSD, SessionID: u.SessionID, Limit: u.Limit, RateLimit: u.RateLimit,
+	}
+	if ev.Model == "" {
+		ev.Model = cfg.Model
+	}
+	if err := cfg.PostUsage(ctx, cfg.ResultURL, cfg.Token, ev); err != nil {
+		log.Printf("worker harness: job %s: post usage: %v", spec.ID, err)
+	}
 }
 
 // loadSpec reads the job JSON, applies the pinned defaults, and validates
@@ -272,7 +308,7 @@ func runArgs(cfg Config, prompt string) []string {
 // worker, nothing to resume); and the prompt as the FINAL positional
 // argument - `--mcp-config` is variadic and would otherwise swallow it.
 func claudeArgs(cfg Config, mcpFile, prompt string) []string {
-	args := []string{"-p"}
+	args := []string{"-p", "--output-format", "stream-json", "--verbose"}
 	if cfg.Model != "" {
 		args = append(args, "--model", claudeModelArg(cfg.Model))
 	}

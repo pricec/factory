@@ -31,6 +31,7 @@ func main() {
 		AdvertiseURL: *advertise,
 		DownloadsDir: *downloads,
 		Budget:       budgets.LoadConfig(),
+		Usage:        factoryapp.LoadUsageConfig(),
 	})
 	if err != nil {
 		log.Fatalf("factory: %v", err)
