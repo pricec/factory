@@ -83,6 +83,7 @@ func TestCreateJobEndpoint(t *testing.T) {
 		{"missing task", map[string]any{"task": ""}},
 		{"bad priority", map[string]any{"task": "x", "priority": 99}},
 		{"bad tier", map[string]any{"task": "x", "tier": "turbo"}},
+		{"bad model", map[string]any{"task": "x", "model": "has space"}},
 	} {
 		var errResp map[string]any
 		if status := e.do("POST", "/v1/jobs", "", tt.in, &errResp); status != http.StatusBadRequest {
@@ -139,6 +140,19 @@ func TestCreateJobEndpoint(t *testing.T) {
 	}
 	if job.Spec.Tier != wire.TierHardest {
 		t.Errorf("hardest job tier = %q, want %q", job.Spec.Tier, wire.TierHardest)
+	}
+
+	// Model pass-through (spec §5.1, §6.5): an explicit model rides the
+	// spec to the foreman and overrides the tier there.
+	ollama := map[string]any{"task": "summarize locally", "model": "ollama/qwen3:8b"}
+	if status := e.do("POST", "/v1/jobs", "", ollama, &created); status != http.StatusCreated {
+		t.Fatalf("model create status = %d, want 201", status)
+	}
+	if status := e.do("GET", "/v1/jobs/"+created.JobID, "", nil, &job); status != http.StatusOK {
+		t.Fatalf("get model job status = %d", status)
+	}
+	if job.Spec.Model != "ollama/qwen3:8b" {
+		t.Errorf("job spec model = %q, want %q", job.Spec.Model, "ollama/qwen3:8b")
 	}
 }
 

@@ -24,9 +24,13 @@ const (
 
 // plannerLoop drains the operator inbox (planner:main, spec §9.5):
 // chat.message envelopes from the conversational UI wake the LLM planner;
-// everything else (brain.reply, notify.*) is informational for the human
-// and is acked without a wake. Acked history stays replayable via
-// GET /v1/inboxes/planner:main/recent - acking never deletes.
+// brain.failed envelopes (relayed by the factory:main consumer, spec
+// §3.2, 2026-11-15 amendment) wake it too - a foreman's brain session
+// died on a delegation and the planner must handle the request itself
+// and tell the operator; everything else (brain.reply, notify.*) is
+// informational for the human and is acked without a wake. Acked history
+// stays replayable via GET /v1/inboxes/planner:main/recent - acking never
+// deletes.
 func (a *App) plannerLoop(ctx context.Context) {
 	for {
 		envs, err := a.inbox.Get(ctx, auth.PlannerMainInbox, plannerLimit, plannerWait)
@@ -45,14 +49,14 @@ func (a *App) plannerLoop(ctx context.Context) {
 		if len(envs) == 0 {
 			continue
 		}
-		var chats []wire.MessageEnvelope
+		var wakes []wire.MessageEnvelope
 		for _, env := range envs {
-			if env.Type == "chat.message" {
-				chats = append(chats, env)
+			if env.Type == "chat.message" || env.Type == "brain.failed" {
+				wakes = append(wakes, env)
 			}
 		}
-		if len(chats) > 0 {
-			a.wakePlanner(ctx, chats)
+		if len(wakes) > 0 {
+			a.wakePlanner(ctx, wakeReason(wakes), wakes)
 		}
 		ids := make([]string, 0, len(envs))
 		for _, env := range envs {
@@ -64,17 +68,28 @@ func (a *App) plannerLoop(ctx context.Context) {
 	}
 }
 
-// wakePlanner runs one planner session for the triggering chat messages,
+// wakeReason names why the planner is waking: operator chat, or a
+// foreman brain failure that needs the planner to take over.
+func wakeReason(wakes []wire.MessageEnvelope) string {
+	for _, env := range wakes {
+		if env.Type == "brain.failed" {
+			return "a foreman brain session failed on a message delegated to it - handle the underlying request yourself (create_job is the reliable path) and tell the operator what happened"
+		}
+	}
+	return "planner: new chat from the operator needs a reply"
+}
+
+// wakePlanner runs one planner session for the triggering envelopes,
 // with the recent operator-inbox history replayed into the prompt. On
 // failure it posts a brain.reply error note so the operator is never left
 // waiting on a silent brain.
-func (a *App) wakePlanner(ctx context.Context, chats []wire.MessageEnvelope) {
+func (a *App) wakePlanner(ctx context.Context, reason string, envs []wire.MessageEnvelope) {
 	history, err := a.inbox.Recent(ctx, auth.PlannerMainInbox, plannerHistoryCap)
 	if err != nil {
 		log.Printf("factoryapp: planner: history: %v", err)
 		history = nil
 	}
-	if err := a.planner.Handle(ctx, "planner: new chat from the operator needs a reply", history, chats); err != nil {
+	if err := a.planner.Handle(ctx, reason, history, envs); err != nil {
 		log.Printf("factoryapp: planner: %v", err)
 		a.notifyOperator(ctx, "brain.reply", map[string]any{
 			"text": "The planner could not run: " + err.Error() + ". Check the factory service logs (journalctl -u factory).",

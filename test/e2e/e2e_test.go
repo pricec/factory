@@ -7,17 +7,20 @@
 package e2e_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/pricec/factory/internal/auth"
 	"github.com/pricec/factory/internal/jobs"
+	"github.com/pricec/factory/internal/models"
 	"github.com/pricec/factory/internal/wire"
 )
 
@@ -41,6 +44,9 @@ func TestE2E(t *testing.T) {
 	t.Run("QuestionLoop", func(t *testing.T) { testQuestionLoop(t, s) })
 	t.Run("DeadLetter", func(t *testing.T) { testDeadLetter(t, s) })
 	t.Run("CancelAPI", func(t *testing.T) { testCancelAPI(t, s) })
+	t.Run("ModelOverride", func(t *testing.T) { testModelOverride(t, s) })
+	t.Run("SettingsPanel", func(t *testing.T) { testSettingsPanel(t, s) })
+	t.Run("BrainFailedFeedback", func(t *testing.T) { testBrainFailedFeedback(t, s) })
 	t.Run("SummaryView", func(t *testing.T) { testSummaryView(t, s) })
 }
 
@@ -377,6 +383,212 @@ func testDeadLetter(t *testing.T, s *stack) {
 	_ = s.do("GET", "/v1/jobs/"+spec.ID, "", nil, &job)
 	if job.State != jobs.StatePending || job.Attempts != 0 {
 		t.Fatalf("requeued job = state %s attempts %d, want pending/0", job.State, job.Attempts)
+	}
+}
+
+// testModelOverride: an explicit model rides the whole chain over the
+// public surfaces - create (both the MCP create_job tool and its POST
+// /v1/jobs UI twin) -> dispatch notifier -> foreman spawner -> the
+// harness config the worker runs with - and overrides the tier mapping
+// there (spec §5.1, §6.5, 2026-11-15 amendments).
+func testModelOverride(t *testing.T, s *stack) {
+	// MCP path: an explicit ollama model on a tier:"hardest" job - the
+	// model must win over the tier's pinned GLM default.
+	sc := s.callTool(s.factoryMCP(), s.factory.PlannerToken(), "create_job", map[string]any{
+		"task": "e2e model override via mcp", "tier": "hardest", "model": "ollama/qwen3:8b",
+	})
+	mcpJobID, _ := sc["job_id"].(string)
+	if !strings.HasPrefix(mcpJobID, "job_") {
+		t.Fatalf("create_job job_id = %v, want job_-prefixed", sc["job_id"])
+	}
+	if sc["state"] != "dispatched" {
+		t.Fatalf("create_job state = %v, want dispatched", sc["state"])
+	}
+	var job jobs.Job
+	waitFor(t, "foreman spawned the mcp job", 5*time.Second, func() bool {
+		_ = s.do("GET", "/v1/jobs/"+mcpJobID, "", nil, &job)
+		return s.harnessModel(mcpJobID) != ""
+	})
+	if got := s.harnessModel(mcpJobID); got != "ollama/qwen3:8b" {
+		t.Errorf("harness model = %q, want the explicit %q (tier mapping must not win)", got, "ollama/qwen3:8b")
+	}
+	if job.Spec.Model != "ollama/qwen3:8b" || job.Spec.Tier != "hardest" {
+		t.Errorf("stored spec = model %q tier %q, want model ollama/qwen3:8b tier hardest", job.Spec.Model, job.Spec.Tier)
+	}
+
+	// UI twin: POST /v1/jobs with a bare model (no tier) dispatches the
+	// same way.
+	var created struct {
+		JobID string `json:"job_id"`
+		State string `json:"state"`
+	}
+	if st := s.do("POST", "/v1/jobs", "", map[string]any{
+		"task": "e2e model override via ui", "model": "openrouter/z-ai/glm-4.7-flash",
+	}, &created); st != http.StatusCreated {
+		t.Fatalf("POST /v1/jobs status = %d, want 201", st)
+	}
+	waitFor(t, "foreman spawned the ui job", 5*time.Second, func() bool {
+		return s.harnessModel(created.JobID) != ""
+	})
+	if got := s.harnessModel(created.JobID); got != "openrouter/z-ai/glm-4.7-flash" {
+		t.Errorf("harness model = %q, want the explicit %q", got, "openrouter/z-ai/glm-4.7-flash")
+	}
+}
+
+// testSettingsPanel: the role-default settings survive over the public
+// surfaces end to end - POST /v1/settings stores them, the foreman's
+// pull applies them (within its refresh interval) so no-model jobs spawn
+// with the panel's default, and clearing reverts to the pinned default
+// (spec §6.5, §6.9, 2026-11-15 amendments). The BuildHarnessConfig
+// seam doubles as the observation point: probe it until the pull has
+// landed, then create the job - no dispatch race.
+func testSettingsPanel(t *testing.T, s *stack) {
+	// Sanity: the default view is all pinned defaults.
+	var view struct {
+		Roles []struct {
+			Role         string `json:"role"`
+			Model        string `json:"model"`
+			DefaultModel string `json:"default_model"`
+			Source       string `json:"source"`
+		} `json:"roles"`
+	}
+	if st := s.do("GET", "/v1/settings", "", nil, &view); st != http.StatusOK {
+		t.Fatalf("GET /v1/settings status = %d, want 200", st)
+	}
+	for _, r := range view.Roles {
+		if r.Role == "worker_flash" && (r.Source != "default" || r.Model != r.DefaultModel) {
+			t.Fatalf("initial worker_flash = %+v, want the pinned default", r)
+		}
+	}
+
+	// The harness-config seam observes the foreman's current tier
+	// resolution (the same seam the harnessModels capture rides).
+	probe := wire.NewJobSpec("settings probe", "e2e")
+	resolvedFlash := func() string {
+		return s.foreman.BuildHarnessConfig(probe, "bearer").Model
+	}
+
+	// Save a flash default via the panel's save path; wait until the
+	// foreman's pull has applied it, then spawn a no-model, no-tier job.
+	const panelModel = "ollama/gemma3:4b"
+	if st := s.do("POST", "/v1/settings", "", map[string]string{"worker_flash": panelModel}, &view); st != http.StatusOK {
+		t.Fatalf("POST /v1/settings status = %d, want 200", st)
+	}
+	waitFor(t, "foreman applied the panel default", 5*time.Second, func() bool {
+		return resolvedFlash() == panelModel
+	})
+	var created struct {
+		JobID string `json:"job_id"`
+	}
+	if st := s.do("POST", "/v1/jobs", "", map[string]any{"task": "e2e settings panel default"}, &created); st != http.StatusCreated {
+		t.Fatalf("POST /v1/jobs status = %d, want 201", st)
+	}
+	waitFor(t, "foreman spawned the settings job", 5*time.Second, func() bool {
+		return s.harnessModel(created.JobID) != ""
+	})
+	if got := s.harnessModel(created.JobID); got != panelModel {
+		t.Errorf("no-model job harness model = %q, want the panel default %q", got, panelModel)
+	}
+
+	// Clearing reverts to the pinned default on the next pull.
+	if st := s.do("POST", "/v1/settings", "", map[string]string{"worker_flash": ""}, &view); st != http.StatusOK {
+		t.Fatalf("POST /v1/settings clear status = %d, want 200", st)
+	}
+	for _, r := range view.Roles {
+		if r.Role == "worker_flash" && r.Source != "default" {
+			t.Fatalf("cleared worker_flash = %+v, want source default", r)
+		}
+	}
+	waitFor(t, "pinned default restored", 5*time.Second, func() bool {
+		return resolvedFlash() == models.WorkerFlash
+	})
+	if st := s.do("POST", "/v1/jobs", "", map[string]any{"task": "e2e settings panel cleared"}, &created); st != http.StatusCreated {
+		t.Fatalf("POST /v1/jobs (cleared) status = %d, want 201", st)
+	}
+	waitFor(t, "foreman spawned the cleared-defaults job", 5*time.Second, func() bool {
+		return s.harnessModel(created.JobID) != ""
+	})
+	if got := s.harnessModel(created.JobID); got != models.WorkerFlash {
+		t.Errorf("cleared-default job harness model = %q, want the pinned default %q", got, models.WorkerFlash)
+	}
+}
+
+// testBrainFailedFeedback: the 2026-11-15 amendment's reason for being,
+// end to end over the public surfaces. A planner nudge delegated to the
+// foreman's brain dies (the brain session fails) - and unlike the silent
+// dead-end this replaces, the foreman reports brain.failed to the
+// factory, the consumer relays it into the operator inbox, and the
+// factory planner wakes with the failure in its prompt so it can handle
+// the request itself and tell the operator (spec §3.2, §9.5).
+func testBrainFailedFeedback(t *testing.T, s *stack) {
+	// Record every factory-planner wake (the stub replaces the real
+	// opencode session; no e2e test spawns one).
+	var mu sync.Mutex
+	var prompts []string
+	s.factory.SetPlannerExec(func(context.Context, string) (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		prompts = append(prompts, "wake")
+		return "handled the failed delegation myself", nil
+	})
+
+	// The foreman's brain fails every session for this scenario.
+	origExec := s.foreman.Brain().Exec
+	s.foreman.Brain().Exec = func(context.Context, string) (string, error) {
+		return "", errors.New("brain session exceeded 5m0s")
+	}
+	t.Cleanup(func() { s.foreman.Brain().Exec = origExec })
+
+	// The planner delegates a nudge via message_foreman (the exact
+	// production pattern that dead-ended silently before).
+	sc := s.callTool(s.factoryMCP(), s.factory.PlannerToken(), "message_foreman", map[string]any{
+		"foreman_id": foremanID,
+		"type":       "chat.message",
+		"payload":    map[string]any{"text": "please investigate the auto-update feature"},
+	})
+	if sc["ok"] != true {
+		t.Fatalf("message_foreman: %v", sc)
+	}
+
+	// The foreman consumes the nudge, its brain fails, the reporter
+	// posts brain.failed, the factory relays it, and the factory
+	// planner wakes.
+	waitFor(t, "factory planner woken by brain.failed", 10*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(prompts) == 1
+	})
+
+	// The relay is visible in the operator inbox (the operator sees what
+	// the planner saw, spec §9.5 replay).
+	var envs []wire.MessageEnvelope
+	if st := s.do("GET", "/v1/inboxes/planner:main/recent?limit=20", "", nil, &envs); st != http.StatusOK {
+		t.Fatalf("planner:main recent status = %d", st)
+	}
+	found := false
+	for _, env := range envs {
+		if env.Type == "brain.failed" && env.From == foremanInbox {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("brain.failed relay missing from planner:main: %+v", envs)
+	}
+
+	// And the original nudge acked away on the foreman side (consumed,
+	// not redelivered forever).
+	var sums []struct {
+		InboxID string `json:"inbox_id"`
+		Unacked int    `json:"unacked"`
+	}
+	if st := s.do("GET", "/v1/inboxes", "", nil, &sums); st != http.StatusOK {
+		t.Fatalf("GET /v1/inboxes status = %d", st)
+	}
+	for _, sum := range sums {
+		if sum.InboxID == foremanInbox && sum.Unacked > 0 {
+			t.Errorf("foreman inbox unacked = %d after brain failure, want 0 (acked, reported via brain.failed)", sum.Unacked)
+		}
 	}
 }
 

@@ -49,11 +49,11 @@ func Handler(cfg Config) (http.Handler, error) {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "factory-planner", Version: "v1"}, nil)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_foremen",
-		Description: "List registered foremen: {foremen: [{id, online, capabilities}]}.",
+		Description: "Registered foremen: {foremen: [{id, online, capabilities}]}.",
 	}, listForemenTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_jobs",
-		Description: "List job summaries: {jobs: [{id, state, summary, usage, over_budget}]}.",
+		Description: "Job summaries: {jobs: [{id, state, summary, usage, over_budget}]}.",
 	}, listJobsTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "create_job",
@@ -62,7 +62,8 @@ func Handler(cfg Config) (http.Handler, error) {
 			"tools:<tool>, or a bare tag name (os, arch, tools); NEVER bare values like linux " +
 			"or amd64 (rejected as unknown_requires). " +
 			"tier: flash (cheapest, default), default (Flash max-thinking), hardest (strongest); " +
-			"pick the cheapest that works. Refused past the spend cap.",
+			"pick the cheapest that works. model: provider/model overrides tier. " +
+			"Refused past the spend cap.",
 	}, createJobTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "read_result",
@@ -74,7 +75,7 @@ func Handler(cfg Config) (http.Handler, error) {
 	}, cancelJobTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "message_foreman",
-		Description: "Post to a foreman's inbox; foreman_id accepts bare or foreman:-prefixed ids.",
+		Description: "Post to a foreman's inbox (its brain, an LLM, reads it); for work prefer create_job.",
 	}, messageForemanTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "notify_operator",

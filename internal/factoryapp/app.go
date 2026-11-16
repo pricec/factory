@@ -72,6 +72,7 @@ type App struct {
 	handler    http.Handler
 	advertise  string
 	plannerTok string
+	now        func() time.Time
 	// downloadsDir backs GET /download/foreman/{platform} (#24).
 	downloadsDir string
 
@@ -83,6 +84,15 @@ type App struct {
 	// loop and test-driven passes may interleave).
 	pendingAlertedJobs map[string]string
 	pendingAlertMu     sync.Mutex
+
+	// Models listing cache (spec §6.9 GET /v1/models): one `opencode
+	// models` exec reused for modelsCacheTTL; single-flight via the
+	// mutex. modelsBin is the opencode binary - a test seam so no test
+	// ever shells out to a real opencode.
+	modelsMu        sync.Mutex
+	modelsCache     []models.ModelInfo
+	modelsFetchedAt time.Time
+	modelsBin       string
 }
 
 // New opens the three sqlite stores under cfg.DataDir, wires every
@@ -130,6 +140,8 @@ func New(cfg Config) (*App, error) {
 	}
 	a.jobs.Now = now
 	a.auth.Now = now
+	a.now = now
+	a.modelsBin = "opencode"
 
 	// Liveness: any authed request or SSE connect bumps last_seen (spec
 	// §6.3); the SSE hub reports connect/disconnect.
@@ -196,6 +208,7 @@ func New(cfg Config) (*App, error) {
 	// runs without any factory tools.
 	a.planner = &PlannerBrain{
 		Model:   models.Resolve(os.Getenv("FACTORY_PLANNER_MODEL"), models.PlannerDefault),
+		ModelFn: a.resolvePlannerModel,
 		MCPURL:  loopbackMCPURL(cfg.Addr) + "/v1/mcp/factory",
 		Bearer:  a.plannerTok,
 		WorkDir: filepath.Join(cfg.DataDir, "planner"),
@@ -215,6 +228,16 @@ func (a *App) PlannerToken() string { return a.plannerTok }
 // pattern of foremanapp, #9.3).
 func (a *App) SetPlannerExec(fn func(ctx context.Context, prompt string) (string, error)) {
 	a.planner.Exec = fn
+}
+
+// SetModelsBin is a test seam: it replaces the opencode binary the models
+// listing shells out to (spec §6.9 GET /v1/models), so no test ever
+// invokes a real opencode (the fake-binary pattern of test/e2e).
+func (a *App) SetModelsBin(bin string) {
+	a.modelsMu.Lock()
+	defer a.modelsMu.Unlock()
+	a.modelsBin = bin
+	a.modelsCache, a.modelsFetchedAt = nil, time.Time{}
 }
 
 // AdvertiseURL returns the URL advertised to pairing children.
@@ -313,6 +336,13 @@ func buildMux(a *App, mcpH http.Handler) http.Handler {
 	// message_foreman tools (§9.4) - same stores, same matcher, same breaker.
 	mux.HandleFunc("POST /v1/jobs", a.handleCreateJob)
 	mux.HandleFunc("POST /v1/foremen/{id}/messages", a.handleMessageForeman)
+	// Model picker feed (spec §6.9): the UI's per-job model selector
+	// lists what the host's opencode can run.
+	mux.HandleFunc("GET /v1/models", a.handleModels)
+	// Settings panel (spec §6.9, 2026-11-15 amendment): role-default
+	// models, persisted here and pulled by foremen.
+	mux.HandleFunc("GET /v1/settings", a.handleGetSettings)
+	mux.HandleFunc("POST /v1/settings", a.handlePostSettings)
 	// Onboarding surfaces (#24): top-level, outside /v1. /install.sh is
 	// planner-authed; downloads are unauthenticated per spec §7.5.
 	mux.HandleFunc("GET /install.sh", a.handleInstall)

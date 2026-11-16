@@ -57,11 +57,15 @@ type Config struct {
 	// "" -> the pinned GLM 5.3 Flash default (spec §6.5).
 	WorkerFlashModel string
 	// WorkerModel is the worker's middle tier (spec §5.1
-	// `tier: "default"`); "" -> the pinned GLM 5.2 default.
+	// `tier: "default"`); "" -> the pinned GLM 5.3 Flash max-thinking
+	// default (spec §6.5).
 	WorkerModel string
 	// WorkerHardestModel is the model for `tier: "hardest"` jobs (spec
 	// §5.1, §6.5); "" -> the pinned GLM 5.3 default.
 	WorkerHardestModel string
+	// SettingsRefresh is the role-model settings pull interval (spec
+	// §6.5, 2026-11-15 amendment); 0/negative -> 60s. A test seam.
+	SettingsRefresh time.Duration
 	// Now is the clock; nil -> real UTC time.
 	Now func() time.Time
 }
@@ -79,14 +83,15 @@ type App struct {
 	paired     pairingRecord
 	brainToken string
 
-	inbox  *inbox.Service
-	auth   *auth.Store
-	authn  *auth.Authenticator
-	hub    *notify.Hub
-	router *routing.Router
-	brain  *BrainRunner
-	poster *Poster
-	client *notify.Client
+	inbox    *inbox.Service
+	auth     *auth.Store
+	authn    *auth.Authenticator
+	hub      *notify.Hub
+	router   *routing.Router
+	brain    *BrainRunner
+	poster   *Poster
+	client   *notify.Client
+	modelCfg *modelConfig
 	// brainInboxID is the foreman's local durable brain queue (spec §3.3,
 	// 2026-11-15 amendment): the sub-inbox "<inboxID>:brain" on the same
 	// inbox store. Brain-delegated envelopes are enqueued here and acked
@@ -214,9 +219,20 @@ func New(cfg Config) (*App, error) {
 	// its own subdirectory: the generated opencode.json is the V2
 	// project config discovered from the working dir, so it must not sit
 	// in DataDir itself, which is an ancestor of every worker job dir
-	// (ancestor configs would leak into worker sessions).
+	// (ancestor configs would leak into worker sessions). The model
+	// config holder (spec §6.5, 2026-11-15 amendment) seeds from the
+	// env-resolved cfg and is updated by the settings pull - the brain
+	// resolves its model per session via ModelFn, so panel changes apply
+	// without a restart.
+	a.modelCfg = newModelConfig(modelValues{
+		brain:    cfg.BrainModel,
+		flash:    cfg.WorkerFlashModel,
+		standard: cfg.WorkerModel,
+		hardest:  cfg.WorkerHardestModel,
+	})
 	a.brain = &BrainRunner{
 		Model:   cfg.BrainModel,
+		ModelFn: a.modelCfg.Brain,
 		MCPURL:  localBaseURL(cfg.Addr) + "/v1/mcp/foreman",
 		Bearer:  a.brainToken,
 		WorkDir: filepath.Join(cfg.DataDir, "brain"),
@@ -224,7 +240,11 @@ func New(cfg Config) (*App, error) {
 	a.poster = &Poster{FactoryURL: cfg.FactoryURL, Bearer: a.paired.Bearer}
 	a.BuildHarnessConfig = a.defaultHarnessConfig
 	a.router = &routing.Router{
-		Brain:   a.brain,
+		// The brain reporter wraps the runner so a failed session posts
+		// brain.failed upstream (spec §3.2, 2026-11-15 amendment) -
+		// without it a dead delegation acks silently and the operator
+		// waits forever.
+		Brain:   &brainReporter{inner: a.brain, poster: a.poster, from: a.inboxID},
 		Poster:  a.poster,
 		Spawner: spawnerFunc(a.SpawnWorker),
 	}
@@ -338,6 +358,10 @@ func (a *App) Run(ctx context.Context) error {
 	go func() {
 		defer wg.Done()
 		a.parentLoop(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		a.settingsLoop(ctx)
 	}()
 	wg.Wait()
 	return nil

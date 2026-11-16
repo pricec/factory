@@ -559,9 +559,9 @@ func TestForemanOffline(t *testing.T) {
 		t.Fatalf("foremen = %v, want foreman:alpha online", foremen)
 	}
 
-	// Advance past the 45s offline threshold (spec §11) and let the
+	// Advance past the 90s offline threshold (spec §11) and let the
 	// sweeper's next pump mark it offline.
-	e.clock.Advance(46 * time.Second)
+	e.clock.Advance(91 * time.Second)
 	waitFor(t, "foreman offline", 12*time.Second, func() bool {
 		var foremen []jobs.Foreman
 		_ = e.do("GET", "/v1/foremen", "", nil, &foremen)
@@ -570,9 +570,10 @@ func TestForemanOffline(t *testing.T) {
 }
 
 // TestCapsRefreshKeepsForemanOnline: a connected-but-silent foreman goes
-// offline after 45s (spec §6.3); its 60s capabilities push (spec §6.7)
-// must revive the registry row - last_seen bumped, online again - so a
-// healthy foreman never shows offline to the operator.
+// offline after 90s (spec §6.3, 2026-11-15 amendment); its 60s
+// capabilities push (spec §6.7) must revive the registry row - last_seen
+// bumped, online again - so a healthy foreman never shows offline to the
+// operator.
 func TestCapsRefreshKeepsForemanOnline(t *testing.T) {
 	e := newEnv(t)
 	bearer := e.pair("alpha", map[string]string{"gpu": "true"})
@@ -580,9 +581,9 @@ func TestCapsRefreshKeepsForemanOnline(t *testing.T) {
 	var before []jobs.Foreman
 	_ = e.do("GET", "/v1/foremen", "", nil, &before)
 
-	// 46s silent: the sweep marks it offline...
-	e.clock.Advance(46 * time.Second)
-	waitFor(t, "foreman offline after 46s of silence", 12*time.Second, func() bool {
+	// 91s silent: the sweep marks it offline...
+	e.clock.Advance(91 * time.Second)
+	waitFor(t, "foreman offline after 91s of silence", 12*time.Second, func() bool {
 		var foremen []jobs.Foreman
 		_ = e.do("GET", "/v1/foremen", "", nil, &foremen)
 		return len(foremen) == 1 && !foremen[0].Online

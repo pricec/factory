@@ -58,8 +58,17 @@ const (
 	// timeoutGrace is the sweeper's grace past a job's timeout_s (spec §6.2).
 	timeoutGrace = 60 * time.Second
 	// offlineAfter is how long since last_seen before a foreman is marked
-	// offline (spec §6.3).
-	offlineAfter = 45 * time.Second
+	// offline (spec §6.3, 2026-11-15 amendment: raised 45s -> 90s). An
+	// idle foreman bumps last_seen only on its 60s capabilities push
+	// (spec §6.7) - its inbox client idles on the SSE stream between
+	// messages (spec §4.5) - so a threshold below the push cadence flaps
+	// every quiet foreman offline for a slice of each minute (observed
+	// live: creates came back "pending" and the UI showed phantom
+	// offline blips). 90s covers the 60s cadence plus jitter and one
+	// missed push; a truly dead foreman still goes offline within 90s,
+	// and the pending picker re-dispatches anything that queued behind
+	// the blip (spec §6.7).
+	offlineAfter = 90 * time.Second
 )
 
 // Store is the jobs + foremen database. Safe for concurrent use.
@@ -112,6 +121,11 @@ CREATE TABLE IF NOT EXISTS foremen (
 	capabilities TEXT NOT NULL DEFAULT '{}',
 	last_seen    TEXT,
 	online       INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS settings (
+	role       TEXT PRIMARY KEY,
+	model      TEXT NOT NULL,
+	updated_at TEXT NOT NULL
 );
 `
 	_, err := db.Exec(ddl)

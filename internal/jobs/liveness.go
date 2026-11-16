@@ -87,7 +87,7 @@ func NewSweeper(store *Store) *Sweeper {
 // Pump runs one sweep pass:
 //  1. running jobs past timeout_s + 60s grace -> timed_out (terminal hook
 //     fires);
-//  2. foremen online with last_seen older than 45s -> offline.
+//  2. foremen online with last_seen older than 90s -> offline.
 func (s *Sweeper) Pump(ctx context.Context) error {
 	now := s.store.Now()
 

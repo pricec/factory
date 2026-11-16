@@ -7,6 +7,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/pricec/factory/internal/auth"
 	"github.com/pricec/factory/internal/jobs"
 	"github.com/pricec/factory/internal/registry"
 	"github.com/pricec/factory/internal/wire"
@@ -87,6 +88,15 @@ func (a *App) handleEnvelope(ctx context.Context, env wire.MessageEnvelope, seen
 		}
 		if err := a.jobs.ApplyEvent(ctx, env.JobID, p.Event); err != nil {
 			log.Printf("factoryapp: consumer: apply event %q for %s: %v", p.Event, env.JobID, err)
+		}
+	case "brain.failed":
+		// A foreman's brain session failed on a delegated envelope
+		// (spec §3.2, 2026-11-15 amendment): relay it into the operator
+		// inbox so the planner wakes, handles the underlying request
+		// itself (create_job is the reliable path), and tells the
+		// operator - the failure must never die silently.
+		if _, err := a.inbox.Post(ctx, auth.PlannerMainInbox, env); err != nil {
+			log.Printf("factoryapp: consumer: relay brain.failed to planner: %v", err)
 		}
 	default:
 		if !seenTypes[env.Type] {

@@ -22,6 +22,7 @@ type createJobRequest struct {
 	Requires     []string        `json:"requires,omitempty"`
 	ResultSchema json.RawMessage `json:"result_schema,omitempty"`
 	Tier         string          `json:"tier,omitempty"`
+	Model        string          `json:"model,omitempty"`
 	TimeoutS     int             `json:"timeout_s,omitempty"`
 	Priority     int             `json:"priority,omitempty"`
 	ScheduleCron string          `json:"schedule_cron,omitempty"`
@@ -53,6 +54,7 @@ func (a *App) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	spec.Requires = in.Requires
 	spec.ResultSchema = in.ResultSchema
 	spec.Tier = in.Tier
+	spec.Model = in.Model
 	if in.TimeoutS != 0 {
 		spec.TimeoutS = in.TimeoutS
 	}

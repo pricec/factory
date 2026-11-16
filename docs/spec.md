@@ -87,6 +87,7 @@ response is the full envelope with server-assigned `id` and `ts` (#1).
 | `job.question` | Worker: via `ask_parent` (#17), posted to the foreman's own inbox `foreman:{id}` (§3.2) | Foreman brain via routing, 60s SLA, default answer on timeout (#4) | #4, #11, #17 |
 | `job.answer` | Foreman brain: via `answer_worker` (#18) | Worker: `ask_parent` long-polls the job inbox (#17); `answer_worker` posts to the job inbox (#18) | #17, #18 |
 | `brain.wake` | Not pinned in any body | Routing -> brain (#4) | #4 |
+| `brain.failed` | Foreman: the brain-failure reporter wrapping the brain, on any failed non-question brain session (2026-11-15 amendment; without it the routing layer logs and acks and a dead delegation is silent - observed live when a brain session spent its 5m bound reading code and never acted) | Factory consumer -> relay into planner:main -> planner wake (§9.5); job.question failures are exempt (ask_parent's default answer is the fallback, #17) | 2026-11-15 amendment |
 | any other type | `post_to_factory(type, ...)` (#18), `message_foreman(..., type, ...)` (#19) | Routing -> brain ("anything unmatched -> brain") (#4) | #4, #18, #19 |
 
 The type set is open: `post_to_factory` and `message_foreman` accept arbitrary
@@ -115,7 +116,13 @@ actions: `forward | drop | brain | spawn_worker` (#4).
 `brain.Interface { Handle(ctx, envelope) ([]Action, error) }` with a stub
 implementation recording calls; the real LLM brain lands with #18 (#4).
 `spawn_worker` enqueues the JobSpec to the worker harness queue; `forward`
-posts to the parent inbox (#4).
+posts to the parent inbox (#4). Brain-session failures are logged and
+return nil - the loop keeps going - but a failed non-question session
+additionally posts a `brain.failed` envelope to the parent (the
+reporter wrap, §3.2, 2026-11-15 amendment) so the factory-side planner
+learns the delegation died instead of acking it away silently;
+`job.question` failures are exempt (the worker's default answer is the
+pinned fallback, #17).
 
 Brain-delegated envelopes (`job.question`, `brain.wake`, anything unmatched)
 never block the foreman's inbox consume loop (2026-11-15 post-incident
@@ -178,8 +185,9 @@ The two UI endpoints are unauthenticated like the §6.9 control plane (trusted-L
 posture, §7.5) and exist because no factory credential carries inbox-read
 scopes: the UI reads the store server-side instead. `GET /` serves the
 single-page operator UI (§9.5 conversational chat over `planner:main`, foremen
-list with `last_seen`, inbox listing, per-item detail views) over these
-endpoints plus §6.9.
+list with `last_seen`, inbox listing, per-item detail views, the job create
+form with its per-job model picker, and the role-default settings panel -
+2026-11-15 amendments) over these endpoints plus §6.9.
 
 `wait_seconds` 0-60 long-polls until non-empty (#1). Error responses use the
 error model in §10.
@@ -240,6 +248,7 @@ a different, fixed curve.)
   "result_schema": {},
   "requires": ["gpu"],
   "tier": "flash",
+  "model": "",
   "timeout_s": 300,
   "priority": 5,
   "budget": {
@@ -255,6 +264,16 @@ a different, fixed curve.)
 Defaults shown; `priority` 1-9, 9 highest (#3). `tier` selects the
 worker's model tier (#28, #29): `flash` (or absent - the cost-biased
 default), `default`, or `hardest`; see §6.5.
+
+`model` (2026-11-15 amendment) is an optional explicit opencode model id,
+`provider/model` form as `opencode run -m` accepts (e.g.
+`openrouter/z-ai/glm-5.3`, `ollama/qwen3:8b`). When set it overrides the
+tier mapping (§6.5) at the worker harness; when absent the tier resolves
+the model as before. It rides the spec through every create path
+(`create_job` §9.4, `POST /v1/jobs`, schedules §6.8, the job create UI)
+and the `job.request` envelope. Validation: 1-128 printable ASCII
+characters, no whitespace (§11); availability is NOT validated at create
+time - model reachability is per host and enforced by the run itself.
 
 ### 5.2 JobResult (#3)
 
@@ -346,7 +365,12 @@ payload and `GET /v1/jobs/{id}`.
 - `foremen` table: `{id PK, capabilities JSON, last_seen, online INT}` (#9).
 - `last_seen` is updated by the auth middleware on any authed request + SSE
   connect (#9); the capabilities refresh also bumps `last_seen` (#12).
-- Sweeper marks a foreman offline after 45s (#9).
+- Sweeper marks a foreman offline after 90s (2026-11-15 amendment: was
+  45s; an idle foreman bumps `last_seen` only on its 60s capabilities
+  push - its inbox client idles on the SSE stream between messages,
+  §4.5 - so a threshold below the push cadence flapped every quiet
+  foreman offline for a slice of each minute; 90s covers the cadence
+  plus jitter and one missed push) (#9).
 - SSE heartbeat comment `:hb` every 15s keeps the stream alive (#2); #9
   subscribes to the `Observer` interface from #2 (#2, #9).
 
@@ -419,6 +443,37 @@ flash#max or full GLM 5.3 only when the task needs it. A job that carries no
 tier runs flash (the cost-biased default). The tier rides JobSpec (§5.1)
 through `create_job`, `POST /v1/jobs`, schedules, and the job create UI.
 Model strings are injected via the generated child config (§8.4).
+
+Per-job model override (2026-11-15 amendment): a JobSpec's explicit
+`model` (§5.1) wins over the tier mapping at the worker harness - the
+operator (UI model picker) or the planner (`create_job`'s `model` arg)
+pins the exact model, tiers stay the no-`model` path and remain the
+cost-biased default dispatchers should prefer (#29). Model *discovery*
+for the picker: `GET /v1/models` (§6.9) runs `opencode models` on the
+factory host and lists every id that host's opencode reports
+(`{id, provider, model}`, provider-split, sorted) - openrouter,
+ollama/ollama-cloud, or any other configured provider. v1 assumes the
+fleet is homogeneous per the one-provider pinning above, so the factory
+host's listing stands in for the workers'; per-foreman aggregation is
+*Not pinned*.
+
+Role-default settings (2026-11-15 amendment): the operator manages the
+role models from the web UI's settings panel (§4.1), persisted on the
+factory in the jobs store's `settings` table and served at
+`GET/POST /v1/settings` (§6.9). Per-role precedence: stored panel
+setting > env var (`RoleEnvVar`, the §6.5 table) > pinned default; an
+empty panel value clears the stored setting. Application: the factory
+re-resolves the planner model per session (panel changes apply to the
+next chat session, no restart); foremen pull the settings at startup and
+every 60s (mirroring the capabilities refresh cadence, §6.7) - worker
+and brain spawns follow within one interval, and jobs dispatched in the
+window run with the previous defaults. The pull applies panel-set roles
+and reverts cleared roles to the foreman's env-resolved seeds, so a
+foreman-side env override still wins over the pinned default when no
+panel value is stored; the factory cannot see foreman-side env, so
+`GET /v1/settings` reports only `panel`/`default` sources and the UI
+says so. `Config.SettingsRefresh` (foreman) overrides the 60s interval
+as a test seam.
 Reporting (v1 amendment, #13): `GET /v1/spend?day=` returns daily totals
 `{total_usd, jobs}` - jobs do not yet carry a role tag, so per-role
 totals `{planner, foreman_brain, worker}` are deferred until they do.
@@ -495,7 +550,11 @@ factory planner's list view carries summaries only (#7, #19).
 | Method & path | Notes |
 |---|---|
 | `GET /v1/jobs?state=&foreman=` | filter by state and foreman (#9) |
-| `POST /v1/jobs` | UI twin of the MCP `create_job` tool (§9.4): body `{task, requires[], result_schema, tier, timeout_s, priority, schedule_cron}`; runs the same spend breaker + capability match (no match -> `pending`); `201 + {job_id, state, foreman}`. `requires` entries are tag names, validated at creation against the union of registered foremen tag keys (§6.7, 2026-11-15 amendment): unknown tag names -> `400 unknown_requires`; a loud `warnings` array rides the 201 when nothing could be validated (no foremen registered) |
+| `POST /v1/jobs` | UI twin of the MCP `create_job` tool (§9.4): body `{task, requires[], result_schema, tier, model, timeout_s, priority, schedule_cron}` (`model` per the 2026-11-15 amendment, §5.1); runs the same spend breaker + capability match (no match -> `pending`); `201 + {job_id, state, foreman}`. `requires` entries are tag names, validated at creation against the union of registered foremen tag keys (§6.7, 2026-11-15 amendment): unknown tag names -> `400 unknown_requires`; a loud `warnings` array rides the 201 when nothing could be validated (no foremen registered) |
+| `GET /v1/models` | UI model-picker feed (2026-11-15 amendment): runs `opencode models` on the factory host and returns `[{id, provider, model}]`, provider-split and sorted (§6.5); empty listing is `[]` and is NOT cached (empty is opencode's degraded mode when its background service is unreachable - the next request retries); non-empty listings cached 5 min (§11); unauthenticated like the rest of the control plane |
+| `GET /v1/settings` | settings panel (2026-11-15 amendment, §6.5): `{"roles": [{role, model, default_model, source}]}` for the five managed roles in pinned order; `source` is `panel` (stored) or `default` (pinned; a per-host env override may still apply at spawn); unauthenticated |
+| `POST /v1/settings` | settings panel save (2026-11-15 amendment, §6.5): body is a role -> model map; a present key stores, `""` clears (back to env/default), an absent key is untouched; unknown roles and invalid models are `400`; response is the updated state, same shape as GET; unauthenticated |
+| `POST /v1/jobs` | UI twin of the MCP `create_job` tool (§9.4): body `{task, requires[], result_schema, tier, model, timeout_s, priority, schedule_cron}` (`model` per the 2026-11-15 amendment, §5.1); runs the same spend breaker + capability match (no match -> `pending`); `201 + {job_id, state, foreman}` |
 | `POST /v1/foremen/{id}/messages` | UI twin of the MCP `message_foreman` tool (§9.4): body `{type, payload, job_id?}` posted from the planner identity; `201` + envelope. `{id}` accepts the bare foreman id or the full `foreman:{id}` form - both normalize to the same inbox (§7.3), never a double-prefixed one. `payload` is required (any JSON value; `{}` for an empty body); a null/missing payload is `400`. An id matching no registered foreman is `404 unknown_foreman` - posting never opens an inbox no foreman consumes (2026-11-14 amendment) |
 | `GET /v1/jobs/{id}` | (#9) |
 | `POST /v1/jobs/{id}/cancel` | Cancel/supersede a job (2026-11-15 amendment, §6.1): optional body `{reason?, terminal_state?}` with `terminal_state` = `cancelled` (default) \| `superseded`; an empty body is a plain cancel. Every non-terminal state moves to that terminal state; every terminal job is rejected `409 already_terminal`; unknown job `404`; malformed body `400`. `200` + the refreshed job record. UI twin of the MCP `cancel_job` tool (§9.4) |
@@ -734,7 +793,9 @@ the agent actually sees.
 - Model strings per role come from the tiering config (§6.5), injected via
   the `opencode run -m` flag (worker jobs select their tier per
   §5.1/§6.5: flash -> GLM 5.3 Flash, default -> GLM 5.3 Flash max-reasoning, hardest ->
-  GLM 5.3); the generated config's `model` field stays as documentation
+  GLM 5.3); a job's explicit `model` (§5.1, 2026-11-15 amendment)
+  overrides the tier mapping and rides the same flag verbatim; the
+  generated config's `model` field stays as documentation
   only, since V2 drops `#variant` suffixes there (#31).
 - opencode must be on PATH - the foreman's responsibility (#5; #12 detects
   it at startup).
@@ -854,7 +915,7 @@ Tools (exact):
 - `list_jobs(state?, limit=50)` - `{jobs: [{id, state, summary, usage,
   over_budget}]}` (summaries only, per #7; record-wrapped per the
   `list_foremen` amendment).
-- `create_job(task, requires?, result_schema?, tier?, timeout_s?, priority?,
+- `create_job(task, requires?, result_schema?, tier?, model?, timeout_s?, priority?,
   schedule_cron?)` - ad hoc dispatch via the Matcher interface; `requires`
   entries are capability tag names - accepted forms `os:linux`,
   `arch:amd64`, `tools:<name>`, or a bare tag name (`os`, `arch`,
@@ -868,7 +929,8 @@ Tools (exact):
   the cheapest and the no-tier default; default -> GLM 5.3 Flash max-reasoning;
   hardest ->
   GLM 5.3) - bias towards the cheapest tier that can do the job (#29);
-  with `schedule_cron`, also creates a schedule via
+  `model` (2026-11-15 amendment, §5.1) pins an explicit provider/model id
+  and overrides the tier; with `schedule_cron`, also creates a schedule via
   the #8 API (§6.8). Refused with error `spend_cap_exceeded` when the
   daily spend breaker is open (#13).
 - `read_result(job_id)` - full result payload; the ONLY path by which full
@@ -929,11 +991,15 @@ Envelope types in `planner:main`:
   when several apply. Informational for the human: no planner wake.
 
 Planner loop (internal/factoryapp, twin of the consumer loop): drains
-`planner:main`; `chat.message` wakes one opencode planner session (§9.4
-surface, planner bearer, model via `FACTORY_PLANNER_MODEL`, default
-per §6.5) with the recent
-inbox history replayed into the prompt (per-payload 2KB caps, §6.6);
-everything else is informational and acked without a wake. A failed session
+`planner:main`; `chat.message` and `brain.failed` envelopes wake one
+opencode planner session (§9.4 surface, planner bearer, model per the
+settings panel > `FACTORY_PLANNER_MODEL` > the §6.5 default) with the
+recent inbox history replayed into the prompt (per-payload 2KB caps,
+§6.6); `brain.failed` envelopes arrive via the factory:main consumer,
+which relays a foreman's brain-session failure report (§3.2, 2026-11-15
+amendment) so the planner can handle the dead delegation itself -
+`create_job` is the reliable path - and tell the operator. Everything
+else is informational and acked without a wake. A failed session
 posts a `brain.reply` error note so the operator is never left waiting.
 The child's MCP endpoint is the factory's loopback address, NOT the
 advertised URL (#28): the child runs on the factory's own host, and the
@@ -975,7 +1041,7 @@ outside the `result_schema` subset at validation time (#3).
 | Constant | Value | Pinned in |
 |---|---|---|
 | SSE heartbeat comment `:hb` | every 15s | #2 |
-| Foreman offline threshold | 45s since `last_seen` | #9 |
+| Foreman offline threshold | 90s since `last_seen` (2026-11-15 amendment: was 45s - below the 60s capabilities cadence, it flapped idle foremen offline) | #9 |
 | Jobs sweeper tick | 10s | #9 |
 | Retry picker tick | 10s | #10 |
 | Job timeout grace | `timeout_s + 60s` -> `timed_out` | #9 |
@@ -994,6 +1060,9 @@ outside the `result_schema` subset at validation time (#3).
 | MCP description budgets | worker < 1KB; foreman < 1.5KB; factory < 2KB (2026-11-15 amendment) | #17, #18, #19 |
 | JobSpec defaults | `timeout_s` 300; `priority` 5 (1-9, 9 highest); `budget` `{max_prompt_bytes 32768, max_output_tokens 8192, max_cost_usd 5.0}` | #3 |
 | Long-pending alert | `pending` with no matching online foreman for > 30 min -> one `notify.pending` in `planner:main` (dedupe per job per pending episode); check tick 1 min | 2026-11-15 amendment |
+| Explicit model string | optional; 1-128 printable ASCII chars, no whitespace; overrides the tier mapping | 2026-11-15 amendment |
+| Models listing cache | `GET /v1/models` re-execs `opencode models` at most every 5 min (non-empty listings only) | 2026-11-15 amendment |
+| Settings pull interval | foremen re-read `GET /v1/settings` at startup and every 60s | 2026-11-15 amendment |
 
 ---
 

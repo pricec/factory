@@ -30,6 +30,11 @@ const (
 // Tiers is every allowed tier value (§5.1).
 var Tiers = []string{TierFlash, TierDefault, TierHardest}
 
+// MaxModelLen caps an explicit model string (§5.1, 2026-11-15
+// amendment): it rides argv, JSON, and logs as one opaque token, so it
+// stays short.
+const MaxModelLen = 128
+
 // Budget bounds a job's prompt size, output size, and spend (§5.1).
 type Budget struct {
 	MaxPromptBytes  int     `json:"max_prompt_bytes"`
@@ -53,6 +58,7 @@ type JobSpec struct {
 	ResultSchema json.RawMessage `json:"result_schema,omitempty"`
 	Requires     []string        `json:"requires,omitempty"`
 	Tier         string          `json:"tier,omitempty"`
+	Model        string          `json:"model,omitempty"`
 	TimeoutS     int             `json:"timeout_s"`
 	Priority     int             `json:"priority"`
 	Budget       Budget          `json:"budget"`
@@ -134,6 +140,9 @@ func (s *JobSpec) validate(requireID bool) error {
 	default:
 		return fmt.Errorf("tier: must be one of %v, got %q", Tiers, s.Tier)
 	}
+	if err := ValidateModelID(s.Model); err != nil {
+		return fmt.Errorf("model: %w", err)
+	}
 	if s.Budget.MaxPromptBytes <= 0 || s.Budget.MaxOutputTokens <= 0 || s.Budget.MaxCostUSD <= 0 {
 		return fmt.Errorf("budget: fields must be > 0, got %+v", s.Budget)
 	}
@@ -143,6 +152,26 @@ func (s *JobSpec) validate(requireID bool) error {
 	if len(s.ResultSchema) > 0 {
 		if err := ValidateSchema(s.ResultSchema); err != nil {
 			return fmt.Errorf("result_schema: %w", err)
+		}
+	}
+	return nil
+}
+
+// ValidateModelID checks an explicit model string (§5.1, 2026-11-15
+// amendment): empty is allowed (the tier resolves the model, §6.5);
+// otherwise 1-MaxModelLen printable ASCII characters with no whitespace.
+// The string passes through argv, JSON envelopes, and logs as one opaque
+// token, so anything unprintable is rejected at validation time.
+func ValidateModelID(model string) error {
+	if model == "" {
+		return nil
+	}
+	if len(model) > MaxModelLen {
+		return fmt.Errorf("must be at most %d chars, got %d", MaxModelLen, len(model))
+	}
+	for i := 0; i < len(model); i++ {
+		if model[i] < 0x21 || model[i] > 0x7e { // printable ASCII, no space
+			return fmt.Errorf("must be printable ASCII without whitespace, got %q", model)
 		}
 	}
 	return nil

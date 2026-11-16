@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/pricec/factory/internal/llmctx"
+	"github.com/pricec/factory/internal/routing"
 	"github.com/pricec/factory/internal/wire"
 )
 
@@ -41,6 +42,11 @@ const (
 type BrainRunner struct {
 	// Model is the opencode model string; "" -> opencode default.
 	Model string
+	// ModelFn, when set, resolves the model per session - the settings
+	// panel's live override path (spec §6.5, 2026-11-15 amendment):
+	// ModelFn wins over the static Model field so panel changes apply to
+	// the next brain session without a restart. nil -> the static field.
+	ModelFn func() string
 	// MCPURL is the foreman brain MCP endpoint (/v1/mcp/foreman).
 	MCPURL string
 	// Bearer is the brain token (a local foreman:{id} credential).
@@ -51,6 +57,15 @@ type BrainRunner struct {
 	// nil means the real opencode child. Tests replace it with a
 	// recorder; no test ever invokes a real opencode.
 	Exec func(ctx context.Context, prompt string) (string, error)
+}
+
+// currentModel resolves the session model: ModelFn when wired (the
+// settings pull path), else the static Model field.
+func (b *BrainRunner) currentModel() string {
+	if b.ModelFn != nil {
+		return b.ModelFn()
+	}
+	return b.Model
 }
 
 // Handle wakes the brain for env (spec §3.3): it builds the prompt via
@@ -92,9 +107,10 @@ func (b *BrainRunner) runOpencode(ctx context.Context, prompt string) (string, e
 	// env lacks the token and would connect with an empty bearer). The
 	// model rides -m, not the config's model field: V2 drops `#variant`
 	// suffixes from the config field, and overrides may carry one.
+	model := b.currentModel()
 	args := []string{"run", "--standalone"}
-	if b.Model != "" {
-		args = append(args, "-m", b.Model)
+	if model != "" {
+		args = append(args, "-m", model)
 	}
 	cmd := exec.CommandContext(ctx, "opencode", append(args, prompt)...)
 	cmd.Dir = b.WorkDir
@@ -128,7 +144,7 @@ func (b *BrainRunner) writeConfig() (string, error) {
 	}
 	path := filepath.Join(b.WorkDir, brainConfigName)
 	cfg := brainOpenCODEConfig{
-		Model: b.Model,
+		Model: b.currentModel(),
 		MCP: brainMCPBlock{Servers: map[string]*brainRemoteMCPServer{
 			"foreman": {
 				Type:    "remote",
@@ -202,4 +218,52 @@ func snippet(s string) string {
 		return string(r[:200])
 	}
 	return s
+}
+
+// BrainFailedType is the envelope type a foreman posts to the factory
+// when a brain session failed (spec §3.2, 2026-11-15 amendment): without
+// it the routing layer logs the failure, the envelope acks, and the
+// factory-side planner waits forever on a delegation that died -
+// observed live when a brain session spent its whole 5m bound reading
+// code and never acted, silently.
+const BrainFailedType = "brain.failed"
+
+// brainReporter wraps the brain for the router (spec §3.3): a failed
+// non-question session posts a brain.failed envelope to the factory in
+// addition to the router's log, so the failure reaches the planner
+// loop (which can fall back - e.g. create_job - and tell the operator).
+// job.question failures are exempt: ask_parent's default answer is the
+// pinned fallback there (#17), so a report would only add noise.
+type brainReporter struct {
+	inner  routing.Brain
+	poster routing.Poster
+	from   string
+}
+
+// Handle runs the wrapped brain and reports non-question failures
+// upstream. The report is best-effort: a posting error logs and never
+// masks the brain's own error.
+func (b *brainReporter) Handle(ctx context.Context, env wire.MessageEnvelope) error {
+	err := b.inner.Handle(ctx, env)
+	if err == nil || env.Type == "job.question" {
+		return err
+	}
+	payload, merr := json.Marshal(map[string]string{
+		"envelope_id":   env.ID,
+		"envelope_type": env.Type,
+		"error":         snippet(err.Error()),
+	})
+	if merr != nil {
+		log.Printf("foremanapp: report brain failure for %s %s: %v", env.Type, env.ID, merr)
+		return err
+	}
+	if perr := b.poster.PostToParent(ctx, wire.MessageEnvelope{
+		Type:    BrainFailedType,
+		JobID:   env.JobID,
+		From:    b.from,
+		Payload: payload,
+	}); perr != nil {
+		log.Printf("foremanapp: report brain failure for %s %s: %v", env.Type, env.ID, perr)
+	}
+	return err
 }

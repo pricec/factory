@@ -46,6 +46,11 @@ const (
 type PlannerBrain struct {
 	// Model is the opencode model string; "" -> opencode default.
 	Model string
+	// ModelFn, when set, resolves the model per session - the settings
+	// panel's live override path (spec §6.5): ModelFn wins over the
+	// static Model field so panel changes apply to the next session
+	// without a restart. nil -> the static Model field.
+	ModelFn func() string
 	// MCPURL is the factory planner MCP endpoint (/v1/mcp/factory).
 	MCPURL string
 	// Bearer is the factory planner token.
@@ -56,6 +61,15 @@ type PlannerBrain struct {
 	// nil means the real opencode child. Tests replace it with a
 	// recorder; no test ever invokes a real opencode.
 	Exec func(ctx context.Context, prompt string) (string, error)
+}
+
+// currentModel resolves the session model: ModelFn when wired (the
+// settings panel path), else the static Model field.
+func (b *PlannerBrain) currentModel() string {
+	if b.ModelFn != nil {
+		return b.ModelFn()
+	}
+	return b.Model
 }
 
 // Handle wakes the planner for envs (spec §9.5): prompt = wake reason +
@@ -99,9 +113,10 @@ func (b *PlannerBrain) runOpencode(ctx context.Context, prompt string) (string, 
 	// factory tool. The model rides -m, not the config's model field:
 	// V2 drops `#variant` suffixes from the config field, and overrides
 	// may carry one.
+	model := b.currentModel()
 	args := []string{"run", "--standalone"}
-	if b.Model != "" {
-		args = append(args, "-m", b.Model)
+	if model != "" {
+		args = append(args, "-m", model)
 	}
 	cmd := exec.CommandContext(ctx, "opencode", append(args, prompt)...)
 	cmd.Dir = b.WorkDir
@@ -135,7 +150,7 @@ func (b *PlannerBrain) writeConfig() (string, error) {
 	}
 	path := filepath.Join(b.WorkDir, plannerConfigName)
 	cfg := plannerOpenCODEConfig{
-		Model: b.Model,
+		Model: b.currentModel(),
 		MCP: plannerMCPBlock{Servers: map[string]*plannerRemoteMCPServer{
 			"factory": {
 				Type:    "remote",

@@ -389,6 +389,19 @@ func TestCreateJobDispatch(t *testing.T) {
 	if !ok || job.State != "pending" {
 		t.Fatalf("stored job = %+v ok=%v, want pending", job, ok)
 	}
+
+	// Explicit model pass-through (spec §5.1, §6.5): the model rides the
+	// spec to the worker and overrides the tier there.
+	sc = structured(t, resultOf(t, e.callTool("create_job", map[string]any{
+		"task": "summarize locally", "model": "ollama/qwen3:8b",
+	})))
+	job, ok, err = e.store.Get(ctx, sc["job_id"].(string))
+	if err != nil || !ok {
+		t.Fatalf("model job: ok=%v err=%v", ok, err)
+	}
+	if job.Spec.Model != "ollama/qwen3:8b" {
+		t.Errorf("spec.Model = %q, want %q", job.Spec.Model, "ollama/qwen3:8b")
+	}
 }
 
 func TestCreateJobSchedule(t *testing.T) {
@@ -450,6 +463,7 @@ func TestCreateJobValidation(t *testing.T) {
 		{"bad timeout", map[string]any{"task": "x", "timeout_s": -1}, "timeout_s"},
 		{"bad result_schema", map[string]any{"task": "x", "result_schema": "not json"}, "result_schema"},
 		{"empty require", map[string]any{"task": "x", "requires": []string{""}}, "requires"},
+		{"bad model", map[string]any{"task": "x", "model": "has space"}, "model"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

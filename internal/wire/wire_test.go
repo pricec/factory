@@ -190,6 +190,16 @@ func TestSpecValidate(t *testing.T) {
 		{"ok explicit default tier", func(s *JobSpec) { s.Tier = TierDefault }, false},
 		{"ok hardest tier", func(s *JobSpec) { s.Tier = TierHardest }, false},
 		{"reject unknown tier", func(s *JobSpec) { s.Tier = "turbo" }, true},
+		{"ok explicit model", func(s *JobSpec) { s.Model = "ollama/qwen3:8b" }, false},
+		{"ok explicit model alongside tier", func(s *JobSpec) { s.Tier = TierHardest; s.Model = "openrouter/z-ai/glm-5.3" }, false},
+		{"ok model variant suffix", func(s *JobSpec) { s.Model = "openrouter/z-ai/glm-5.3-flash#max" }, false},
+		{"ok model with tilde vendor", func(s *JobSpec) { s.Model = "openrouter/~z-ai/glm-flash-latest" }, false},
+		{"ok model at max length", func(s *JobSpec) { s.Model = strings.Repeat("a", MaxModelLen) }, false},
+		{"reject model with space", func(s *JobSpec) { s.Model = "ollama/qwen 3" }, true},
+		{"reject whitespace-only model", func(s *JobSpec) { s.Model = " " }, true},
+		{"reject model with newline", func(s *JobSpec) { s.Model = "ollama/qwen3:8b\n" }, true},
+		{"reject non-ascii model", func(s *JobSpec) { s.Model = "ollama/qwen3:8b✨" }, true},
+		{"reject over-long model", func(s *JobSpec) { s.Model = strings.Repeat("a", MaxModelLen+1) }, true},
 		{"ok with payload and schema", func(s *JobSpec) {
 			s.Payload = raw(`{"input":[1,2]}`)
 			s.ResultSchema = raw(`{"type":"object"}`)
