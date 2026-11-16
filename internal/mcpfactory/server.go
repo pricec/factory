@@ -40,6 +40,8 @@ type Config struct {
 	// TaskChanged, when set, is told about every task a tool creates or
 	// changes (the factory publishes task.changed on SSE, I5).
 	TaskChanged func(ctx context.Context, taskID string)
+	// RaiseAlert backs the raise_alert tool (spec §9.5.2); nil -> tool errors.
+	RaiseAlert RaiseAlertFunc
 }
 
 // Handler builds the factory planner MCP endpoint (spec §9.4): the five-tool
@@ -89,6 +91,8 @@ func Handler(cfg Config) (http.Handler, error) {
 		Description: "Reply to the operator on a task thread (task_id defaults to the woken task); ALWAYS answer this way.",
 	}, notifyOperatorTool(cfg))
 	addTaskTools(srv, cfg) // spec §9.5.2 (tasks_tools.go)
+
+	addRaiseAlertTool(srv, cfg)
 
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})

@@ -114,6 +114,8 @@ func (a *App) handleEnvelope(ctx context.Context, env wire.MessageEnvelope, seen
 		// on them. This is the path a foreman's post_to_factory alone
 		// reaches the operator on - no direct /v1/chat post needed.
 		a.relayToPlanner(ctx, env)
+	case AlertRaiseType:
+		a.handleForemanAlert(ctx, env)
 	default:
 		// Nothing handles this type. Acking it silently is the parking
 		// failure mode (an envelope nobody reads, see spec §9.5): the
@@ -167,17 +169,13 @@ func (a *App) relayToPlanner(ctx context.Context, env wire.MessageEnvelope) {
 	a.publishTaskChanged(ctx, relay.ThreadID)
 }
 
-// notifyUnhandled tells the operator about a factory:main envelope no
-// handler consumes (informational: no planner wake). The payload names
+// notifyUnhandled raises a P2 alert (spec §9.5.2) about a factory:main envelope no
+// handler consumes (no chat row, no planner wake). The payload names
 // the envelope so the operator can see what was posted and by whom.
 func (a *App) notifyUnhandled(ctx context.Context, env wire.MessageEnvelope) {
-	a.notifyOperator(ctx, "notify.unhandled", map[string]any{
-		"envelope_id": env.ID,
-		"type":        env.Type,
-		"from":        env.From,
-		"job_id":      env.JobID,
-		"note":        "no handler on factory:main for this type; the envelope was acked after this notice",
-	})
+	body := fmt.Sprintf("envelope %s of type %q from %s (job %q): no handler on factory:main; "+
+		"the envelope was acked after this notice", env.ID, env.Type, env.From, env.JobID)
+	a.raiseSystemAlert(ctx, alertPriorityUnhandled, "Unhandled envelope type "+env.Type, body, "factory:consumer")
 }
 
 // notifyDispatched posts the job.request envelope for one dispatched job.

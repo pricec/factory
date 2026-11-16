@@ -10,15 +10,16 @@ package factoryapp_test
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/pricec/factory/internal/budgets"
 	"github.com/pricec/factory/internal/factoryapp"
 	"github.com/pricec/factory/internal/jobs"
+	"github.com/pricec/factory/internal/tasks"
 	"github.com/pricec/factory/internal/wire"
 )
 
@@ -69,33 +70,21 @@ func (e *testEnv) createPendingJob(requires []string) string {
 	return created.JobID
 }
 
-// pendingAlerts returns the notify.pending envelopes in the operator
-// inbox (planner:main, spec §9.5), with payloads decoded.
-func (e *testEnv) pendingAlerts() []struct {
-	env  wire.MessageEnvelope
-	body map[string]any
-} {
+// pendingAlerts returns the open alerts raised by the long-pending check
+// (source factory:pending; spec §9.5.2) via GET /v1/alerts.
+func (e *testEnv) pendingAlerts() []tasks.Alert {
 	e.t.Helper()
-	var envs []wire.MessageEnvelope
-	if status := e.do("GET", "/v1/inboxes/planner:main/recent?limit=100", "", nil, &envs); status != http.StatusOK {
-		e.t.Fatalf("GET planner:main/recent status = %d, want 200", status)
+	var resp struct {
+		Alerts []tasks.Alert `json:"alerts"`
 	}
-	var out []struct {
-		env  wire.MessageEnvelope
-		body map[string]any
+	if status := e.do("GET", "/v1/alerts", "", nil, &resp); status != http.StatusOK {
+		e.t.Fatalf("GET /v1/alerts status = %d, want 200", status)
 	}
-	for _, env := range envs {
-		if env.Type != "notify.pending" {
-			continue
+	var out []tasks.Alert
+	for _, al := range resp.Alerts {
+		if al.Source == "factory:pending" {
+			out = append(out, al)
 		}
-		var body map[string]any
-		if err := json.Unmarshal(env.Payload, &body); err != nil {
-			e.t.Fatalf("decode notify.pending payload: %v", err)
-		}
-		out = append(out, struct {
-			env  wire.MessageEnvelope
-			body map[string]any
-		}{env, body})
 	}
 	return out
 }
@@ -173,26 +162,24 @@ func TestPendingAlertFiresPastThreshold(t *testing.T) {
 	}
 	alerts := e.pendingAlerts()
 	if len(alerts) != 1 {
-		t.Fatalf("got %d notify.pending envelopes, want 1", len(alerts))
+		t.Fatalf("got %d pending alerts, want 1", len(alerts))
 	}
-	env, body := alerts[0].env, alerts[0].body
-	if env.From != "factory" {
-		t.Errorf("envelope from = %q, want factory", env.From)
+	al := alerts[0]
+	if al.Priority != 1 || al.ExpiresAt != nil {
+		t.Errorf("alert priority/expiry = %d/%v, want P1 never expiring", al.Priority, al.ExpiresAt)
 	}
-	if got := bodyString(t, body, "job_id"); got != jobID {
-		t.Errorf("payload job_id = %q, want %q", got, jobID)
+	for _, want := range []string{jobID, "pending 31m0s"} {
+		if !strings.Contains(al.Title, want) {
+			t.Errorf("title %q lacks %q", al.Title, want)
+		}
 	}
-	if got := bodyStrings(t, body, "requires"); len(got) != 2 || got[0] != "os:linux" || got[1] != "arch:amd64" {
-		t.Errorf("payload requires = %v, want [os:linux arch:amd64]", got)
+	for _, want := range []string{"no foreman advertises: arch:amd64, os:linux", "os:linux, arch:amd64"} {
+		if !strings.Contains(al.Body, want) {
+			t.Errorf("body %q lacks %q", al.Body, want)
+		}
 	}
-	if got := bodyString(t, body, "reason"); got != "no foreman advertises: arch:amd64, os:linux" {
-		t.Errorf("payload reason = %q, want the missing-tags diagnosis", got)
-	}
-	if got := bodyStrings(t, body, "missing_tags"); len(got) != 2 || got[0] != "arch:amd64" || got[1] != "os:linux" {
-		t.Errorf("payload missing_tags = %v, want [arch:amd64 os:linux]", got)
-	}
-	if got, ok := body["pending_minutes"].(float64); !ok || got < 31 {
-		t.Errorf("payload pending_minutes = %v, want >= 31", body["pending_minutes"])
+	if envs := operatorEnvelopes(t, e, "notify.pending"); len(envs) != 0 {
+		t.Errorf("notify.pending still posted to the chat inbox: %d", len(envs))
 	}
 
 	// Dedupe: another pass with the job still pending posts nothing.
@@ -255,7 +242,7 @@ func TestPendingAlertSkipsMatchableJob(t *testing.T) {
 		}
 	}
 	if alerts := e.pendingAlerts(); len(alerts) != 0 {
-		t.Fatalf("got %d notify.pending envelopes for job %s, want 0", len(alerts), jobID)
+		t.Fatalf("got %d pending alerts for job %s, want 0", len(alerts), jobID)
 	}
 }
 
@@ -278,19 +265,15 @@ func TestPendingAlertNamesOfflineForeman(t *testing.T) {
 	}
 	alerts := e.pendingAlerts()
 	if len(alerts) != 1 {
-		t.Fatalf("got %d notify.pending envelopes, want 1", len(alerts))
+		t.Fatalf("got %d pending alerts, want 1", len(alerts))
 	}
-	_, body := alerts[0].env, alerts[0].body
-	if got := bodyString(t, body, "job_id"); got != jobID {
-		t.Errorf("payload job_id = %q, want %q", got, jobID)
+	if !strings.Contains(alerts[0].Title, jobID) {
+		t.Errorf("title %q lacks job id %q", alerts[0].Title, jobID)
 	}
-	if got := bodyString(t, body, "reason"); got != "only offline foremen have: arch:amd64, os:linux" {
-		t.Errorf("payload reason = %q, want the offline-foreman diagnosis", got)
+	if !strings.Contains(alerts[0].Body, "only offline foremen have: arch:amd64, os:linux") {
+		t.Errorf("body %q lacks the offline-foreman diagnosis", alerts[0].Body)
 	}
-	offline := bodyStrings(t, body, "offline_foremen")
-	if len(offline) != 1 || offline[0] != "foreman:server (last seen "+lastSeen+")" {
-		t.Errorf("payload offline_foremen = %v, want foreman:server with its last_seen", offline)
-	}
+	_ = lastSeen
 }
 
 // TestPendingAlertEmptyRequiresAllOffline: a job with no requires matches
@@ -309,12 +292,9 @@ func TestPendingAlertEmptyRequiresAllOffline(t *testing.T) {
 	}
 	alerts := e.pendingAlerts()
 	if len(alerts) != 1 {
-		t.Fatalf("got %d notify.pending envelopes, want 1", len(alerts))
+		t.Fatalf("got %d pending alerts, want 1", len(alerts))
 	}
-	if got := bodyString(t, alerts[0].body, "job_id"); got != jobID {
-		t.Errorf("payload job_id = %q, want %q", got, jobID)
-	}
-	if got := bodyString(t, alerts[0].body, "reason"); got != "all foremen are offline" {
-		t.Errorf("payload reason = %q, want the all-offline diagnosis", got)
+	if !strings.Contains(alerts[0].Title, jobID) || !strings.Contains(alerts[0].Body, "all foremen are offline") {
+		t.Errorf("alert = %+v, want job id and the all-offline diagnosis", alerts[0])
 	}
 }

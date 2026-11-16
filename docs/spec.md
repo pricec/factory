@@ -95,7 +95,7 @@ response is the full envelope with server-assigned `id` and `ts` (#1).
 The type set is open: `post_to_factory` and `message_foreman` accept arbitrary
 type strings, and unmatched types route to the brain (#4). An envelope that
 reaches `factory:main` with no handler is never acked silently: the operator
-gets a `notify.unhandled` notice (2026-11-16 amendment, §9.5).
+gets a P2 alert (`notify.unhandled` before the 2026-11-16 inbox redesign; §9.5.2).
 
 Inbox destinations for the worker conversation flow (resolution of TODO-2;
 transcribed from #17, #18, with the corrected #11 scope model): a worker's
@@ -525,8 +525,8 @@ factory planner's list view carries summaries only (#7, #19).
   invisible - the 2026-11-15 incident left two jobs pending ~7h before
   anyone noticed. A periodic check in the factory server (1-minute tick,
   §11) re-runs the Matcher over the pending set; every job past the
-  threshold that still matches no online foreman posts one `notify.pending`
-  envelope to the operator inbox (§9.5) naming the job id, its requires,
+  threshold that still matches no online foreman raises one P1 alert
+  (§9.5.2; formerly a `notify.pending` chat row) naming the job id, its requires,
   and why nothing matched (required tags no foreman advertises, or the
   tags living only on offline foremen). A pending job that DOES match an
   online foreman is skipped: the pending picker dispatches it on its next
@@ -946,11 +946,11 @@ Kill the entire process group at `timeout_s`; post a JobResult with
   section (#17, #15).
 - Tool descriptions stay tiny (per-turn token cost for every LLM caller,
   #6); byte budgets asserted by test: worker surface < 1KB total (#17);
-  foreman surface < 1.5KB (#18); factory surface < 4KB (2026-11-16
+  foreman surface < 2KB (#18; 1.5KB before the 2026-11-16 `raise_alert` tool); factory surface < 4KB (2026-11-16
   inbox redesign: raised from 2KB for the task tools of §9.5.2 and
   the `task_id` arguments, with headroom for the alert tool; 2026-11-15
   amendments: raised from 1.5KB for the incident-driven `cancel_job` tool,
-  and `create_job` must state the requires tag-name forms - §6.7 -
+  2026-11-16: 2.5KB for the `raise_alert` tool (§9.5.2), and `create_job` must state the requires tag-name forms - §6.7 -
   because undocumented semantics let the planner pass capability
   values as requires, parking two jobs pending for ~7h). Names,
   descriptions, and advertised input/output schemas all count toward the
@@ -1273,7 +1273,7 @@ Envelope types in `planner:main`:
   error}`) - a foreman brain session failed on a delegated envelope (§3.3,
   2026-11-15 amendment). Relayed and wakes the planner exactly like
   `foreman.report`, so a failed delegation is never silent.
-- `notify.unhandled` (from `factory`) - an envelope reached `factory:main` with
+- `notify.unhandled` (**legacy**: since the inbox redesign S3 the factory raises a P2 alert instead, §9.5.2; old rows stay readable) - an envelope reached `factory:main` with
   no handler (2026-11-16 amendment). Payload `{envelope_id, type, from, job_id,
   note}`. Informational: no planner wake. Without it the envelope would be acked
   and parked unseen.
@@ -1281,7 +1281,7 @@ Envelope types in `planner:main`:
   state, foreman, last_error, over_budget, summary), posted on every
   terminal transition (done/failed/timed_out/dead/cancelled/superseded) to
   bring completions and failures to the operator's attention.
-- `notify.pending` (from `factory`) - long-pending job alert (2026-11-15
+- `notify.pending` (**legacy**: since S3 a P1 alert, §9.5.2; old rows stay readable) - long-pending job alert (2026-11-15
   amendment, §6.7): posted when a job has sat `pending` with no matching
   online foreman for more than 30 minutes. Payload
   `{job_id, requires, pending_since, pending_minutes, reason, missing_tags,
@@ -1457,6 +1457,51 @@ planner session running or queued is closed with close_reason
 `idle-24h`, and task.changed is published. The planner normally closes
 tasks itself (`update_task(status=closed)`) once their jobs are terminal
 and the operator has been told; the reaper is the backstop.
+#### 9.5.3 Alerts (inbox redesign S3, 2026-11-16)
+
+Alerts are operator notifications that are NOT chat: they live in the S1
+`alerts` table (§9.5.1) and render in the UI's left pane. Alert JSON:
+`{id, priority, title, body, source, created_at, expires_at|null, state,
+task_id|null}`; `priority` is an integer, 0 = most urgent.
+
+- **Producers.** (1) The long-pending check (§6.7) raises a **P1** alert
+  (source `factory:pending`; title names the job and wait, body carries the
+  diagnosis, requires and foremen counts) instead of a `notify.pending`
+  row. (2) An unhandled `factory:main` type raises a **P2** alert (source
+  `factory:consumer`) instead of `notify.unhandled`. Neither produces a
+  chat-visible row any more; the log lines stay. (3) The planner MCP tool
+  `raise_alert(priority, title, body?, ttl_s?, no_expiry?, task_id?)`
+  (source `planner`). (4) The foreman MCP tool `raise_alert` (same args)
+  posts an envelope of type `alert.raise` (payload = the args) to
+  `factory:main`; the consumer turns it into an alert with source
+  `foreman:<id>`. A malformed or invalid `alert.raise` is never dropped: it
+  raises a P2 alert (source `factory:consumer`) describing the rejection.
+  Validation: priority >= 0, non-empty title (<= 200 B), body <= 8 KB,
+  `ttl_s` > 0 and exclusive with `no_expiry`, `task_id` must exist.
+- **TTL.** Default by priority: P0 and P1 never expire, P2 24h, P3+ 4h.
+  `ttl_s` overrides it and `no_expiry` removes it, for any priority
+  including P0; `no_expiry` wins over defaults. `expires_at` is fixed at
+  creation (factory clock). Expiry is applied lazily on every alert read,
+  ack and reply, and by a 1-minute ticker (`ExpireAlertsPass`, clock
+  injectable via `Config.Now`). Expired alerts leave `GET /v1/alerts`.
+- **HTTP** (same unauthenticated UI-surface class as `/v1/chat`, §7.5):
+  - `GET /v1/alerts` -> `{"alerts":[Alert]}`: open only, priority ASC then
+    created_at DESC.
+  - `POST /v1/alerts/{id}/ack` -> 200 `{"alert":Alert}`; unknown -> 404;
+    already acked, replied or expired -> 409 `{"error":"already_terminal"}`.
+  - `POST /v1/alerts/{id}/reply {text}` -> 201 `{"alert":Alert,"task_id"}`.
+    Creates a task (title = the alert title, priority = the alert's),
+    seeds its thread with a `brain.reply` from `factory` rendering the
+    alert, then posts the reply as an operator `chat.message` carrying the
+    task's `thread_id`, which wakes the planner like any chat. The alert
+    becomes `replied` only if it was still open; an acked or expired alert
+    still gets a task and keeps its state. `task_id` on the alert points at
+    the new task. Empty text -> 400, unknown alert -> 404 (no task created).
+- **SSE.** Every create and state change publishes a synthetic,
+  non-persisted `alert.changed` envelope (payload = Alert JSON) on the
+  `planner:main` stream (contract I5).
+- **MCP sizes.** `raise_alert` pushed the planner surface budget to < 2.5KB
+  and the foreman surface to < 2KB (§9.1).
 
 ## 10. Error model
 
@@ -1506,7 +1551,7 @@ outside the `result_schema` subset at validation time (#3).
 | Bearer token | 32B random, stored SHA-256 only | #11 |
 | Long-poll window | `wait_seconds` 0-60 | #1 |
 | Inbox fetch limit | default 50, max 500 | #1 |
-| MCP description budgets | worker < 1KB; foreman < 1.5KB; factory < 4KB (2026-11-16 inbox redesign; was 2KB) | #17, #18, #19 |
+| MCP description budgets | worker < 1KB; foreman < 2KB; factory < 4KB (2026-11-16 inbox redesign; was 2KB) | #17, #18, #19 |
 | JobSpec defaults | `timeout_s` 300; `priority` 5 (1-9, 9 highest); `budget` `{max_prompt_bytes 32768, max_output_tokens 8192, max_cost_usd 5.0}` | #3 |
 | Long-pending alert | `pending` with no matching online foreman for > 30 min -> one `notify.pending` in `planner:main` (dedupe per job per pending episode); check tick 1 min | 2026-11-15 amendment |
 
