@@ -21,6 +21,19 @@ import (
 	"github.com/pricec/factory/internal/wire"
 )
 
+// writeExecutable writes an executable fake-binary script. Tests run in
+// parallel and each Run forks a child, so a fork in one test can inherit the
+// write fd another test has open on its script; exec'ing that script then
+// fails with ETXTBSY ("text file busy"), which Run reports as a crash. Go
+// takes syscall.ForkLock exclusively around every fork, so holding the read
+// side across create+write+close guarantees no fork can overlap an open
+// write fd.
+func writeExecutable(path, content string) error {
+	syscall.ForkLock.RLock()
+	defer syscall.ForkLock.RUnlock()
+	return os.WriteFile(path, []byte(content), 0o755)
+}
+
 // fakeOpencode writes a fake `opencode` shell script named "opencode" into a
 // fresh temp dir and returns the dir, for PATH injection. The fake never
 // invokes a real model.
@@ -28,7 +41,7 @@ func fakeOpencode(t *testing.T, body string) string {
 	t.Helper()
 	dir := t.TempDir()
 	script := "#!/bin/sh\n" + body + "\n"
-	if err := os.WriteFile(filepath.Join(dir, "opencode"), []byte(script), 0o755); err != nil {
+	if err := writeExecutable(filepath.Join(dir, "opencode"), script); err != nil {
 		t.Fatal(err)
 	}
 	return dir
@@ -602,7 +615,7 @@ func fakeClaude(t *testing.T, body string) string {
 	t.Helper()
 	dir := t.TempDir()
 	script := "#!/bin/sh\n" + body + "\n"
-	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte(script), 0o755); err != nil {
+	if err := writeExecutable(filepath.Join(dir, "claude"), script); err != nil {
 		t.Fatal(err)
 	}
 	return dir
