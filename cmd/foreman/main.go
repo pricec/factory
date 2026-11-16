@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pricec/factory/internal/buildinfo"
 	"github.com/pricec/factory/internal/foremanapp"
 )
 
@@ -27,6 +28,7 @@ func main() {
 	pairingToken := flag.String("pairing-token", os.Getenv("FACTORY_PAIRING_TOKEN"),
 		"one-time pairing token (first run only; default $FACTORY_PAIRING_TOKEN)")
 	flag.Parse()
+	log.Printf("foreman build %s", buildinfo.Current())
 	if *factory == "" || *id == "" {
 		log.Fatalf("foreman: -factory and -id are required")
 	}
@@ -55,6 +57,7 @@ func main() {
 		log.Fatalf("foreman: listen: %v", err)
 	}
 	srv := &http.Server{Handler: app.Handler()}
+	app.MarkListening(ln.Addr().String())
 	go app.Run(ctx)
 
 	go func() {
@@ -65,7 +68,16 @@ func main() {
 	log.Printf("foreman: %s listening on http://%s (advertised %s)", *id, ln.Addr(), app.AdvertiseURL())
 	log.Printf("foreman: paired with %s as %s", *factory, *id)
 
-	<-ctx.Done()
+	// Exit code: 0 on a signal; the self-updater (spec §12) asks for 0
+	// after swapping in a new binary and non-zero after a rollback, and
+	// systemd (Restart=always) starts whatever bin/foreman now holds.
+	code := 0
+	select {
+	case <-ctx.Done():
+	case code = <-app.ExitRequested():
+		log.Printf("foreman: auto-update restart requested (exit %d)", code)
+	}
+	stop()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
@@ -74,4 +86,5 @@ func main() {
 	if err := app.Close(); err != nil {
 		log.Printf("foreman: close: %v", err)
 	}
+	os.Exit(code)
 }

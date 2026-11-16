@@ -508,3 +508,53 @@ func TestClientURLs(t *testing.T) {
 		t.Errorf("streamURL = %q, want escaped inbox segment", unsafe.streamURL())
 	}
 }
+
+// TestClientResyncRedeliversUnacked proves Resync (auto-update drain, spec
+// §12.4): a message the Handler deliberately left unacked is re-delivered
+// on Resync without any new traffic on the inbox.
+func TestClientResyncRedeliversUnacked(t *testing.T) {
+	const inboxID = "foreman:alpha"
+	svc, hub, srv := newTestServer(t, nil, nil)
+	m, err := svc.Post(context.Background(), inboxID, wire.MessageEnvelope{Type: "job.request", From: "factory:main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var defer_ atomic.Bool
+	defer_.Store(true)
+	batches := make(chan []wire.MessageEnvelope, 8)
+	acking := ackingHandler(t, srv, inboxID, batches)
+	seen := make(chan string, 8)
+	c := newTestClient(srv, inboxID, func(ctx context.Context, envs []wire.MessageEnvelope) error {
+		if defer_.Load() {
+			for _, e := range envs {
+				seen <- e.ID
+			}
+			return nil // deferred: unacked
+		}
+		return acking(ctx, envs)
+	})
+	c.Resync() // before Run: coalesces, must not block or panic
+	c.Resync()
+	runClient(t, c)
+	waitSubscribers(t, hub, inboxID, 1)
+	select {
+	case id := <-seen:
+		if id != m.ID {
+			t.Fatalf("deferred id %s, want %s", id, m.ID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("initial snapshot never delivered")
+	}
+	// Drain any extra deliveries from the pre-Run resync request.
+	time.Sleep(50 * time.Millisecond)
+	for len(seen) > 0 {
+		<-seen
+	}
+	defer_.Store(false)
+	noMoreBatches(t, batches, 100*time.Millisecond) // nothing re-delivered by itself
+	c.Resync()
+	b := collectBatch(t, batches)
+	if len(b) != 1 || b[0].ID != m.ID {
+		t.Fatalf("resync batch = %+v, want [%s]", b, m.ID)
+	}
+}

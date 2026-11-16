@@ -145,15 +145,25 @@ func portOf(addr, fallback string) string {
 }
 
 // postJSON issues one POST with a JSON body and bearer auth; 2xx is a
-// success. Used by the capabilities push and the remote ack.
+// success. Used by the remote ack.
 func postJSON(ctx context.Context, target, bearer string, body any) error {
+	_, _, err := postJSONResponse(ctx, target, bearer, body)
+	return err
+}
+
+// maxResponseBody caps a response body read by postJSONResponse.
+const maxResponseBody = 1 << 20
+
+// postJSONResponse is postJSON returning the 2xx status and body (up to
+// maxResponseBody): the capabilities push reads the update advert from it.
+func postJSONResponse(ctx context.Context, target, bearer string, body any) (int, []byte, error) {
 	data, err := json.Marshal(body)
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(data))
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if bearer != "" {
@@ -161,14 +171,18 @@ func postJSON(ctx context.Context, target, bearer string, body any) error {
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
 	defer resp.Body.Close()
+	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("POST %s: status %d", target, resp.StatusCode)
+		return resp.StatusCode, nil, fmt.Errorf("POST %s: status %d", target, resp.StatusCode)
 	}
-	return nil
+	if readErr != nil {
+		return resp.StatusCode, nil, fmt.Errorf("POST %s: read response: %w", target, readErr)
+	}
+	return resp.StatusCode, respBody, nil
 }
 
 // sleepCtx sleeps for d and reports whether ctx is still live.

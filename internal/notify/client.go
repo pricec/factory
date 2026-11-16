@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pricec/factory/internal/wire"
@@ -83,6 +84,26 @@ type Client struct {
 	HTTPClient *http.Client
 	// SnapshotLimit is the snapshot GET limit; 0 means DefaultSnapshotLimit.
 	SnapshotLimit int
+
+	resyncOnce sync.Once
+	resync     chan struct{}
+}
+
+// Resync asks a running client to re-snapshot now, as if a "message" event
+// had arrived (auto-update drain, spec §12.4): envelopes the Handler left
+// unacked on purpose are re-delivered without waiting for new traffic.
+// Non-blocking; requests coalesce. Safe for concurrent use; a no-op effect
+// when Run is not running until the next connection cycle syncs anyway.
+func (c *Client) Resync() {
+	select {
+	case c.resyncCh() <- struct{}{}:
+	default: // a pending request already guarantees a resync
+	}
+}
+
+func (c *Client) resyncCh() chan struct{} {
+	c.resyncOnce.Do(func() { c.resync = make(chan struct{}, 1) })
+	return c.resync
 }
 
 // Run drives the loop until ctx is canceled (returns ctx.Err()) or the
@@ -143,12 +164,17 @@ func (c *Client) runOnce(ctx context.Context) (bool, error) {
 	if err := c.sync(ctx); err != nil {
 		return false, err
 	}
+	resync := c.resyncCh()
 	for {
 		select {
 		case <-ctx.Done():
 			return true, ctx.Err()
 		case err := <-done: // stream error/EOF: reconnect (and thus resync)
 			return true, err
+		case <-resync:
+			if err := c.sync(ctx); err != nil {
+				return true, err
+			}
 		case <-wake:
 			if err := c.sync(ctx); err != nil {
 				return true, err
