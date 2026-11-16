@@ -33,10 +33,16 @@ func TestDiagnoseNoMatch(t *testing.T) {
 			alertable: true,
 		},
 		{
-			name:     "incident shape: online foreman advertises the wrong keys",
+			// Fix2 reconciliation: pre-fix2 Has("os:linux") was a literal
+			// key lookup, so an online foreman with the native caps below
+			// satisfied nothing - the incident shape. The amendment made
+			// "os:linux" match os=linux, so the unsatisfiable-online-
+			// foreman shape is now wrong VALUES; re-merged here to keep
+			// the diagnosis covered under the new semantics.
+			name:     "incident shape: online foreman advertises the wrong values",
 			requires: []string{"os:linux", "arch:amd64"},
 			foremen: []alertForeman{
-				foreman("foreman:server", true, registry.Capabilities{"os": "linux", "arch": "amd64"}),
+				foreman("foreman:server", true, registry.Capabilities{"os": "darwin", "arch": "arm64"}),
 			},
 			want: noMatchDiagnosis{
 				reason:  "no foreman advertises: arch:amd64, os:linux",
@@ -50,7 +56,7 @@ func TestDiagnoseNoMatch(t *testing.T) {
 			name:     "required tags live only on an offline foreman",
 			requires: []string{"os:linux", "arch:amd64"},
 			foremen: []alertForeman{
-				foreman("foreman:server", false, registry.Capabilities{"os:linux": "latch", "arch:amd64": "latch"}),
+				foreman("foreman:server", false, registry.Capabilities{"os": "linux", "arch": "amd64"}),
 			},
 			want: noMatchDiagnosis{
 				reason:  "only offline foremen have: arch:amd64, os:linux",
@@ -90,7 +96,7 @@ func TestDiagnoseNoMatch(t *testing.T) {
 			requires: []string{"gpu", "tools:docker"},
 			foremen: []alertForeman{
 				foreman("foreman:a", true, registry.Capabilities{"gpu": "a100"}),
-				foreman("foreman:b", true, registry.Capabilities{"tools:docker": "yes"}),
+				foreman("foreman:b", true, registry.Capabilities{"tools": "docker"}),
 			},
 			want: noMatchDiagnosis{
 				reason: "no single online foreman has all required tags",
@@ -103,7 +109,7 @@ func TestDiagnoseNoMatch(t *testing.T) {
 			name:     "online foreman satisfies the requires: transient, skip",
 			requires: []string{"os:linux"},
 			foremen: []alertForeman{
-				foreman("foreman:server", true, registry.Capabilities{"os:linux": "latch"}),
+				foreman("foreman:server", true, registry.Capabilities{"os": "linux"}),
 			},
 			want: noMatchDiagnosis{
 				total:  1,
@@ -116,13 +122,32 @@ func TestDiagnoseNoMatch(t *testing.T) {
 			requires: []string{"os:linux"},
 			foremen: []alertForeman{
 				foreman("foreman:dark", false, registry.Capabilities{"gpu": "a100"}),
-				foreman("foreman:server", true, registry.Capabilities{"os:linux": "latch"}),
+				foreman("foreman:server", true, registry.Capabilities{"os": "linux"}),
 			},
 			want: noMatchDiagnosis{
 				total:  2,
 				online: 1,
 			},
 			alertable: false,
+		},
+		{
+			// Fix2 reconciliation: legacy latch keys - {"os:linux":
+			// "latch"} from the incident's upsert - advertise nothing now
+			// that Has cuts "os:linux" into the os=linux value check. A
+			// foreman carrying only latch keys reads as not advertising,
+			// exactly like the dispatch picker sees it.
+			name:     "legacy latch keys advertise nothing (fix2)",
+			requires: []string{"os:linux"},
+			foremen: []alertForeman{
+				foreman("foreman:server", true, registry.Capabilities{"os:linux": "latch"}),
+			},
+			want: noMatchDiagnosis{
+				reason:  "no foreman advertises: os:linux",
+				missing: []string{"os:linux"},
+				total:   1,
+				online:  1,
+			},
+			alertable: true,
 		},
 	}
 
