@@ -36,7 +36,7 @@ Decided in #14 and used consistently in protocol, code, docs, and UI:
 |---|---|---|
 | factory | `factory` | Controller: orchestration + web UI. Hosts the job state machine, foremen registry, schedules, and the planner MCP surface (AGENTS.md; #15; #19). |
 | foreman | `foreman` | Per-machine agent host. Pairs with the factory, runs the worker harness plus the worker and brain MCP surfaces. Its inbox id is `foreman:{id}` (#1; #11). |
-| worker | `worker` | One-shot harness process that runs an opencode agent for a single job and reports the result (AGENTS.md; #5). |
+| worker | `worker` | One-shot harness process that runs an agent for a single job - opencode, or the Claude Code CLI for claude-* models (§8.4) - and reports the result (AGENTS.md; #5). |
 
 Example inbox id: `foreman:alpha` (#1). Targets: Linux only, amd64 + arm64
 (AGENTS.md; #15). Go module `github.com/pricec/factory` (#15). Dependency
@@ -421,6 +421,14 @@ flash#max or full GLM 5.3 only when the task needs it. A job that carries no
 tier runs flash (the cost-biased default). The tier rides JobSpec (§5.1)
 through `create_job`, `POST /v1/jobs`, schedules, and the job create UI.
 Model strings are injected via the generated child config (§8.4).
+
+Claude runner override (2026-11-16 amendment): a tier may also be pointed
+at a claude model through the SAME env override (`FACTORY_WORKER_*_MODEL`
+= a bare `claude-*` id, the bare `claude` alias, or
+`anthropic/claude-*`); such a tier's jobs run via the Claude Code CLI
+(routing + invocation, §8.4) instead of opencode. The pinned GLM defaults
+above are unchanged - claude runs only by explicit operator override -
+and the GLM token-cost defaults are unaffected.
 Reporting (v1 amendment, #13): `GET /v1/spend?day=` returns daily totals
 `{total_usd, jobs}` - jobs do not yet carry a role tag, so per-role
 totals `{planner, foreman_brain, worker}` are deferred until they do.
@@ -526,7 +534,18 @@ Onboarding endpoints (#24, #25) - all outside `/v1`:
   token copy-paste. The script (as root, on Linux with systemd) downloads
   the foreman binary, installs `/etc/systemd/system/factory-foreman.service`
   (`Environment=FACTORY_PAIRING_TOKEN`, inert once `paired.json` exists),
-  and enables + restarts the service; it is idempotent. Trust note: the
+  and enables + restarts the service; it is idempotent. It also installs
+  BOTH worker CLIs - opencode and the Claude Code CLI (2026-11-16
+  amendment, §8.4) - so spawned workers can run either runner: each
+  missing CLI is installed via its official installer as the service user
+  (its self-updater keeps working) and symlinked into `/usr/local/bin`,
+  because systemd runs the unit with the default service PATH and the
+  service user's `~/.local/bin` / `~/.opencode/bin` are NOT on it (the
+  2026-11-15 user-unit PATH gotcha). A service-visible install is kept
+  (idempotent); every step verifies with `command -v` against the service
+  PATH - the same lookup the harness's exec performs - and a failed or
+  unverifiable install aborts the onboarding loudly (before the unit file
+  is written; re-run to complete). Trust note: the
   pairing token rides the rendered script, so the v1 operator-credential
   note extends here - anyone holding the planner token can onboard machines.
 - `GET /install-server.sh` (#25): planner-credential auth identical to
@@ -541,7 +560,11 @@ Onboarding endpoints (#24, #25) - all outside `/v1`:
   override point), pre-seeds the local-arch foreman binary into
   `/var/lib/factory/downloads/` (non-fatal on failure), and enables +
   restarts the service; it is idempotent, and a reinstall preserves the
-  existing planner token from the prior unit file.
+  existing planner token from the prior unit file. It also installs BOTH
+  worker CLIs exactly like `/install.sh` (2026-11-16 amendment, §8.4):
+  the factory machine itself runs the planner brain via opencode, and a
+  foreman onboarded here needs opencode plus the Claude Code CLI for its
+  spawned workers.
 - `GET /download/{kind}/{platform}` (#24, #25): serves the {kind} =
   `factory` | `foreman` binary from the factory's `-downloads` dir for
   `{platform}` = `{kind}-linux-amd64` | `{kind}-linux-arm64` (i.e. the full
@@ -643,21 +666,86 @@ no shared state.
 The tool name is `inbox_report_result` (#28): the generated config mounts
 the worker MCP server under the name `inbox`, and opencode exposes MCP
 tools with a `<server>_<tool>` prefix - the §8.3 wording must use the name
-the agent actually sees.
+the agent actually sees. The Claude Code runner (§8.4) exposes the same
+server's tools as `mcp__inbox__report_result`, so a claude-routed job's
+prompt uses that spelling; task, machine-input block, and the fallback
+sentence stay byte-identical across runners.
 
-### 8.4 opencode invocation & generated config (#5, #13, #28, #31)
+### 8.4 Child CLI invocation & generated config (#5, #13, #28, #31; claude amendment 2026-11-16)
 
-- Invocation (#28, #31): `opencode run --standalone [-m <model>] "<prompt>"`;
-  must be non-interactive. `--standalone` boots a private server inside
-  the child process: the shared background service would substitute the
-  config's `{env:...}` credential headers against its own environment -
-  which has no per-child tokens - and every MCP connect would die with
-  401 "missing bearer token", silently stripping the child of its tools.
-  The pinned model rides `-m`, never only the config's `model` field:
-  V2 drops `#variant` suffixes (reasoning-effort levels like `#max`,
-  §6.5) from the config field, so the flag is the only reliable injection
-  point. Verify exact flags against `opencode --help` during
-  implementation.
+- Runner routing (2026-11-16 amendment): the pinned model string routes
+  the child CLI. A bare `claude-*` model id (or the bare `claude` alias),
+  optionally behind the `anthropic/` provider prefix, runs via the
+  Claude Code CLI in non-interactive mode (below); everything else -
+  including OpenRouter-hosted claude models (`openrouter/...`: a
+  different credential path, the OpenRouter key, not the Anthropic CLI's
+  own auth) - runs via opencode. The routing decision lives in the
+  harness (`RunnerFor`); the tier model mapping (§6.5) is unchanged: an
+  operator points a worker tier at a claude model via its existing env
+  override, and that tier's jobs run on the claude runner.
+- opencode invocation (#28, #31): `opencode run --standalone [-m <model>]
+  "<prompt>"`; must be non-interactive. `--standalone` boots a private
+  server inside the child process: the shared background service would
+  substitute the config's `{env:...}` credential headers against its own
+  environment - which has no per-child tokens - and every MCP connect
+  would die with 401 "missing bearer token", silently stripping the child
+  of its tools. The pinned model rides `-m`, never only the config's
+  `model` field: V2 drops `#variant` suffixes (reasoning-effort levels
+  like `#max`, §6.5) from the config field, so the flag is the only
+  reliable injection point. Verify exact flags against `opencode --help`
+  during implementation.
+- Claude Code invocation (2026-11-16 amendment; flags verified against
+  the installed CLI, 2.1.325): `claude -p [--model <model>] --mcp-config
+  <claude-mcp.json> --strict-mcp-config --permission-mode
+  bypassPermissions --no-session-persistence "<prompt>"` - the same
+  per-job cwd, prompt (§8.3), child env (WORKER_TOKEN guaranteed), flag
+  file (§8.5), and fallback reporting (§8.5) as the opencode runner.
+  `-p`/`--print` is the non-interactive mode; `--strict-mcp-config` makes
+  the generated config the ONLY MCP source (the isolation analog of
+  opencode `--standalone`: no user/project MCP servers leak into a
+  per-job child); `--permission-mode bypassPermissions` is the headless
+  analog of the opencode allow-all permissions (a headless run has no one
+  to answer a permission prompt); `--no-session-persistence` keeps the
+  one-shot worker from persisting sessions; the prompt is the FINAL
+  positional argument - `--mcp-config` is variadic and would otherwise
+  swallow it (observed live). The `anthropic/` provider prefix is
+  stripped for `--model` (the CLI takes bare ids and aliases).
+- Claude Code generated config (2026-11-16 amendment): the MCP injection
+  lands at `<job dir>/claude-mcp.json`, passed explicitly via
+  `--mcp-config` (never name-discovered; a non-`.mcp.json` name also
+  keeps claude's project scan from double-loading it), written 0600
+  before every run:
+
+```json
+{
+  "mcpServers": {
+    "inbox": {
+      "type": "http",
+      "url": "WORKER_MCP_URL",
+      "headers": { "Authorization": "Bearer ${WORKER_TOKEN}" }
+    }
+  }
+}
+```
+
+  `type: "http"` is Claude Code's streamable-HTTP transport (the opencode
+  `remote` analog). The token is referenced via Claude Code's `${VAR}` env
+  expansion so the secret never lands in the file at rest; the expansion
+  was verified live (the child connects with the expanded bearer). There
+  is no generated permissions block on this runner - headless permission
+  policy rides `--permission-mode` (above) - and no generated model field
+  (the model rides `--model`).
+- Loud failures (2026-11-16 amendment): a routed runner that cannot run
+  fails the job loudly, never silently. A missing CLI surfaces at exec
+  (start failure → §8.5 crash result). Claude Code reports in-run
+  failures - missing auth among them - as the result on STDOUT with
+  empty stderr and a NON-ZERO exit (observed live on 2.1.325: `Not logged
+  in · Please run /login`, exit 1), so the exit code contract already
+  catches them; on the claude runner the crash message falls back to
+  stdout when stderr is empty (the opencode runner keeps the
+  stderr-or-exit-status semantics, §8.5). An unauthenticated claude run
+  therefore surfaces as a failed job with the auth error as the crash
+  message - consistent with the §8.5 spawn-failure surfacing.
 - Config discovery (#28): the generated config is written to the V2
   project-config path `opencode.json` IN THE CHILD'S WORKING DIRECTORY
   (worker: the per-job dir; planner/foreman brain: their WorkDir). V2
@@ -706,9 +794,15 @@ the agent actually sees.
   the `opencode run -m` flag (worker jobs select their tier per
   §5.1/§6.5: flash -> GLM 5.3 Flash, default -> GLM 5.3 Flash max-reasoning, hardest ->
   GLM 5.3); the generated config's `model` field stays as documentation
-  only, since V2 drops `#variant` suffixes there (#31).
-- opencode must be on PATH - the foreman's responsibility (#5; #12 detects
-  it at startup).
+  only, since V2 drops `#variant` suffixes there (#31). On the claude
+  runner the model rides `claude --model` instead (the generated
+  claude-mcp.json carries no model field).
+- The routed runner's CLI must be on PATH - the foreman's responsibility
+  (#5; #12 detects it at startup): opencode for the GLM tiers, the Claude
+  Code CLI for claude-* models. Both install scripts (§7.1) install both
+  CLIs so spawned workers can use either; the visibility check is
+  PATH-aware (systemd's default service PATH, not the service user's
+  interactive PATH).
 
 ### 8.5 Reporting: primary & fallback (#5, #17, #1)
 
@@ -731,7 +825,11 @@ the agent actually sees.
   which routes to the factory like any worker report; the factory applies
   it terminal-idempotently, so it is ignored if the harness did deliver a
   report. A worker death can therefore only ever surface as a visible job
-  failure, never a silent fake success.
+  failure, never a silent fake success. The claude runner (§8.4) leans on
+  the same semantics: a missing CLI surfaces at exec as a §8.5 crash
+  result, and a claude auth failure exits non-zero (the §8.5 fallback
+  contract maps it to `failed`/`crash`, with the crash message taken from
+  stdout when stderr is empty).
 
 ### 8.6 Timeout (#5)
 

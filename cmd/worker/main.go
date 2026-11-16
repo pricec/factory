@@ -1,5 +1,6 @@
-// Command worker is a one-shot opencode harness: it runs an opencode agent
-// for a single job and reports the result back to its foreman (spec §8).
+// Command worker is a one-shot agent harness: it runs an agent for a
+// single job - opencode, or the Claude Code CLI for claude-* models
+// (spec §8.4) - and reports the result back to its foreman (spec §8).
 // Spawned as `worker -job <path/to/job.json>` with WORKER_RESULT_URL,
 // WORKER_MCP_URL, WORKER_TOKEN, and WORKER_DIR in the environment (§8.1).
 package main

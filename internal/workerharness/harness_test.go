@@ -135,7 +135,7 @@ printf 'all good'`)
 	}
 	// No model pinned: run --standalone <prompt>.
 	assertArg(t, jobDir, 2, "--standalone")
-	assertArg(t, jobDir, 3, buildPrompt(spec))
+	assertArg(t, jobDir, 3, buildPrompt(spec, RunnerOpencode))
 	assertArg(t, jobDir, 4, "")
 	// macOS resolves /var to /private/var in getcwd(); compare the resolved form.
 	wantPwd, err := filepath.EvalSymlinks(jobDir)
@@ -151,7 +151,7 @@ printf 'all good'`)
 	for name, want := range map[string]string{
 		"pwd.txt":    wantPwd,
 		"cfg.txt":    strings.TrimRight(string(wantCfg), "\n"),
-		"prompt.txt": buildPrompt(spec),
+		"prompt.txt": buildPrompt(spec, RunnerOpencode),
 	} {
 		data, err := os.ReadFile(filepath.Join(jobDir, name))
 		if err != nil {
@@ -218,7 +218,7 @@ printf 'ok'`)
 	assertArg(t, jobDir, 2, "--standalone")
 	assertArg(t, jobDir, 3, "-m")
 	assertArg(t, jobDir, 4, "openrouter/z-ai/glm-5.3-flash#max")
-	assertArg(t, jobDir, 5, buildPrompt(spec))
+	assertArg(t, jobDir, 5, buildPrompt(spec, RunnerOpencode))
 }
 
 func TestRunExitCodeMapping(t *testing.T) {
@@ -589,6 +589,326 @@ func TestRunStartFailurePostsCrashResult(t *testing.T) {
 	}
 	if !strings.Contains(res.Error.Message, "opencode-not-on-path") {
 		t.Errorf("crash message = %q, want the start failure", res.Error.Message)
+	}
+	if err := res.Validate(nil); err != nil {
+		t.Errorf("crash result invalid: %v", err)
+	}
+}
+
+// fakeClaude writes a fake `claude` shell script into a fresh temp dir and
+// returns the dir, for PATH-style injection. The fake never invokes a real
+// model.
+func fakeClaude(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" + body + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// testClaudeConfig builds a Run config routed to the claude runner: both
+// fake binaries are set by absolute path (exec.Command resolves with the
+// parent's PATH, so a routing bug can never silently exec the real tools).
+func testClaudeConfig(t *testing.T, specPath, binDir string, post PostFunc) Config {
+	t.Helper()
+	cfg := testConfig(t, specPath, binDir, post)
+	cfg.ClaudeBin = filepath.Join(binDir, "claude")
+	return cfg
+}
+
+// TestRunnerForRoutingDecision pins the routing decision (spec §8.4):
+// bare claude-* ids (and the bare `claude` alias, and the anthropic/
+// provider-prefixed shape) route to the Claude Code CLI; GLM models,
+// empty models, and OpenRouter-hosted claude models (a different
+// credential path - the OpenRouter key, not the Anthropic CLI's own
+// auth) stay on opencode.
+func TestRunnerForRoutingDecision(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		model string
+		want  string
+	}{
+		{"claude-sonnet-4-5", RunnerClaude},
+		{"claude-opus-4-6", RunnerClaude},
+		{"claude-haiku-4-5", RunnerClaude},
+		{"claude", RunnerClaude},
+		{"anthropic/claude-sonnet-4-5", RunnerClaude},
+		{"", RunnerOpencode},
+		{"openrouter/z-ai/glm-5.3", RunnerOpencode},
+		{"openrouter/z-ai/glm-5.3-flash", RunnerOpencode},
+		{"openrouter/z-ai/glm-5.3-flash#max", RunnerOpencode},
+		{"openrouter/anthropic/claude-sonnet-4-5", RunnerOpencode},
+	}
+	for _, tc := range cases {
+		t.Run(tc.model, func(t *testing.T) {
+			t.Parallel()
+			if got := RunnerFor(tc.model); got != tc.want {
+				t.Errorf("RunnerFor(%q) = %q, want %q", tc.model, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRunClaudeRoutingAndArgs: a claude-* model routes the run to the
+// Claude Code CLI - the fake opencode must never run - with the SAME
+// per-job cwd, prompt, token-env, flag-file, and fallback-result contract
+// as the opencode runner (spec §8.3, §8.4, §8.5). Args verified against
+// the installed CLI (2.1.325).
+func TestRunClaudeRoutingAndArgs(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		model     string
+		wantModel string // the --model value (anthropic/ stripped)
+	}{
+		{"bare claude id", "claude-sonnet-4-5", "claude-sonnet-4-5"},
+		{"anthropic-prefixed id strips the provider", "anthropic/claude-opus-4-6", "claude-opus-4-6"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			spec, specPath := writeSpec(t, dir, nil)
+			claudeDir := fakeClaude(t, `n=1
+for a in "$@"; do
+	printf '%s' "$a" > "arg$n.txt"
+	n=$((n+1))
+done
+pwd > pwd.txt
+printf '%s' "$WORKER_TOKEN" > token.txt
+cat claude-mcp.json > mcp.txt
+printf 'claude ran'`)
+			rec := &recordingPost{}
+			// OpenCODEBin points at a nonexistent path: if the routing
+			// decision ever went to opencode on a claude-* model, the run
+			// fails loudly instead of silently exercising the wrong CLI.
+			cfg := testConfig(t, specPath, t.TempDir(), rec.post)
+			cfg.ClaudeBin = filepath.Join(claudeDir, "claude")
+			cfg.Model = tc.model
+
+			if err := Run(context.Background(), cfg); err != nil {
+				t.Fatalf("Run() = %v, want nil", err)
+			}
+			jobDir := filepath.Join(cfg.WorkDir, jobsDirName, spec.ID)
+			wantPwd, err := filepath.EvalSymlinks(jobDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The routed prompt uses the claude tool spelling (§8.3).
+			wantPromptText := buildPrompt(spec, RunnerClaude)
+			for name, want := range map[string]string{
+				"arg1": "-p",
+				"arg2": "--model",
+				"arg3": tc.wantModel,
+				"arg4": "--mcp-config",
+				// The exec arg is the unresolved per-job join (cmd.Dir
+				// handles the cwd; macOS resolves /var in getcwd only).
+				"arg5":  filepath.Join(jobDir, claudeConfigFileName),
+				"arg6":  "--strict-mcp-config",
+				"arg7":  "--permission-mode",
+				"arg8":  "bypassPermissions",
+				"arg9":  "--no-session-persistence",
+				"arg10": wantPromptText,
+				"pwd":   wantPwd,
+				"token": "tok-abc",
+			} {
+				data, err := os.ReadFile(filepath.Join(jobDir, name+".txt"))
+				if err != nil {
+					t.Fatalf("%s: %v", name, err)
+				}
+				if got := strings.TrimRight(string(data), "\n"); got != want {
+					t.Errorf("%s = %q, want %q", name, got, want)
+				}
+			}
+
+			// The generated MCP config rides --mcp-config: verified shape,
+			// 0600, token only via ${WORKER_TOKEN} expansion, and NO
+			// opencode.json (the opencode runner's file is dead weight
+			// on a claude run).
+			info, err := os.Stat(filepath.Join(jobDir, claudeConfigFileName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if perm := info.Mode().Perm(); perm != 0o600 {
+				t.Errorf("generated claude config perms = %o, want 0600", perm)
+			}
+			mcpData, err := os.ReadFile(filepath.Join(jobDir, claudeConfigFileName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got struct {
+				MCPServers map[string]struct {
+					Type    string            `json:"type"`
+					URL     string            `json:"url"`
+					Headers map[string]string `json:"headers"`
+				} `json:"mcpServers"`
+			}
+			if err := json.Unmarshal(mcpData, &got); err != nil {
+				t.Fatalf("generated claude config is not the mcpServers shape: %v\n%s", err, mcpData)
+			}
+			srv, ok := got.MCPServers["inbox"]
+			if !ok {
+				t.Fatalf("generated claude config has no inbox server:\n%s", mcpData)
+			}
+			if srv.Type != "http" || srv.URL != cfg.MCPURL {
+				t.Errorf("inbox server = %+v, want http %s", srv, cfg.MCPURL)
+			}
+			if srv.Headers["Authorization"] != "Bearer ${WORKER_TOKEN}" {
+				t.Errorf("Authorization header = %q, want the ${WORKER_TOKEN} reference", srv.Headers["Authorization"])
+			}
+			if containsSecret(t, mcpData, cfg.Token) {
+				t.Errorf("generated claude config leaks the worker token at rest:\n%s", mcpData)
+			}
+			if _, err := os.Stat(filepath.Join(jobDir, configFileName)); !os.IsNotExist(err) {
+				t.Errorf("opencode.json exists on a claude run (err = %v), want absent", err)
+			}
+
+			// Same fallback-result contract (§8.5).
+			if rec.calls() != 1 {
+				t.Fatalf("fallback posts = %d, want 1", rec.calls())
+			}
+			res := rec.last()
+			if res.Status != wire.StatusDone || res.Error != nil || res.Summary != "claude ran" || res.JobID != spec.ID {
+				t.Errorf("result = %+v, want done %s summary %q", res, spec.ID, "claude ran")
+			}
+		})
+	}
+}
+
+// TestRunOpencodeRoutingUnchanged: the GLM tiers keep running opencode -
+// the generated config stays the opencode.json project config, and no
+// claude config appears (spec §8.4). ClaudeBin points at a nonexistent
+// path: if the routing decision ever went to claude on a GLM model, the
+// run fails loudly instead of silently exercising the wrong CLI.
+func TestRunOpencodeRoutingUnchanged(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	spec, specPath := writeSpec(t, dir, nil)
+	binDir := fakeOpencode(t, `printf 'opencode ran'`)
+	rec := &recordingPost{}
+	cfg := testConfig(t, specPath, binDir, rec.post)
+	cfg.ClaudeBin = filepath.Join(t.TempDir(), "claude-not-installed")
+	cfg.Model = "openrouter/z-ai/glm-5.3-flash"
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run() = %v, want nil", err)
+	}
+	jobDir := filepath.Join(cfg.WorkDir, jobsDirName, spec.ID)
+	if _, err := os.Stat(filepath.Join(jobDir, configFileName)); err != nil {
+		t.Errorf("opencode.json missing on an opencode run: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(jobDir, claudeConfigFileName)); !os.IsNotExist(err) {
+		t.Errorf("claude-mcp.json exists on an opencode run (err = %v), want absent", err)
+	}
+	if rec.calls() != 1 {
+		t.Fatalf("fallback posts = %d, want 1", rec.calls())
+	}
+	if res := rec.last(); res.Status != wire.StatusDone || res.Summary != "opencode ran" {
+		t.Errorf("result = %+v, want done summary %q", res, "opencode ran")
+	}
+}
+
+// TestRunClaudeAuthFailureIsLoud: a claude run that fails inside the run -
+// missing auth among them - must surface as a failed job, never a silent
+// success. Claude Code prints in-run failures as the result on STDOUT
+// with empty stderr (observed on 2.1.325: `Not logged in · Please run
+// /login`, exit 1), so the crash message falls back to stdout there
+// (spec §8.4).
+func TestRunClaudeAuthFailureIsLoud(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		body    string
+		wantMsg string
+		wantSum string
+	}{
+		{
+			"auth failure printed on stdout (observed live shape)",
+			`printf 'Not logged in · Please run /login'; exit 1`,
+			"Not logged in · Please run /login",
+			"Not logged in · Please run /login",
+		},
+		{
+			"auth failure on stderr still preferred",
+			`printf 'Invalid API key · Please run /login'; printf 'bad key' >&2; exit 1`,
+			"bad key",
+			"Invalid API key · Please run /login",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			_, specPath := writeSpec(t, dir, nil)
+			binDir := fakeClaude(t, tc.body)
+			rec := &recordingPost{}
+			cfg := testClaudeConfig(t, specPath, binDir, rec.post)
+			cfg.Model = "claude-sonnet-4-5"
+
+			if err := Run(context.Background(), cfg); err != nil {
+				t.Fatalf("Run() = %v, want nil (failed result posted)", err)
+			}
+			if rec.calls() != 1 {
+				t.Fatalf("fallback posts = %d, want 1", rec.calls())
+			}
+			res := rec.last()
+			if res.Status != wire.StatusFailed || res.Error == nil || res.Error.Kind != wire.KindCrash {
+				t.Fatalf("result = %+v, want failed crash", res)
+			}
+			if res.Error.Message != tc.wantMsg {
+				t.Errorf("crash message = %q, want %q", res.Error.Message, tc.wantMsg)
+			}
+			if res.Summary != tc.wantSum {
+				t.Errorf("summary = %q, want %q", res.Summary, tc.wantSum)
+			}
+			if err := res.Validate(nil); err != nil {
+				t.Errorf("crash result invalid: %v", err)
+			}
+		})
+	}
+}
+
+// TestRunClaudeMissingCLILoudFailure: a claude-routed job whose CLI is
+// missing fails loudly - a failed crash result is posted (routed to the
+// factory by the spawner's §8.5 spawn-failure surfacing), never a silent
+// fake success (spec §8.4).
+func TestRunClaudeMissingCLILoudFailure(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	spec, specPath := writeSpec(t, dir, nil)
+	binDir := fakeOpencode(t, `printf 'should not run' >&2; exit 42`)
+	rec := &recordingPost{}
+	cfg := testClaudeConfig(t, specPath, binDir, rec.post)
+	cfg.Model = "claude-sonnet-4-5"
+	cfg.ClaudeBin = filepath.Join(t.TempDir(), "claude-not-installed")
+	if _, err := exec.LookPath(cfg.ClaudeBin); err == nil {
+		t.Fatal("test binary unexpectedly resolves")
+	}
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run() = %v, want nil (crash result posted)", err)
+	}
+	if rec.calls() != 1 {
+		t.Fatalf("fallback posts = %d, want 1", rec.calls())
+	}
+	res := rec.last()
+	if res.JobID != spec.ID || res.Status != wire.StatusFailed {
+		t.Errorf("result = %+v, want failed for %s", res, spec.ID)
+	}
+	if res.Error == nil || res.Error.Kind != wire.KindCrash {
+		t.Fatalf("error = %+v, want crash kind", res.Error)
+	}
+	if !strings.Contains(res.Error.Message, "claude-not-installed") {
+		t.Errorf("crash message = %q, want the missing-CLI start failure", res.Error.Message)
 	}
 	if err := res.Validate(nil); err != nil {
 		t.Errorf("crash result invalid: %v", err)
