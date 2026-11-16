@@ -63,7 +63,7 @@ func route(msgType string) Action {
 	switch msgType {
 	case "job.request":
 		return ActionSpawnWorker
-	case "job.result":
+	case "job.result", "job.usage", "usage.record":
 		return ActionForward
 	case "job.event":
 		return ActionDrop

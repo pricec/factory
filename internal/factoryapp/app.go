@@ -17,6 +17,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pricec/factory/internal/claudecli"
+
 	"github.com/pricec/factory/internal/auth"
 	"github.com/pricec/factory/internal/budgets"
 	"github.com/pricec/factory/internal/inbox"
@@ -216,6 +218,18 @@ func New(cfg Config) (*App, error) {
 		MCPURL:  loopbackMCPURL(cfg.Addr) + "/v1/mcp/factory",
 		Bearer:  a.plannerTok,
 		WorkDir: filepath.Join(cfg.DataDir, "planner"),
+	}
+	a.planner.OnUsage = func(ctx context.Context, taskID string, u claudecli.Usage) {
+		ev := wire.UsageEvent{
+			Kind: wire.UsageKindPlanner, TaskID: taskID, Model: u.Model, Input: u.Input, Output: u.Output,
+			CacheCreate: u.CacheCreate, CacheRead: u.CacheRead, CostUSD: u.CostUSD, SessionID: u.SessionID, Limit: u.Limit,
+		}
+		if ev.Model == "" {
+			ev.Model = a.planner.Model
+		}
+		if err := a.jobs.RecordUsage(ctx, ev); err != nil {
+			log.Printf("factoryapp: record planner usage: %v", err)
+		}
 	}
 	a.initTasks()
 	a.handler = buildMux(a, mcpH)

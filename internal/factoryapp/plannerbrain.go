@@ -72,6 +72,10 @@ type PlannerBrain struct {
 	// nil means the real child CLI (routed on the session model, §9.4).
 	// Tests replace it with a recorder; no test ever invokes a real CLI.
 	Exec func(ctx context.Context, prompt string) (string, error)
+	// OnUsage, when set, receives the usage parsed from each claude run.
+	OnUsage func(ctx context.Context, taskID string, u claudecli.Usage)
+	// taskID is set by forTask for per-task sessions.
+	taskID string
 }
 
 // Handle wakes the planner for envs without a task binding: prompt =
@@ -156,6 +160,7 @@ func (b *PlannerBrain) HandleTask(ctx context.Context, w PlannerWake) error {
 // query, per-task work dir.
 func (b *PlannerBrain) forTask(taskID string) *PlannerBrain {
 	c := *b
+	c.taskID = taskID
 	c.MCPURL = plannerTaskURL(b.MCPURL, taskID)
 	c.WorkDir = filepath.Join(filepath.Dir(filepath.Clean(b.WorkDir)), "planner-tasks", taskID)
 	return &c
@@ -325,7 +330,7 @@ func (b *PlannerBrain) runClaude(ctx context.Context, prompt string) (string, er
 	if err != nil {
 		return "", err
 	}
-	return claudecli.Exec(ctx, claudecli.Session{
+	text, usage, err := claudecli.Exec(ctx, claudecli.Session{
 		Bin:        b.ClaudeBin,
 		Model:      b.Model,
 		ConfigPath: configPath,
@@ -336,6 +341,10 @@ func (b *PlannerBrain) runClaude(ctx context.Context, prompt string) (string, er
 		Timeout:    plannerBrainTimeout,
 		Label:      "planner session",
 	})
+	if b.OnUsage != nil && !usage.IsZero() {
+		b.OnUsage(ctx, b.taskID, usage)
+	}
+	return text, err
 }
 
 // writeConfig regenerates the opencode project config at

@@ -65,6 +65,8 @@ type BrainRunner struct {
 	// nil means the real child CLI, routed on the session model (§9.3).
 	// Tests replace it with a recorder; no test ever invokes a real CLI.
 	Exec func(ctx context.Context, prompt string) (string, error)
+	// OnUsage, when set, receives the usage parsed from each claude run.
+	OnUsage func(ctx context.Context, u claudecli.Usage)
 }
 
 // Handle wakes the brain for env (spec §3.3): it builds the prompt via
@@ -101,7 +103,7 @@ func (b *BrainRunner) runClaude(ctx context.Context, prompt string) (string, err
 	if err != nil {
 		return "", err
 	}
-	return claudecli.Exec(ctx, claudecli.Session{
+	text, usage, err := claudecli.Exec(ctx, claudecli.Session{
 		Bin:        b.ClaudeBin,
 		Model:      b.Model,
 		ConfigPath: configPath,
@@ -112,6 +114,10 @@ func (b *BrainRunner) runClaude(ctx context.Context, prompt string) (string, err
 		Timeout:    brainTimeout,
 		Label:      "brain session",
 	})
+	if b.OnUsage != nil && !usage.IsZero() {
+		b.OnUsage(ctx, usage)
+	}
+	return text, err
 }
 
 // writeClaudeConfig regenerates the Claude Code MCP config at

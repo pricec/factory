@@ -42,17 +42,29 @@ func (e *statusError) Error() string {
 	return fmt.Sprintf("post result: status %d", e.code)
 }
 
+// UsagePostFunc delivers a captured usage event (job.usage envelope).
+type UsagePostFunc func(ctx context.Context, resultURL, token string, ev wire.UsageEvent) error
+
 // httpPost posts res as a job.result envelope with Bearer auth (§3.1, §8.5).
 // A 409 response is an idempotent duplicate (§4.2) and succeeds.
 func httpPost(ctx context.Context, resultURL, token string, res wire.JobResult) error {
-	payload, err := json.Marshal(res)
+	return postEnvelope(ctx, resultURL, token, resultEnvelopeType, res.JobID, res)
+}
+
+// httpPostUsage posts ev as a job.usage envelope.
+func httpPostUsage(ctx context.Context, resultURL, token string, ev wire.UsageEvent) error {
+	return postEnvelope(ctx, resultURL, token, wire.TypeJobUsage, ev.JobID, ev)
+}
+
+func postEnvelope(ctx context.Context, resultURL, token, typ, jobID string, v any) error {
+	payload, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
 	env := wire.MessageEnvelope{
-		Type:    resultEnvelopeType,
-		JobID:   res.JobID,
-		From:    senderFrom(res.JobID),
+		Type:    typ,
+		JobID:   jobID,
+		From:    senderFrom(jobID),
 		Payload: payload,
 	}
 	body, err := json.Marshal(env)

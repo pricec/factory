@@ -716,17 +716,19 @@ printf 'claude ran'`)
 			wantPromptText := buildPrompt(spec, RunnerClaude)
 			for name, want := range map[string]string{
 				"arg1": "-p",
-				"arg2": "--model",
-				"arg3": tc.wantModel,
-				"arg4": "--mcp-config",
+				"arg2": "--output-format",
+				"arg3": "json",
+				"arg4": "--model",
+				"arg5": tc.wantModel,
+				"arg6": "--mcp-config",
 				// The exec arg is the unresolved per-job join (cmd.Dir
 				// handles the cwd; macOS resolves /var in getcwd only).
-				"arg5":  filepath.Join(jobDir, claudeConfigFileName),
-				"arg6":  "--strict-mcp-config",
-				"arg7":  "--permission-mode",
-				"arg8":  "bypassPermissions",
-				"arg9":  "--no-session-persistence",
-				"arg10": wantPromptText,
+				"arg7":  filepath.Join(jobDir, claudeConfigFileName),
+				"arg8":  "--strict-mcp-config",
+				"arg9":  "--permission-mode",
+				"arg10": "bypassPermissions",
+				"arg11": "--no-session-persistence",
+				"arg12": wantPromptText,
 				"pwd":   wantPwd,
 				"token": "tok-abc",
 			} {
@@ -925,5 +927,43 @@ func TestRunClaudeMissingCLILoudFailure(t *testing.T) {
 	}
 	if err := res.Validate(nil); err != nil {
 		t.Errorf("crash result invalid: %v", err)
+	}
+}
+
+// TestRunClaudeRecordsUsage: the harness parses the CLI's JSON result,
+// ALWAYS posts the usage event (even when the agent reported via the flag
+// file), and uses the result text for the fallback summary.
+func TestRunClaudeRecordsUsage(t *testing.T) {
+	t.Parallel()
+	for _, agentReported := range []bool{false, true} {
+		dir := t.TempDir()
+		spec, specPath := writeSpec(t, dir, nil)
+		body := `printf '%s' '{"type":"result","is_error":false,"result":"hello summary","session_id":"s9","total_cost_usd":0.25,"usage":{"input_tokens":7,"output_tokens":3,"cache_creation_input_tokens":11,"cache_read_input_tokens":13}}'`
+		if agentReported {
+			body = "touch .result_posted\n" + body
+		}
+		claudeDir := fakeClaude(t, body)
+		rec := &recordingPost{}
+		cfg := testConfig(t, specPath, t.TempDir(), rec.post)
+		cfg.ClaudeBin = filepath.Join(claudeDir, "claude")
+		cfg.Model = "claude-sonnet-4-5"
+		var got []wire.UsageEvent
+		cfg.PostUsage = func(_ context.Context, _, _ string, ev wire.UsageEvent) error {
+			got = append(got, ev)
+			return nil
+		}
+		if err := Run(context.Background(), cfg); err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0].JobID != spec.ID || got[0].Kind != wire.UsageKindWorker ||
+			got[0].Input != 7 || got[0].Output != 3 || got[0].CacheCreate != 11 || got[0].CacheRead != 13 ||
+			got[0].CostUSD != 0.25 || got[0].SessionID != "s9" {
+			t.Fatalf("agentReported=%v usage events = %+v", agentReported, got)
+		}
+		if !agentReported {
+			if len(rec.results) != 1 || rec.results[0].Summary != "hello summary" {
+				t.Fatalf("fallback results = %+v", rec.results)
+			}
+		}
 	}
 }

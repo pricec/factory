@@ -74,7 +74,7 @@ func TestArgs(t *testing.T) {
 	}
 	for _, tc := range tests {
 		got := Args(tc.model, tc.config, prompt)
-		want := []string{"-p"}
+		want := []string{"-p", "--output-format", "json"}
 		if tc.model != "" {
 			want = append(want, "--model", ModelArg(tc.model))
 		}
@@ -165,7 +165,7 @@ func fakeClaude(t *testing.T, body string) string {
 func TestExec(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, ConfigName)
-	stdout, err := Exec(context.Background(), Session{
+	stdout, _, err := Exec(context.Background(), Session{
 		Bin:        fakeClaude(t, "said hi"),
 		Model:      "claude-opus-5-5",
 		ConfigPath: cfg,
@@ -216,7 +216,7 @@ func TestExecFailures(t *testing.T) {
 		if err := os.WriteFile(bin, []byte("#!/bin/sh\n"+tc.script+"\n"), 0o755); err != nil {
 			t.Fatalf("%s: write: %v", tc.name, err)
 		}
-		_, err := Exec(context.Background(), Session{
+		_, _, err := Exec(context.Background(), Session{
 			Bin: bin, Model: "claude-opus-5-5", ConfigPath: "c.json", Dir: dir,
 			TokenEnv: "TEST_CLAUDE_TOKEN", Token: "x", Prompt: "p",
 			Timeout: time.Minute, Label: "test session",
@@ -236,7 +236,7 @@ func TestExecFailures(t *testing.T) {
 func TestExecMissingCLI(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	_, err := Exec(context.Background(), Session{
+	_, _, err := Exec(context.Background(), Session{
 		Bin: filepath.Join(dir, "no-such-claude"), Model: "claude-opus-5-5",
 		ConfigPath: "c.json", Dir: dir, TokenEnv: "TEST_CLAUDE_TOKEN", Token: "x",
 		Prompt: "p", Timeout: time.Minute, Label: "test session",
@@ -254,7 +254,7 @@ func TestExecTimeout(t *testing.T) {
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	_, err := Exec(context.Background(), Session{
+	_, _, err := Exec(context.Background(), Session{
 		Bin: bin, Model: "claude-opus-5-5", ConfigPath: "c.json", Dir: dir,
 		TokenEnv: "TEST_CLAUDE_TOKEN", Token: "x", Prompt: "p",
 		Timeout: 200 * time.Millisecond, Label: "test session",
@@ -274,7 +274,7 @@ func TestExecParentCancel(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	_, err := Exec(ctx, Session{
+	_, _, err := Exec(ctx, Session{
 		Bin: bin, Model: "claude-opus-5-5", ConfigPath: "c.json", Dir: dir,
 		TokenEnv: "TEST_CLAUDE_TOKEN", Token: "x", Prompt: "p",
 		Timeout: time.Minute, Label: "test session",

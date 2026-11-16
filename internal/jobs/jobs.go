@@ -117,7 +117,10 @@ CREATE TABLE IF NOT EXISTS foremen (
 	online       INTEGER NOT NULL DEFAULT 0
 );
 `
-	_, err := db.Exec(ddl)
+	if _, err := db.Exec(ddl); err != nil {
+		return err
+	}
+	_, err := db.Exec(usageDDL)
 	return err
 }
 
@@ -249,7 +252,15 @@ func (s *Store) ApplyResult(ctx context.Context, res wire.JobResult) error {
 		return nil
 	}
 
-	usageJSON, err := json.Marshal(res.Usage)
+	// Harness-captured usage (usage_events) always overrides whatever the
+	// agent reported on the result.
+	resUsage := res.Usage
+	if u, ok, err := s.jobRollup(ctx, res.JobID); err != nil {
+		return err
+	} else if ok {
+		resUsage = &u
+	}
+	usageJSON, err := json.Marshal(resUsage)
 	if err != nil {
 		return err
 	}

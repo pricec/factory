@@ -18,6 +18,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pricec/factory/internal/claudecli"
+
 	"github.com/pricec/factory/internal/auth"
 	"github.com/pricec/factory/internal/buildinfo"
 	"github.com/pricec/factory/internal/inbox"
@@ -275,6 +277,22 @@ func New(cfg Config) (*App, error) {
 		WorkDir: filepath.Join(cfg.DataDir, "brain"),
 	}
 	a.poster = &Poster{FactoryURL: cfg.FactoryURL, Bearer: a.paired.Bearer}
+	a.brain.OnUsage = func(ctx context.Context, u claudecli.Usage) {
+		ev := wire.UsageEvent{
+			Kind: wire.UsageKindBrain, ForemanID: cfg.ID, Model: u.Model, Input: u.Input, Output: u.Output,
+			CacheCreate: u.CacheCreate, CacheRead: u.CacheRead, CostUSD: u.CostUSD, SessionID: u.SessionID, Limit: u.Limit,
+		}
+		if ev.Model == "" {
+			ev.Model = cfg.BrainModel
+		}
+		payload, err := json.Marshal(ev)
+		if err != nil {
+			return
+		}
+		if err := a.poster.PostToParent(ctx, wire.MessageEnvelope{Type: wire.TypeUsageRecord, From: a.inboxID, Payload: payload}); err != nil {
+			log.Printf("foremanapp: post brain usage: %v", err)
+		}
+	}
 	a.BuildHarnessConfig = a.defaultHarnessConfig
 	// The brain reporter wraps the runner so a failed session posts
 	// brain.failed upstream (spec §3.2): without it a dead delegation acks
