@@ -234,3 +234,39 @@ func TestUIForemenData(t *testing.T) {
 		t.Errorf("expected no jobs yet, got %d", len(jobs))
 	}
 }
+
+// TestUIInboxRedesignShell pins the element ids and endpoint strings the
+// S4 UI depends on (inbox redesign I3-I6). No browser runner: this guards
+// the contract between the page and the S2/S3 endpoints.
+func TestUIInboxRedesignShell(t *testing.T) {
+	e := newEnv(t)
+	resp, err := http.Get(e.ts.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	body := string(b)
+	for _, want := range []string{
+		// panes and controls
+		`id="alerts"`, `id="tasklist"`, `id="chatlog"`, `id="newtaskform"`,
+		`id="only-active"`, `id="task-search"`, `id="show-internal"`, `id="chatform"`,
+		// tabs stay
+		`id="tab-foremen"`, `id="tab-jobs"`, `id="tab-inboxes"`,
+		// contract endpoints
+		`/v1/tasks`, `/v1/alerts`, `/ack"`, `/reply"`, `?internal=1`,
+		`status=`, `/v1/chat`, `task_id`,
+		// SSE hint stream + legacy endpoints
+		`EventSource`, `/v1/inboxes/planner:main/stream`, `/v1/foremen`, `/v1/jobs`, `/v1/inboxes`,
+		// graceful degradation
+		`tasksAvailable`, `alertsAvailable`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("UI page missing %q", want)
+		}
+	}
+	// Decision 2: no job chips in the default thread view.
+	if strings.Contains(body, "job-chip") {
+		t.Error("UI must not render job chips")
+	}
+}
