@@ -171,10 +171,10 @@ type Job struct {
 	OverBudget  bool            `json:"over_budget"`
 	// HeldReason explains why a held job waits (S3 dispatch gate), e.g.
 	// "usage ORANGE: 5h 88%, resets 23:30Z". Empty outside StateHeld.
-	HeldReason  string          `json:"held_reason,omitempty"`
-	CreatedAt   string          `json:"created_at"`
-	UpdatedAt   string          `json:"updated_at"`
-	Spec        wire.JobSpec    `json:"spec"`
+	HeldReason string       `json:"held_reason,omitempty"`
+	CreatedAt  string       `json:"created_at"`
+	UpdatedAt  string       `json:"updated_at"`
+	Spec       wire.JobSpec `json:"spec"`
 }
 
 // Create stores spec as a pending job (spec §6.1).

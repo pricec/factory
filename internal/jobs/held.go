@@ -130,3 +130,13 @@ func (s *Store) ActiveJobIDs(ctx context.Context) ([]string, error) {
 	}
 	return out, rows.Err()
 }
+
+// CountHeldAhead counts held jobs that would release before a new job of
+// the given priority (same or more urgent priority; all are older), so a
+// fresh create queues behind them instead of jumping the FIFO.
+func (s *Store) CountHeldAhead(ctx context.Context, priority int) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs WHERE state = ?
+		AND CAST(IFNULL(json_extract(spec, '$.priority'), 5) AS INTEGER) <= ?`, StateHeld, priority).Scan(&n)
+	return n, err
+}

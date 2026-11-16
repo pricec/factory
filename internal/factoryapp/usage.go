@@ -84,6 +84,8 @@ func (a *App) recordUsage(ctx context.Context, ev wire.UsageEvent) error {
 type usageResponse struct {
 	usagewin.Snapshot
 	Spend map[string]jobs.UsageSums `json:"factory_spend"`
+	// Gate is the S3 dispatch gate: mode, effective level, held count.
+	Gate *gateView `json:"gate,omitempty"`
 }
 
 // handleUsage serves GET /v1/usage (unauthenticated UI-surface class, like
@@ -106,6 +108,14 @@ func (a *App) handleUsage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		resp.Spend[name] = sums
+	}
+	if a.gate != nil {
+		gv, err := a.gateStatus(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+		resp.Gate = &gv
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

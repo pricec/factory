@@ -62,7 +62,7 @@ func Handler(cfg Config) (http.Handler, error) {
 		Description: "List registered foremen: {foremen: [{id, online, capabilities}]}.",
 	}, listForemenTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "list_jobs",
+		Name: "list_jobs",
 		Description: "List job summaries: {jobs: [{id, state, summary, usage, over_budget, held_reason?}]}. " +
 			"state held = parked by the usage throttle; it dispatches automatically when usage allows.",
 	}, listJobsTool(cfg))
