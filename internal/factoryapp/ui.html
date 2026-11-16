@@ -360,9 +360,10 @@ async function loadForemen() {
       "<td>" + (f.online ? '<span class="dot online"></span>' : '<span class="dot offline"></span>') + esc(f.id) + "</td>" +
       "<td>" + (f.online ? "online" : "offline") + "</td>" +
       "<td>" + esc(rel(f.last_seen)) + " <span style=\"color:var(--dim)\">(" + esc(f.last_seen || "never") + ")</span></td>" +
+      "<td>" + esc(caps.build || "-") + "</td>" +
       "<td>" + (n ? '<span class="badge">' + n + " cap" + (n === 1 ? "" : "s") + "</span>" : "-") + "</td></tr>";
   });
-  $("list").innerHTML = table(["foreman", "status", "last seen", "capabilities"], rows);
+  $("list").innerHTML = table(["foreman", "status", "last seen", "build", "capabilities"], rows);
   for (const tr of $("list").querySelectorAll("tr[data-id]")) {
     tr.onclick = () => { selectedForeman = tr.dataset.id; selectedInbox = null; renderForemanDetail(selectedForeman); };
   }
