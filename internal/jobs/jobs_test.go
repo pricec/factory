@@ -323,19 +323,20 @@ func TestLivenessAndOfflineMarking(t *testing.T) {
 		t.Errorf("capabilities = %q", foremen[0].Capabilities)
 	}
 
-	// 44s silent: still online.
-	*now = now.Add(44 * time.Second)
+	// 59s silent: still online (under the 90s threshold; the foreman's
+	// 60s capabilities push cadence plus jitter must not flicker offline).
+	*now = now.Add(59 * time.Second)
 	_ = sw.Pump(ctx)
 	foremen, _ = s.Foremen(ctx)
 	if !foremen[0].Online {
-		t.Error("foreman marked offline at 44s; threshold is 45s")
+		t.Error("foreman marked offline at 59s; threshold is 90s")
 	}
-	// 46s silent: offline.
-	*now = now.Add(2 * time.Second)
+	// 90s silent: offline.
+	*now = now.Add(31 * time.Second)
 	_ = sw.Pump(ctx)
 	foremen, _ = s.Foremen(ctx)
 	if foremen[0].Online {
-		t.Error("foreman still online at 46s; threshold is 45s")
+		t.Error("foreman still online at 90s; threshold is 90s")
 	}
 	// OnDisconnect marks offline immediately; OnActivity brings it back.
 	live.OnDisconnect("foreman:alpha")
@@ -368,14 +369,14 @@ func TestUpsertForemanRefreshKeepsForemanAlive(t *testing.T) {
 		t.Fatalf("foremen: %v (%v)", before, err)
 	}
 
-	// 46s of silence: the sweep marks the foreman offline (spec §6.3).
-	*now = now.Add(46 * time.Second)
+	// 90s of silence: the sweep marks the foreman offline (spec §6.3).
+	*now = now.Add(90 * time.Second)
 	if err := NewSweeper(s).Pump(ctx); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := s.Foremen(ctx)
 	if after[0].Online {
-		t.Fatal("sweeper left the foreman online past the 45s threshold")
+		t.Fatal("sweeper left the foreman online past the 90s threshold")
 	}
 
 	// The capabilities push revives it: last_seen bumped, online again,

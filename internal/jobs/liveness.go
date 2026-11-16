@@ -87,7 +87,8 @@ func NewSweeper(store *Store) *Sweeper {
 // Pump runs one sweep pass:
 //  1. running jobs past timeout_s + 60s grace -> timed_out (terminal hook
 //     fires);
-//  2. foremen online with last_seen older than 45s -> offline.
+//  2. foremen online with last_seen 90s or more old -> offline (the 90s
+//     threshold covers the 60s capabilities push cadence; spec §6.3).
 func (s *Sweeper) Pump(ctx context.Context) error {
 	now := s.store.Now()
 
@@ -137,7 +138,7 @@ func (s *Sweeper) Pump(ctx context.Context) error {
 	}
 
 	_, err = s.store.db.ExecContext(ctx,
-		`UPDATE foremen SET online = 0 WHERE online = 1 AND last_seen < ?`,
+		`UPDATE foremen SET online = 0 WHERE online = 1 AND last_seen <= ?`,
 		now.Add(-offlineAfter).UTC().Format(time.RFC3339))
 	return err
 }

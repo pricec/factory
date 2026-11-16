@@ -49,8 +49,11 @@ const (
 	// timeoutGrace is the sweeper's grace past a job's timeout_s (spec §6.2).
 	timeoutGrace = 60 * time.Second
 	// offlineAfter is how long since last_seen before a foreman is marked
-	// offline (spec §6.3).
-	offlineAfter = 45 * time.Second
+	// offline (spec §6.3). 90s covers the foreman's 60s capabilities push
+	// cadence plus jitter and one missed push, so a healthy foreman never
+	// flickers offline between pushes; a truly dead foreman still goes
+	// offline within 90s.
+	offlineAfter = 90 * time.Second
 )
 
 // Store is the jobs + foremen database. Safe for concurrent use.
@@ -368,7 +371,8 @@ func scanJob(row rowScanner) (Job, bool, error) {
 // and refresh path, spec §6.7; #12 wires the matching, #11 the pairing).
 // Every upsert is a liveness signal too (spec §6.3): the conflict branch
 // bumps last_seen and marks the foreman online, so the foreman's steady
-// 60s capabilities push keeps it online even with no other traffic.
+// 60s capabilities push keeps it online even with no other traffic (the
+// 90s offline threshold is comfortably above the 60s push cadence).
 func (s *Store) UpsertForeman(ctx context.Context, id string, capabilities json.RawMessage) error {
 	if len(capabilities) == 0 {
 		capabilities = json.RawMessage("{}")
