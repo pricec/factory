@@ -25,6 +25,7 @@ import (
 	"github.com/pricec/factory/internal/models"
 	"github.com/pricec/factory/internal/notify"
 	"github.com/pricec/factory/internal/registry"
+	"github.com/pricec/factory/internal/tasks"
 	"github.com/pricec/factory/internal/wire"
 )
 
@@ -59,6 +60,7 @@ type Config struct {
 type App struct {
 	jobs       *jobs.Store
 	inbox      *inbox.Service
+	tasks      *tasks.Store // shares inbox.db (spec §9.5.1); New runs the legacy backfill; inbox.Close closes it
 	auth       *auth.Store
 	authn      *auth.Authenticator
 	hub        *notify.Hub
@@ -122,6 +124,11 @@ func New(cfg Config) (*App, error) {
 	if err != nil {
 		_ = a.Close()
 		return nil, fmt.Errorf("factoryapp: open inbox: %w", err)
+	}
+	a.tasks, err = tasks.New(context.Background(), a.inbox.DB())
+	if err != nil {
+		_ = a.Close()
+		return nil, fmt.Errorf("factoryapp: open tasks: %w", err)
 	}
 	a.auth, err = auth.Open(filepath.Join(cfg.DataDir, "auth.db"))
 	if err != nil {

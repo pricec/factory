@@ -68,6 +68,7 @@ policy: stdlib-first; allowed additions are `modernc.org/sqlite`,
 | `from` | Sender identity, e.g. `foreman:alpha` | #1 |
 | `payload` | JSON value; type-specific | #1 |
 | `ts` | Assigned by the server on POST: RFC3339 | #1 |
+| `thread_id` | Optional (omitted when empty): the task thread the message belongs to (§9.5.1). Persisted and returned by every read path | inbox redesign S1 |
 
 Go types for `MessageEnvelope`, `JobSpec`, and `JobResult` live in
 `internal/wire` - the single source of truth, with validation (#3). ULIDs via
@@ -201,6 +202,11 @@ error model in §10.
 `messages(id PK, inbox_id, type, job_id, sender, payload, ts, seq
 AUTOINCREMENT, acked INT, acked_at)`; partial index `(inbox_id, seq)` WHERE
 `acked=0`; partial unique `(inbox_id, job_id)` WHERE `type='job.result'`.
+`thread_id TEXT NULL` + index `(thread_id, seq)` (inbox redesign S1, see
+§9.5 Storage): added in place by `ALTER TABLE` when absent. The migration
+runs on every open, is additive only and idempotent; no row is ever
+deleted or rewritten by it. The envelope's optional `thread_id` (§3.1,
+`omitempty`) is persisted on POST and returned by every read path.
 
 ### 4.4 SSE stream (#2)
 
@@ -1408,6 +1414,46 @@ Host header" and a session silently stripped of every factory tool.
 Acking never deletes: history stays replayable via
 `GET /v1/inboxes/planner:main/recent` and streams to browsers via the
 permissive SSE `GET /v1/inboxes/planner:main/stream`.
+
+#### 9.5.1 Storage: threads, tasks, alerts (inbox redesign S1, 2026-11-16)
+
+All of it lives in the factory's `inbox.db` (package `internal/tasks`,
+sharing the inbox's single connection). Additive DDL only, idempotent at
+every start; existing files migrate in place.
+
+- `messages.thread_id` (nullable) files a message under a task; `NULL` =
+  unthreaded. Threads are global (not per inbox) and include acked rows.
+  Ordering is `seq`.
+- `tasks(id 'task_<ulid>' PK, title, status open|closed, priority INT
+  default 2 (0 = most urgent), created_at, updated_at, closed_at NULL,
+  close_reason)`. Closing stamps `closed_at` once; reopening clears
+  `closed_at` and `close_reason`.
+- `task_jobs(task_id, job_id, PK(task_id, job_id))`, indexed by job_id.
+- `alerts(id 'alert_<ulid>' PK, priority INT, title, body, source,
+  created_at, expires_at NULL = never, state open|acked|replied|expired,
+  task_id NULL, acked_at NULL)`.
+- `settings(key PK, value)`; key `priority_criteria` holds the operator's
+  free-text ranking criteria.
+- `tasks_migrations(name PK, applied_at, detail)`: one-shot migration
+  guards.
+- Timestamps in these tables are fixed-width UTC
+  `YYYY-MM-DDTHH:MM:SS.mmmZ`, so text order is time order and a
+  `YYYY-MM-DD` prefix selects a day.
+- Internal vs operator-visible is derived from the envelope type and never
+  stored: only `chat.message` and `brain.reply` are operator-visible;
+  everything else (`foreman.report`, `brain.failed`, `notify.*`, `job.*`,
+  unknown) is internal (`tasks.IsInternal`).
+- Legacy backfill: exactly once per database, guarded by
+  `tasks_migrations.legacy_backfill_v1` and written in the same transaction,
+  so a crash retries cleanly. It creates ONE closed task
+  `Legacy chat (pre-tasks)` (close_reason `migration`, created_at = oldest
+  row's ts) and stamps it on every `planner:main` row that has no thread.
+  Nothing is deleted, re-typed or re-acked. If `planner:main` is empty
+  (fresh install), no task is created, but the guard is still written, so
+  later rows are never swept in.
+- The store is policy-free: TTL defaults, expiry tickers, wakes and the idle
+  reaper live in the factory app, which uses the store's primitives
+  (`ExpireAlerts(now)`, `TransitionAlert` compare-and-set, and so on).
 
 ## 10. Error model
 
