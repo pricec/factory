@@ -626,7 +626,7 @@ factory planner's list view carries summaries only (#7, #19).
 | `GET /v1/inboxes` | per-inbox aggregate listing `{inbox_id, total, unacked, last_ts}` (UI; §4.1) |
 | `GET /v1/inboxes/{id}/recent` | recent envelopes for one inbox, acked included (UI; §4.1) |
 | `POST /v1/chat` | `{text, task_id?}` -> chat.message envelope in the operator inbox, filed under a task (new without `task_id`; 404 for an unknown one); wakes the LLM planner (§9.5, §9.5.2) |
-| `GET /v1/tasks`, `GET /v1/tasks/{id}`, `POST /v1/tasks` | task list, task + thread, and the "new task" alias of chat (§9.5.2) |
+| `GET /v1/tasks`, `GET /v1/tasks/{id}`, `POST /v1/tasks`, `PATCH /v1/tasks/{id}` | task list, task + thread, the "new task" alias of chat, and operator rename `{title}` (§9.5.2) |
 | `GET /v1/alerts`, `POST /v1/alerts/{id}/ack`, `POST /v1/alerts/{id}/reply` | open alerts, ack, and reply-creates-a-task (§9.5.3) |
 | `GET /v1/inboxes/planner:main/stream` | permissive SSE stream of the operator inbox for the chat UI (§9.5) |
 | `GET /` | operator web UI (single page; §4.1) |
@@ -1527,6 +1527,22 @@ Chat and task API (unauthenticated, like the rest of the UI surface,
   `task_id`.
 - `POST /v1/tasks {text}` is the same as chat without `task_id` (the "new
   task" box).
+- `PATCH /v1/tasks/{id} {title}` renames a task (operator rename from the
+  UI). Same (absent) auth as the rest of this surface: the browser holds no
+  token. The title is whitespace-trimmed; missing, empty or blank -> 400; more
+  than 200 characters (runes, the same limit as alert titles; the 60 of
+  `POST /v1/chat` only shortens DERIVED titles) -> 400; invalid JSON or a body
+  over 64 KiB -> 400; unknown id -> 404 `unknown_task`. 200 returns `{task}`
+  (Task JSON). Closed tasks MAY be renamed: a rename is bookkeeping, it does
+  not reopen the task and leaves status and close_reason alone (there is no
+  reason to freeze the label of an archived task, and the operator searches
+  closed tasks by title). It bumps `updated_at` like any `update_task`, so it
+  counts as activity (resets the idle-24h auto-close clock, re-ranks the
+  task). On success a `task.changed` envelope (payload = Task) is published
+  on `planner:main` SSE, so other tabs and the task list update live. It
+  shares the store path with the planner's MCP `update_task`, whose
+  semantics are unchanged (no length limit there); concurrent retitles are
+  last-write-wins.
 - Task JSON: `{id, title, status open|closed, priority int (0 = most
   urgent), created_at, updated_at, closed_at?, close_reason?, job_ids[],
   last_activity_at, preview}`. `preview` is the newest operator-visible
@@ -1711,6 +1727,20 @@ DECISION 2). Live updates: the `planner:main` SSE stream; any event
 (`message`, `task.changed`, `alert.changed`) debounces a refetch, with a 10s
 poll as fallback. If `/v1/tasks` or `/v1/alerts` 404s (slice not deployed),
 the page degrades to the legacy chat log or an "alerts not available" note.
+
+Task rename (2026-11-16): the title in the thread header is editable in
+place. Click it (or focus it and press Enter/Space), or click the pencil
+button next to it, to swap it for a text input (maxlength 200, selected).
+Enter or blur saves via `PATCH /v1/tasks/{id}`; Escape cancels; an unchanged
+title makes no request. While the input is open live refreshes do not
+re-render the header, so typing is never clobbered. On failure (400/404/
+network) the title reverts to the stored value and an inline `role="alert"`
+message `rename failed: ...` stays beside it until the next edit. On success
+the header and the task list row update immediately; other tabs follow
+through `task.changed`. Keyboard: title (role=button, tabindex 0) and
+pencil button are tab stops; focus returns to the title after save/cancel.
+Not exercised by an automated browser test: no JS runtime or browser exists
+in CI; `TestUIRenameHooks` only pins the markup and key handling.
 
 #### 9.5.6 Live acceptance (inbox redesign S5)
 

@@ -3,8 +3,11 @@ package factoryapp
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/pricec/factory/internal/tasks"
 )
@@ -26,6 +29,58 @@ func (a *App) registerTaskRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/tasks", a.handleListTasks)
 	mux.HandleFunc("POST /v1/tasks", a.handleCreateTask)
 	mux.HandleFunc("GET /v1/tasks/{id}", a.handleGetTask)
+	mux.HandleFunc("PATCH /v1/tasks/{id}", a.handleRenameTask)
+}
+
+// taskTitleLimit bounds an operator rename, in characters (runes). It
+// matches the 200 limit on alert titles (spec §9.5.3); the 60-character
+// taskTitleMax only shortens titles DERIVED from free text and is too
+// tight for a hand-written name. The planner's update_task has no limit
+// and is deliberately left unchanged.
+const taskTitleLimit = 200
+
+// handleRenameTask serves PATCH /v1/tasks/{id} {"title"} -> 200 {"task":Task}
+// (spec §9.5.2). The title is trimmed; empty -> 400, over taskTitleLimit
+// characters -> 400, unknown id -> 404. Closed tasks may be renamed (a
+// rename is bookkeeping, not a reopen; status is untouched). On success a
+// task.changed envelope is published so every open tab updates live. Last
+// write wins against a concurrent planner update_task. Unauthenticated like
+// the rest of the operator UI surface (§7.5).
+func (a *App) handleRenameTask(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Title *string `json:"title"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+	if err := dec.Decode(&in); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON: "+err.Error())
+		return
+	}
+	if in.Title == nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "title: required")
+		return
+	}
+	title := strings.TrimSpace(*in.Title)
+	if title == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "title: must not be empty")
+		return
+	}
+	if n := utf8.RuneCountInString(title); n > taskTitleLimit {
+		writeError(w, http.StatusBadRequest, "bad_request",
+			fmt.Sprintf("title: too long (%d characters, max %d)", n, taskTitleLimit))
+		return
+	}
+	ctx := r.Context()
+	t, err := a.tasks.UpdateTask(ctx, r.PathValue("id"), tasks.TaskUpdate{Title: &title})
+	if errors.Is(err, tasks.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "unknown_task", "unknown task "+r.PathValue("id"))
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	a.publishTaskChanged(ctx, t.ID)
+	writeJSON(w, http.StatusOK, map[string]any{"task": a.taskView(ctx, t)})
 }
 
 // handleListTasks serves GET /v1/tasks?status=open|closed|all&q=&limit=

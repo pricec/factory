@@ -98,6 +98,16 @@
   #newtaskform button { background: #1f6feb; border-color: #1f6feb; color: #fff; padding: 0 14px; border-radius: 8px; }
   #threadhead { align-items: center; justify-content: space-between; gap: 10px; padding: 6px 4px;
     border-bottom: 1px solid var(--border); font-weight: 600; }
+  #thread-title { display: inline-flex; align-items: center; gap: 6px; min-width: 0; flex: 1; }
+  #thread-title .ttl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: text;
+    border-radius: 4px; padding: 1px 3px; }
+  #thread-title .ttl:hover, #thread-title .ttl:focus-visible { background: var(--panel); outline: 1px solid var(--border); }
+  #thread-title .editbtn { background: none; border: 1px solid transparent; color: var(--dim); cursor: pointer;
+    padding: 0 4px; border-radius: 4px; font-size: 13px; }
+  #thread-title .editbtn:hover, #thread-title .editbtn:focus-visible { color: var(--text); border-color: var(--border); }
+  #thread-title input.titleedit { flex: 1; min-width: 0; background: var(--panel); color: var(--text);
+    border: 1px solid #1f6feb; border-radius: 4px; padding: 2px 6px; font: inherit; }
+  #thread-title .titleerr { color: #f85149; font-weight: 400; font-size: 12px; }
   .internal { opacity: .65; border-left: 2px dashed var(--border); padding-left: 6px; }
   #chat { display: flex; flex-direction: column; flex: 1; min-height: 0; }
   #chatlog { flex: 1; overflow-y: auto; padding: 8px 4px; display: flex;
@@ -228,7 +238,7 @@
           <button type="submit" id="newtask-send">new task</button>
         </form>
         <div id="threadhead" style="display:none">
-          <span id="thread-title"></span>
+          <span id="thread-title" data-testid="thread-title"></span>
           <label class="toggle"><input type="checkbox" id="show-internal"> show internal</label>
         </div>
         <div id="chat">
@@ -351,6 +361,17 @@ async function postJ(url, body) {
   if (!r.ok) {
     const e = new Error((data.error && (data.error.message || data.error)) || ("HTTP " + r.status));
     e.status = r.status; e.code = typeof data.error === "string" ? data.error : (data.error && data.error.code);
+    throw e;
+  }
+  return data;
+}
+
+async function patchJ(url, body) {
+  const r = await fetch(url, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const e = new Error((data.error && (data.error.message || data.error)) || ("HTTP " + r.status));
+    e.status = r.status;
     throw e;
   }
   return data;
@@ -571,8 +592,7 @@ function renderThread() {
   }
   const t = st.thread.task, msgs = st.thread.messages || [];
   head.style.display = "flex";
-  $("thread-title").innerHTML = prioBadge(t.priority) + " " + esc(t.title) +
-    ' <span class="badge">' + esc(t.status) + "</span>";
+  renderTitle(t);
   $("show-internal").checked = st.showInternal;
   const el = log;
   const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
@@ -583,6 +603,72 @@ function renderThread() {
   const last = shown[shown.length - 1];
   $("typing").style.display = last && last.from === "human:operator" && t.status === "open" ? "block" : "none";
   $("chat-input").placeholder = t.status === "closed" ? "reply to reopen this task…" : "reply in this task…";
+}
+
+/* ----- in-place task rename (PATCH /v1/tasks/{id}) -----
+   Click the title or the pencil (or focus it and press Enter/Space) to edit.
+   Enter or blur saves, Escape cancels. A failure shows an inline error and
+   reverts to the stored title. While editing, live refreshes do not touch the
+   header, so a typed-in title is never clobbered by an SSE-driven re-render. */
+
+let titleEdit = null; // {id} while the title input is open
+
+function renderTitle(t) {
+  if (titleEdit) {
+    if (titleEdit.id === t.id) return; // keep the open editor
+    titleEdit = null;                  // switched task: drop it
+  }
+  const box = $("thread-title");
+  box.innerHTML = prioBadge(t.priority) + ' <span class="ttl" role="button" tabindex="0" title="Rename task" aria-label="Task title: ' +
+    esc(t.title) + '. Activate to rename" id="title-text">' + esc(t.title) + "</span>" +
+    '<button type="button" class="editbtn" id="title-edit" title="Rename task" aria-label="Rename task">&#9998;</button>' +
+    ' <span class="badge">' + esc(t.status) + '</span><span class="titleerr" id="title-err" role="alert"></span>';
+  if (titleErr && titleErr.id === t.id) $("title-err").textContent = titleErr.msg; // sticks until the next edit
+  const go = () => startTitleEdit();
+  $("title-text").onclick = go;
+  $("title-text").onkeydown = (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); go(); } };
+  $("title-edit").onclick = go;
+}
+
+let titleErr = null; // {id, msg}: last failed rename, shown inline
+
+function startTitleEdit() {
+  if (titleEdit || !st.thread) return;
+  const t = st.thread.task;
+  titleEdit = { id: t.id };
+  titleErr = null;
+  const box = $("thread-title");
+  box.innerHTML = prioBadge(t.priority) +
+    ' <input type="text" class="titleedit" id="title-input" maxlength="200" aria-label="Task title" value="' + esc(t.title) + '">';
+  const inp = $("title-input");
+  let done = false;
+  const finish = async (save) => {
+    if (done) return;
+    done = true;
+    const next = inp.value.trim();
+    if (!save || next === t.title) { titleEdit = null; renderTitle(st.thread.task); $("title-text").focus(); return; }
+    inp.disabled = true;
+    try {
+      const out = await patchJ("/v1/tasks/" + encodeURIComponent(t.id), { title: next });
+      titleEdit = null;
+      if (st.thread && st.thread.task.id === t.id) st.thread.task = Object.assign(st.thread.task, out.task);
+      renderTitle(out.task);
+      const ti = st.tasks.find(x => x.id === t.id); if (ti) ti.title = out.task.title;
+      renderTasks();
+      $("title-text").focus();
+    } catch (e) {
+      titleEdit = null;
+      titleErr = { id: t.id, msg: "rename failed: " + e.message };
+      renderTitle(st.thread.task); // revert to the stored title
+      $("title-text").focus();
+    }
+  };
+  inp.onkeydown = (ev) => {
+    if (ev.key === "Enter") { ev.preventDefault(); finish(true); }
+    else if (ev.key === "Escape") { ev.preventDefault(); finish(false); }
+  };
+  inp.onblur = () => finish(true);
+  inp.focus(); inp.select();
 }
 
 $("show-internal").onchange = async () => { st.showInternal = $("show-internal").checked; await loadThread(); };

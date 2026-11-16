@@ -270,3 +270,25 @@ func TestUIInboxRedesignShell(t *testing.T) {
 		t.Error("UI must not render job chips")
 	}
 }
+
+// TestUIRenameHooks: the served page carries the in-place task rename UI
+// (no browser/JS runtime exists in CI, so this only pins the markup, the
+// PATCH call and the key handling; the behaviour is in spec §9.5.5).
+func TestUIRenameHooks(t *testing.T) {
+	e := newEnv(t)
+	resp, err := http.Get(e.ts.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	for _, want := range []string{
+		`id="thread-title"`, `id="title-edit"`, `id="title-input"`, `role="alert"`,
+		`method: "PATCH"`, `"/v1/tasks/" + encodeURIComponent(t.id)`,
+		`ev.key === "Escape"`, `inp.onblur`, `if (titleEdit)`,
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("UI page missing %q", want)
+		}
+	}
+}
