@@ -56,6 +56,25 @@ func TestCapabilityMatcherMatch(t *testing.T) {
 			wantOK:   false,
 		},
 		{
+			name:     "name:value entries match tag name + value (2026-11-15 amendment)",
+			rows:     []Foreman{f("foreman:linux-amd64", true, 0, map[string]string{"os": "linux", "arch": "amd64", "tools": "git,docker"})},
+			requires: []string{"os:linux", "arch:amd64", "tools:git"},
+			wantOK:   true,
+			wantID:   "foreman:linux-amd64",
+		},
+		{
+			name:     "name:value value mismatch disqualifies",
+			rows:     []Foreman{f("foreman:darwin", true, 0, map[string]string{"os": "darwin", "arch": "arm64"})},
+			requires: []string{"os:linux", "arch:amd64"},
+			wantOK:   false,
+		},
+		{
+			name:     "bare capability values are not tag names",
+			rows:     []Foreman{f("foreman:linux", true, 0, map[string]string{"os": "linux", "arch": "amd64"})},
+			requires: []string{"linux", "amd64"},
+			wantOK:   false,
+		},
+		{
 			name:     "empty tag value counts as absent",
 			rows:     []Foreman{f("foreman:empty-gpu", true, 0, map[string]string{"gpu": ""}), f("foreman:none", true, 0, nil)},
 			requires: []string{"gpu"},

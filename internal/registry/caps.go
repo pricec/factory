@@ -16,19 +16,48 @@ import (
 // Capabilities is a foreman's flat tag map (spec §6.7): tag name -> value.
 type Capabilities map[string]string
 
-// Has reports whether tag is present with a non-empty value. An empty
+// Has reports whether a requires entry (spec §6.7) is satisfied. A bare
+// entry is a tag name: present with a non-empty value. A "name:value"
+// entry additionally requires the tag's value - or its comma-separated
+// value list ("tools" -> "git,docker") - to contain value, so "os:linux",
+// "arch:amd64", "tools:git" work against the standard os/arch/tools tags.
+// ':' separates name from value (tag names must not contain it); an empty
+// value part degrades to the bare-name form. A missing or empty-valued
+// tag counts as absent. Safe on a nil Capabilities.
+func (c Capabilities) Has(entry string) bool {
+	name, value, constrained := strings.Cut(entry, ":")
+	if !constrained || value == "" {
+		return c.has(name)
+	}
+	if name == "" {
+		return false
+	}
+	v := c[name]
+	if v == "" {
+		return false
+	}
+	for _, part := range strings.Split(v, ",") {
+		if strings.TrimSpace(part) == value {
+			return true
+		}
+	}
+	return false
+}
+
+// has reports whether tag is present with a non-empty value. An empty
 // value counts as absent. Safe on a nil Capabilities.
-func (c Capabilities) Has(tag string) bool {
+func (c Capabilities) has(tag string) bool {
 	v, ok := c[tag]
 	return ok && v != ""
 }
 
-// HasAll reports whether every required tag is present non-empty (AND
-// semantics). Empty requires matches any foreman, including one with no
-// capabilities at all.
+// HasAll reports whether every requires entry is satisfied (AND
+// semantics; entries are bare tag names or "name:value", see Has). Empty
+// requires matches any foreman, including one with no capabilities at
+// all.
 func (c Capabilities) HasAll(requires []string) bool {
-	for _, tag := range requires {
-		if !c.Has(tag) {
+	for _, entry := range requires {
+		if !c.Has(entry) {
 			return false
 		}
 	}

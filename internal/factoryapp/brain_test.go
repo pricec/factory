@@ -20,9 +20,10 @@ func TestCreateJobEndpoint(t *testing.T) {
 
 	// No matching foreman yet: job is created and left pending.
 	var created struct {
-		JobID   string `json:"job_id"`
-		State   string `json:"state"`
-		Foreman any    `json:"foreman"`
+		JobID    string   `json:"job_id"`
+		State    string   `json:"state"`
+		Foreman  any      `json:"foreman"`
+		Warnings []string `json:"warnings"`
 	}
 	body := map[string]any{"task": "summarize the logs", "requires": []string{"gpu"}}
 	if status := e.do("POST", "/v1/jobs", "", body, &created); status != http.StatusCreated {
@@ -30,6 +31,11 @@ func TestCreateJobEndpoint(t *testing.T) {
 	}
 	if created.JobID == "" || created.State != "pending" || created.Foreman != "" {
 		t.Fatalf("created = %+v, want pending job with empty foreman", created)
+	}
+	// No foremen registered: requires cannot be validated - the 201 body
+	// carries a loud warning (spec §6.7, 2026-11-15 amendment).
+	if len(created.Warnings) == 0 {
+		t.Fatalf("warnings = %v, want a loud warning", created.Warnings)
 	}
 	var job jobs.Job
 	if status := e.do("GET", "/v1/jobs/"+created.JobID, "", nil, &job); status != http.StatusOK {
@@ -42,9 +48,10 @@ func TestCreateJobEndpoint(t *testing.T) {
 	// Pair a foreman with matching capabilities: next create dispatches.
 	e.pair("alpha", map[string]string{"gpu": "a100"})
 	created = struct {
-		JobID   string `json:"job_id"`
-		State   string `json:"state"`
-		Foreman any    `json:"foreman"`
+		JobID    string   `json:"job_id"`
+		State    string   `json:"state"`
+		Foreman  any      `json:"foreman"`
+		Warnings []string `json:"warnings"`
 	}{}
 	if status := e.do("POST", "/v1/jobs", "", body, &created); status != http.StatusCreated {
 		t.Fatalf("create w/ match status = %d, want 201", status)
@@ -81,6 +88,44 @@ func TestCreateJobEndpoint(t *testing.T) {
 		if status := e.do("POST", "/v1/jobs", "", tt.in, &errResp); status != http.StatusBadRequest {
 			t.Errorf("%s: status = %d, want 400", tt.name, status)
 		}
+	}
+
+	// Requires validation (spec §6.7, 2026-11-15 amendment): alpha is
+	// registered with gpu only, so capability values like "linux" name no
+	// registered tag key - 400 unknown_requires, nothing created.
+	var errResp struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	status := e.do("POST", "/v1/jobs", "", map[string]any{"task": "x", "requires": []string{"linux"}}, &errResp)
+	if status != http.StatusBadRequest {
+		t.Fatalf("values-as-names requires status = %d, want 400: %+v", status, errResp)
+	}
+	if errResp.Error.Code != "unknown_requires" {
+		t.Errorf("code = %q, want unknown_requires (%+v)", errResp.Error.Code, errResp)
+	}
+	if !strings.Contains(errResp.Error.Message, "linux") {
+		t.Errorf("message = %q, want mention of the offending entry", errResp.Error.Message)
+	}
+
+	// name:value form rides the real matcher: gpu=a100 satisfies gpu:a100.
+	created = struct {
+		JobID    string   `json:"job_id"`
+		State    string   `json:"state"`
+		Foreman  any      `json:"foreman"`
+		Warnings []string `json:"warnings"`
+	}{}
+	valueForm := map[string]any{"task": "constrain by value", "requires": []string{"gpu:a100"}}
+	if status := e.do("POST", "/v1/jobs", "", valueForm, &created); status != http.StatusCreated {
+		t.Fatalf("name:value create status = %d, want 201", status)
+	}
+	if created.State != "dispatched" || created.Foreman != "foreman:alpha" {
+		t.Fatalf("created = %+v, want dispatched to foreman:alpha", created)
+	}
+	if len(created.Warnings) != 0 {
+		t.Errorf("warnings = %v, want none for validated requires", created.Warnings)
 	}
 
 	// Tier pass-through (spec §5.1, §6.5): `tier: "hardest"` rides the

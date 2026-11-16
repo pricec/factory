@@ -64,6 +64,16 @@ func (a *App) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Creation-time requires validation (spec §6.7, 2026-11-15 amendment):
+	// entries must be tag names - bare or name:value - never capability
+	// values; an entry naming no registered tag key can never match, and
+	// the job would park pending silently.
+	warnings, err := a.jobs.ValidateRequires(r.Context(), spec.Requires)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "unknown_requires", err.Error())
+		return
+	}
+
 	// Ad hoc dispatch via the Matcher (spec §6.7): no matching foreman
 	// leaves the job pending.
 	state, foreman := "pending", ""
@@ -96,11 +106,17 @@ func (a *App) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Location", "/v1/jobs/"+spec.ID)
-	writeJSON(w, http.StatusCreated, map[string]any{
+	body := map[string]any{
 		"job_id":  spec.ID,
 		"state":   state,
 		"foreman": foreman,
-	})
+	}
+	// Loud, non-fatal warnings (spec §6.7): e.g. requires could not be
+	// validated because no foremen are registered yet.
+	if len(warnings) > 0 {
+		body["warnings"] = warnings
+	}
+	writeJSON(w, http.StatusCreated, body)
 }
 
 // messageForemanRequest is the POST /v1/foremen/{id}/messages body (spec
