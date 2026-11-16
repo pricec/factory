@@ -58,12 +58,9 @@ type Config struct {
 
 // App is the wired factory controller.
 type App struct {
-	jobs  *jobs.Store
-	inbox *inbox.Service
-	// tasks shares inbox.db (spec §9.5 storage): tasks, task_jobs,
-	// alerts, settings. Opened right after the inbox, which runs the
-	// one-time legacy backfill. Not closed separately (inbox owns the DB).
-	tasks      *tasks.Store
+	jobs       *jobs.Store
+	inbox      *inbox.Service
+	tasks      *tasks.Store // shares inbox.db (spec §9.5.1); New runs the legacy backfill; inbox.Close closes it
 	auth       *auth.Store
 	authn      *auth.Authenticator
 	hub        *notify.Hub
