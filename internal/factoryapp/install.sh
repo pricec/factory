@@ -2,7 +2,8 @@
 # factory foreman onboarding script (spec §7.1, issue #24).
 # Rendered per-request by the factory with a fresh one-time pairing token
 # and the factory's advertised URL. Idempotent: re-running overwrites the
-# binary and the unit file; an existing paired.json makes the embedded
+# binary (now under /var/lib/factory-foreman/bin) and the unit file, and
+# migrates the old /opt/factory/foreman layout in place; an existing paired.json makes the embedded
 # token inert.
 set -euo pipefail
 
@@ -41,13 +42,36 @@ aarch64 | arm64) GOARCH=arm64 ;;
 esac
 
 mkdir -p /opt/factory
-echo "downloading foreman (linux/$GOARCH) from $FACTORY_URL..."
-curl -fsSL "$FACTORY_URL/download/foreman/foreman-linux-$GOARCH" -o /opt/factory/foreman
-chmod 755 /opt/factory/foreman
 
 if ! id factory-foreman >/dev/null 2>&1; then
 	useradd --system --home /var/lib/factory-foreman --shell /usr/sbin/nologin factory-foreman
 fi
+
+# Install layout (auto-update v1, contract C5): the live binary is
+# /var/lib/factory-foreman/bin/foreman, owned by the service user so the
+# foreman can swap itself (bin/foreman.new -> bin/foreman, previous kept as
+# bin/foreman.prev). Idempotent MIGRATION: a host still on the old
+# /opt/factory/foreman layout is moved over by simply re-running this script;
+# state (paired.json, stores, inbox) lives under /var/lib/factory-foreman and
+# is never touched, so the existing pairing survives (the embedded token is
+# inert once paired.json exists).
+BIN_DIR=/var/lib/factory-foreman/bin
+mkdir -p "$BIN_DIR"
+chown factory-foreman "$BIN_DIR"
+chmod 755 "$BIN_DIR"
+echo "downloading foreman (linux/$GOARCH) from $FACTORY_URL..."
+curl -fsSL "$FACTORY_URL/download/foreman/foreman-linux-$GOARCH" -o "$BIN_DIR/foreman.new"
+if [ ! -s "$BIN_DIR/foreman.new" ]; then
+	echo "error: downloaded foreman binary is empty" >&2
+	rm -f "$BIN_DIR/foreman.new"
+	exit 1
+fi
+chmod 755 "$BIN_DIR/foreman.new"
+chown factory-foreman "$BIN_DIR/foreman.new"
+mv -f "$BIN_DIR/foreman.new" "$BIN_DIR/foreman"
+# A reinstall supersedes any in-flight auto-update: drop a stale marker and
+# boot counter so the guard cannot roll back over the fresh binary.
+rm -f "$BIN_DIR/update-pending.json" "$BIN_DIR/update-boots"
 
 # Worker CLIs (spec §8.4, §7.1): spawned workers run opencode (the pinned
 # GLM tiers) or the Claude Code CLI (claude-* worker models, e.g.
@@ -99,18 +123,83 @@ install_worker_cli() {
 install_worker_cli opencode .opencode/bin/opencode https://opencode.ai/install
 install_worker_cli claude .local/bin/claude https://claude.ai/install.sh
 
+# Crash-loop guard (contract C8): root-owned, run by systemd before every
+# start via ExecStartPre=+. POSIX sh, no jq/python. Always exits 0 - it must
+# never itself block the start.
+cat >/opt/factory/foreman-update-guard.sh <<'GUARD_EOF'
+#!/bin/sh
+# factory foreman auto-update crash-loop guard. Usage: guard.sh <data-dir>
+data="${1:-}"
+log() { echo "foreman-update-guard: $*" >&2; }
+[ -n "$data" ] || { log "no data dir given; nothing to do"; exit 0; }
+bin="$data/bin"
+marker="$bin/update-pending.json"
+boots="$bin/update-boots"
+if [ ! -f "$marker" ]; then
+	rm -f "$boots"
+	exit 0
+fi
+owner="$(ls -ldn "$bin" 2>/dev/null | awk '{print $3":"$4}')"
+n=0
+if [ -f "$boots" ]; then
+	read -r n <"$boots" 2>/dev/null || : # last line may lack a newline
+fi
+case "$n" in '' | *[!0-9]*) n=0 ;; esac
+n=$((n + 1))
+if [ "$n" -lt 3 ]; then
+	echo "$n" >"$boots" 2>/dev/null || true
+	[ -z "$owner" ] || chown "$owner" "$boots" 2>/dev/null || true
+	log "update pending, unconfirmed start $n of 3"
+	exit 0
+fi
+if [ ! -f "$bin/foreman.prev" ]; then
+	log "update unconfirmed after $n starts but $bin/foreman.prev is missing; cannot roll back"
+	echo "$n" >"$boots" 2>/dev/null || true
+	[ -z "$owner" ] || chown "$owner" "$boots" 2>/dev/null || true
+	exit 0
+fi
+if grep -Eq '"rolled_back"[[:space:]]*:[[:space:]]*true' "$marker" 2>/dev/null; then
+	log "update already rolled back; leaving $bin/foreman as is"
+	rm -f "$boots"
+	exit 0
+fi
+log "update unconfirmed after $n starts: restoring foreman.prev over foreman"
+if cp -p "$bin/foreman.prev" "$bin/foreman.guard.tmp" 2>/dev/null &&
+	{ [ -z "$owner" ] || chown "$owner" "$bin/foreman.guard.tmp"; } &&
+	chmod 755 "$bin/foreman.guard.tmp" &&
+	mv -f "$bin/foreman.guard.tmp" "$bin/foreman"; then
+	body="$(cat "$marker")"
+	rest="${body%\}}"
+	case "$rest" in
+	*[!{[:space:]]*) printf '%s,"rolled_back":true}\n' "$rest" >"$marker" ;;
+	*) printf '{"rolled_back":true}\n' >"$marker" ;;
+	esac
+	rm -f "$boots"
+	log "rolled back to foreman.prev"
+else
+	rm -f "$bin/foreman.guard.tmp"
+	log "rollback copy FAILED; starting the current binary"
+fi
+exit 0
+GUARD_EOF
+chown root:root /opt/factory /opt/factory/foreman-update-guard.sh
+chmod 755 /opt/factory /opt/factory/foreman-update-guard.sh
+
 cat >/etc/systemd/system/factory-foreman.service <<'EOF'
 [Unit]
 Description=factory foreman agent
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=10
 
 [Service]
 Type=simple
 User=factory-foreman
 StateDirectory=factory-foreman
 Environment=PATH={{SERVICE_PATH}}
-ExecStart=/opt/factory/foreman -factory {{FACTORY_URL}} -id {{FOREMAN_ID}} -data /var/lib/factory-foreman -addr 127.0.0.1:8090
+ExecStartPre=+/opt/factory/foreman-update-guard.sh /var/lib/factory-foreman
+ExecStart=/var/lib/factory-foreman/bin/foreman -factory {{FACTORY_URL}} -id {{FOREMAN_ID}} -data /var/lib/factory-foreman -addr 127.0.0.1:8090
 Environment=FACTORY_PAIRING_TOKEN={{PAIRING_TOKEN}}
 Restart=always
 RestartSec=5
@@ -131,6 +220,8 @@ chmod 600 /etc/systemd/system/factory-foreman.service
 systemctl daemon-reload
 systemctl enable factory-foreman >/dev/null
 systemctl restart factory-foreman
+# Migration cleanup: the old layout's binary is no longer referenced.
+rm -f /opt/factory/foreman
 
 echo "foreman onboarded as '$FOREMAN_ID'."
 systemctl --no-pager --lines=5 status factory-foreman || true
