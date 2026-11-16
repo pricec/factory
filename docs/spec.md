@@ -605,7 +605,28 @@ Onboarding endpoints (#24, #25) - all outside `/v1`:
   token copy-paste. The script (as root, on Linux with systemd) downloads
   the foreman binary, installs `/etc/systemd/system/factory-foreman.service`
   (`Environment=FACTORY_PAIRING_TOKEN`, inert once `paired.json` exists),
-  and enables + restarts the service; it is idempotent. It also installs
+  and enables + restarts the service; it is idempotent. Install layout
+  (auto-update v1 piece C, 2026-11-16 amendment): the binary lands at
+  `/var/lib/factory-foreman/bin/foreman`, owned by the service user and
+  written via `bin/foreman.new` + `rename(2)`, and the unit's `ExecStart`
+  points there so the foreman can swap itself (`bin/foreman.prev` is the
+  rollback copy; `bin/update-pending.json` the update marker). The unit also
+  sets `StartLimitIntervalSec=600`, `StartLimitBurst=10` (with
+  `Restart=always`, `RestartSec=5`) and
+  `ExecStartPre=+/opt/factory/foreman-update-guard.sh <data-dir>`, a
+  root-owned POSIX-sh crash-loop guard written by the installer: with no
+  marker it deletes `bin/update-boots` and does nothing; with a marker it
+  counts unconfirmed starts in `bin/update-boots` and on the third restores
+  `foreman.prev` over `foreman` (owner/mode preserved), sets
+  `"rolled_back":true` in the marker and resets the counter. It always exits
+  0 so it can never block a start. Migration: re-running the installer on a
+  host with the old `/opt/factory/foreman` layout moves it to the new layout
+  in place - state under `/var/lib/factory-foreman` (including `paired.json`,
+  so no re-pairing) is never touched, a stale marker/boot counter is dropped,
+  and the old `/opt/factory/foreman` is removed after the restart. This
+  one-time per-host re-run is required before a host can auto-update
+  (un-migrated hosts keep working, just without auto-update); see
+  `docs/operator-runbook.md`. It also installs
   BOTH worker CLIs - opencode and the Claude Code CLI (2026-11-16
   amendment, §8.4) - so spawned workers can run either runner: each
   missing CLI is installed via its official installer as the service user
