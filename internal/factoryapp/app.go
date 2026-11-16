@@ -74,6 +74,15 @@ type App struct {
 	plannerTok string
 	// downloadsDir backs GET /download/foreman/{platform} (#24).
 	downloadsDir string
+
+	// pendingAlertedJobs dedupes the long-pending alert (spec §6.7,
+	// 2026-11-15 amendment): one notify.pending per job per pending
+	// episode, keyed by the job row's pending-since stamp (updated_at) so
+	// a requeue re-alerts; process-local and at-least-once like the
+	// dispatch notifier's notified set. Guarded by pendingAlertMu (the
+	// loop and test-driven passes may interleave).
+	pendingAlertedJobs map[string]string
+	pendingAlertMu     sync.Mutex
 }
 
 // New opens the three sqlite stores under cfg.DataDir, wires every
@@ -91,7 +100,10 @@ func New(cfg Config) (*App, error) {
 		now = func() time.Time { return time.Now().UTC() }
 	}
 
-	a := &App{advertise: cfg.AdvertiseURL}
+	a := &App{
+		advertise:          cfg.AdvertiseURL,
+		pendingAlertedJobs: map[string]string{},
+	}
 	if a.advertise == "" {
 		a.advertise = defaultAdvertiseURL(cfg.Addr)
 	}
@@ -214,8 +226,8 @@ func (a *App) Inbox() *inbox.Service { return a.inbox }
 func (a *App) Auth() *auth.Store     { return a.auth }
 
 // Run runs the background loops: sweeper, scheduler, retry picker, the
-// factory:main consumer, and the dispatch notifier. It blocks until ctx
-// is done.
+// factory:main consumer, the dispatch notifier, and the long-pending
+// alert. It blocks until ctx is done.
 func (a *App) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	run := func(name string, fn func() error) {
@@ -234,6 +246,7 @@ func (a *App) Run(ctx context.Context) error {
 	run("consumer", func() error { a.consumeLoop(ctx); return nil })
 	run("planner", func() error { a.plannerLoop(ctx); return nil })
 	run("dispatch notifier", func() error { a.notifyLoop(ctx); return nil })
+	run("pending alert", func() error { a.pendingAlertLoop(ctx); return nil })
 	wg.Wait()
 	return nil
 }

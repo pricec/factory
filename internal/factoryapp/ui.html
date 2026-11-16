@@ -293,6 +293,15 @@ function bubble(env) {
       (p.job_id ? ' · <a href="/v1/jobs/' + encodeURIComponent(p.job_id) + '" target="_blank">details</a>' : "") +
       "</div>";
   }
+  if (env.type === "notify.pending") {
+    const p = payloadObj(env);
+    return '<div class="bubble notify"><span class="who">job ' + esc(p.job_id || "?") + " pending " +
+      esc(String(p.pending_minutes ?? "?")) + "m · " + esc(rel(env.ts)) + "</span>" +
+      (Array.isArray(p.requires) && p.requires.length ? " · requires: " + esc(p.requires.join(", ")) : "") +
+      (p.reason ? '<div><span style="color:var(--warn)">' + esc(p.reason) + "</span>" +
+        ' · <a href="/v1/jobs/' + encodeURIComponent(p.job_id || "") + '" target="_blank">details</a></div>' : "") +
+      "</div>";
+  }
   return '<div class="bubble notify"><span class="who">' + esc(env.type) + " from " + esc(env.from) + " · " + esc(rel(env.ts)) + "</span>" +
     esc(JSON.stringify(env.payload ?? null)) + "</div>";
 }
