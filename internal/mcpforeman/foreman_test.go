@@ -235,12 +235,12 @@ func TestInitializeToolsListAndBudget(t *testing.T) {
 	_, out = e.rpc(e.brain, "tools/list", nil)
 	res := resultOf(t, out)
 	tools, ok := res["tools"].([]any)
-	if !ok || len(tools) != 5 {
-		t.Fatalf("tools/list: want exactly 5 tools, got %v", res["tools"])
+	if !ok || len(tools) != 6 {
+		t.Fatalf("tools/list: want exactly 6 tools, got %v", res["tools"])
 	}
 	want := map[string]bool{
 		"inbox_next": true, "inbox_ack": true, "post_to_factory": true,
-		"spawn_worker": true, "answer_worker": true,
+		"spawn_worker": true, "answer_worker": true, "raise_alert": true,
 	}
 	var budget int
 	for _, tl := range tools {
@@ -265,10 +265,10 @@ func TestInitializeToolsListAndBudget(t *testing.T) {
 	if len(want) != 0 {
 		t.Errorf("missing tools: %v", want)
 	}
-	if budget >= 1536 {
-		t.Errorf("description budget = %d bytes, want < 1536 (1.5KB)", budget)
+	if budget >= 2048 {
+		t.Errorf("description budget = %d bytes, want < 2048 (2KB; raised from 1.5KB for raise_alert, S3)", budget)
 	}
-	t.Logf("description budget: %d bytes (limit 1536)", budget)
+	t.Logf("description budget: %d bytes (limit 2048)", budget)
 }
 
 func TestInboxNextAck(t *testing.T) {

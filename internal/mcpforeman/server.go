@@ -72,6 +72,8 @@ func Handler(cfg Config) (http.Handler, error) {
 		Description: "Deliver an answer to a worker's question.",
 	}, answerWorkerTool(cfg))
 
+	addRaiseAlertTool(srv, cfg)
+
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 	return bearerAuth(cfg, h), nil

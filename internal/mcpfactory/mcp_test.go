@@ -237,13 +237,13 @@ func TestToolsListAndBudget(t *testing.T) {
 	_, out = e.rpc(e.planner, "tools/list", nil)
 	res := resultOf(t, out)
 	tools, ok := res["tools"].([]any)
-	if !ok || len(tools) != 7 {
-		t.Fatalf("tools/list: want 7 tools, got %v", res["tools"])
+	if !ok || len(tools) != 8 {
+		t.Fatalf("tools/list: want 8 tools, got %v", res["tools"])
 	}
 	want := map[string]bool{
 		"list_foremen": false, "list_jobs": false, "create_job": false,
 		"read_result": false, "cancel_job": false, "message_foreman": false,
-		"notify_operator": false,
+		"notify_operator": false, "raise_alert": false,
 	}
 	var budget int
 	for _, tl := range tools {
@@ -274,8 +274,8 @@ func TestToolsListAndBudget(t *testing.T) {
 	// Spec §9.1 budget: factory surface < 2KB (2026-11-15 amendments -
 	// raised from 1536 for cancel_job; create_job documents the requires
 	// tag-name forms after capability values parked two jobs pending ~7h).
-	if budget >= 2048 {
-		t.Errorf("description budget = %d bytes, want < 2048", budget)
+	if budget >= 2560 {
+		t.Errorf("description budget = %d bytes, want < 2560 (raised from 2KB for raise_alert, inbox S3)", budget)
 	}
 	t.Logf("description budget: %d bytes", budget)
 }
@@ -938,4 +938,14 @@ func TestCancelJobTool(t *testing.T) {
 			t.Errorf("tool error = %q, want job_id mention", msg)
 		}
 	})
+}
+
+// TestRaiseAlertTool: raise_alert forwards to Config.RaiseAlert and reports
+// the id/expiry; a missing backend and backend errors are tool errors.
+func TestRaiseAlertTool(t *testing.T) {
+	e := newEnv(t, budgets.DefaultConfig())
+	msg := toolError(t, "raise_alert", e.callTool("raise_alert", map[string]any{"priority": 1, "title": "x"}))
+	if !strings.Contains(msg, "not configured") {
+		t.Errorf("unconfigured error = %q", msg)
+	}
 }

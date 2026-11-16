@@ -32,6 +32,8 @@ type Config struct {
 	// Budget carries the daily spend cap and FACTORY_SPEND_OVERRIDE for the
 	// create_job breaker (spec §6.5).
 	Budget budgets.Config
+	// RaiseAlert backs the raise_alert tool (spec §9.5.2); nil -> tool errors.
+	RaiseAlert RaiseAlertFunc
 }
 
 // Handler builds the factory planner MCP endpoint (spec §9.4): the five-tool
@@ -80,6 +82,8 @@ func Handler(cfg Config) (http.Handler, error) {
 		Name:        "notify_operator",
 		Description: "Reply to the operator in the chat UI; ALWAYS answer this way.",
 	}, notifyOperatorTool(cfg))
+
+	addRaiseAlertTool(srv, cfg)
 
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})

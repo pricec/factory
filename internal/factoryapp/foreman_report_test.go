@@ -2,13 +2,13 @@ package factoryapp_test
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/pricec/factory/internal/foremanapp"
+	"github.com/pricec/factory/internal/tasks"
 	"github.com/pricec/factory/internal/wire"
 )
 
@@ -64,8 +64,8 @@ func operatorEnvelopes(t *testing.T, e *testEnv, typ string) []wire.MessageEnvel
 
 // TestFactoryMainRelaysReportsAndWakes: foreman.report and brain.failed
 // posted into factory:main are relayed verbatim into planner:main and wake
-// the planner with a report-specific reason; an unhandled type is relayed
-// as notify.unhandled and does not wake (spec §3.2, §9.5).
+// the planner with a report-specific reason; an unhandled type is raised
+// as a P2 alert (no chat row) and does not wake (spec §3.2, §9.5).
 func TestFactoryMainRelaysReportsAndWakes(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -75,7 +75,7 @@ func TestFactoryMainRelaysReportsAndWakes(t *testing.T) {
 	}{
 		{"foreman.report relays and wakes", "foreman.report", true, "foreman.report"},
 		{"brain.failed relays and wakes", "brain.failed", true, "brain.failed"},
-		{"unhandled type notifies, no wake", "mystery.type", false, "notify.unhandled"},
+		{"unhandled type alerts, no wake", "mystery.type", false, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -90,6 +90,30 @@ func TestFactoryMainRelaysReportsAndWakes(t *testing.T) {
 				t.Fatalf("post to factory:main: %v", err)
 			}
 
+			if tc.wantOut == "" {
+				var resp struct {
+					Alerts []tasks.Alert `json:"alerts"`
+				}
+				waitFor(t, "alert", 5*time.Second, func() bool {
+					e.do("GET", "/v1/alerts", "", nil, &resp)
+					return len(resp.Alerts) == 1
+				})
+				al := resp.Alerts[0]
+				if al.Priority != 2 || al.Source != "factory:consumer" || al.ExpiresAt == nil ||
+					!strings.Contains(al.Title, "mystery.type") || !strings.Contains(al.Body, "foreman:alpha") {
+					t.Fatalf("unhandled alert = %+v", al)
+				}
+				time.Sleep(200 * time.Millisecond)
+				if n := rec.count(); n != 0 {
+					t.Fatalf("planner woke %d time(s) for %s, want none", n, tc.typ)
+				}
+				for _, typ := range []string{"notify.unhandled", "mystery.type"} {
+					if len(operatorEnvelopes(t, e, typ)) != 0 {
+						t.Fatalf("%s leaked into the chat inbox", typ)
+					}
+				}
+				return
+			}
 			waitFor(t, "relay", 5*time.Second, func() bool {
 				return len(operatorEnvelopes(t, e, tc.wantOut)) == 1
 			})
@@ -111,17 +135,6 @@ func TestFactoryMainRelaysReportsAndWakes(t *testing.T) {
 					t.Errorf("wake prompt lacks the report payload: %q", rec.last())
 				}
 				return
-			}
-			// No wake for informational notices: give the loop a beat, then
-			// confirm the planner stayed asleep.
-			time.Sleep(200 * time.Millisecond)
-			if n := rec.count(); n != 0 {
-				t.Fatalf("planner woke %d time(s) for %s, want none", n, tc.typ)
-			}
-			notice := operatorEnvelopes(t, e, "notify.unhandled")[0]
-			var p map[string]any
-			if err := json.Unmarshal(notice.Payload, &p); err != nil || p["type"] != "mystery.type" || p["from"] != "foreman:alpha" {
-				t.Fatalf("notify.unhandled payload = %s (%v)", notice.Payload, err)
 			}
 		})
 	}
