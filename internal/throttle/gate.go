@@ -171,6 +171,7 @@ func (g *Gate) Admit(ctx context.Context, jobID string, req Request, active func
 	if ev.Mode == ModeOff {
 		level = usagewin.Green
 	}
+	g.pruneInflight(now, nil) // TTL prune on every call: bounded in all states
 	load := Load{QueuedAhead: queuedAhead}
 	if !g.lastStart.IsZero() {
 		load.HasLastStart, load.SinceLastStart = true, now.Sub(g.lastStart)
@@ -315,12 +316,11 @@ func (g *Gate) evaluateLocked(ctx context.Context) Eval {
 	driveBumped := false
 	usable := 0
 	for _, w := range []usagewin.Window{usagewin.Win5h, usagewin.Win7d} {
-		v, ok := snap.Windows[w]
+		v := snap.Windows[w]
 		if !usableView(v) {
 			continue
 		}
 		usable++
-		_ = ok
 		st := v.State
 		bumped := g.observe(w, v, now)
 		if bumped {
