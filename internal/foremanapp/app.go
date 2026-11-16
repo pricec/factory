@@ -238,8 +238,11 @@ func New(cfg Config) (*App, error) {
 	}
 	a.poster = &Poster{FactoryURL: cfg.FactoryURL, Bearer: a.paired.Bearer}
 	a.BuildHarnessConfig = a.defaultHarnessConfig
+	// The brain reporter wraps the runner so a failed session posts
+	// brain.failed upstream (spec §3.2): without it a dead delegation acks
+	// silently and the operator waits forever.
 	a.router = &routing.Router{
-		Brain:   a.brain,
+		Brain:   &brainReporter{inner: a.brain, poster: a.poster, from: a.inboxID},
 		Poster:  a.poster,
 		Spawner: spawnerFunc(a.SpawnWorker),
 	}

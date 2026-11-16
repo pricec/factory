@@ -7,6 +7,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/pricec/factory/internal/auth"
 	"github.com/pricec/factory/internal/jobs"
 	"github.com/pricec/factory/internal/registry"
 	"github.com/pricec/factory/internal/wire"
@@ -107,12 +108,58 @@ func (a *App) handleEnvelope(ctx context.Context, env wire.MessageEnvelope, seen
 		if err := a.jobs.ApplyEvent(ctx, env.JobID, p.Event); err != nil {
 			log.Printf("factoryapp: consumer: apply event %q for %s: %v", p.Event, env.JobID, err)
 		}
+	case foremanReportType, brainFailedType:
+		// Foreman-originated reports for the operator (spec §3.2, §9.5):
+		// relay verbatim into planner:main, where the planner loop wakes
+		// on them. This is the path a foreman's post_to_factory alone
+		// reaches the operator on - no direct /v1/chat post needed.
+		a.relayToPlanner(ctx, env)
 	default:
+		// Nothing handles this type. Acking it silently is the parking
+		// failure mode (an envelope nobody reads, see spec §9.5): the
+		// operator is told instead, once per envelope, without a wake.
 		if !seenTypes[env.Type] {
 			seenTypes[env.Type] = true
-			log.Printf("factoryapp: consumer: no handler for envelope type %q (job_id %q); acked", env.Type, env.JobID)
+			log.Printf("factoryapp: consumer: no handler for envelope type %q (job_id %q); relayed as notify.unhandled", env.Type, env.JobID)
 		}
+		a.notifyUnhandled(ctx, env)
 	}
+}
+
+// Envelope types the consumer relays into planner:main (spec §3.2).
+const (
+	foremanReportType = "foreman.report"
+	brainFailedType   = "brain.failed"
+)
+
+// relayToPlanner copies one factory:main envelope verbatim (type, job id,
+// sender, payload) into the operator inbox. The store assigns a fresh id
+// and ts. Failures log; the source envelope is still acked, so a
+// persistent planner-inbox failure drops only the copy, with the log line
+// as the trace.
+func (a *App) relayToPlanner(ctx context.Context, env wire.MessageEnvelope) {
+	relay := wire.MessageEnvelope{
+		Type:    env.Type,
+		JobID:   env.JobID,
+		From:    env.From,
+		Payload: env.Payload,
+	}
+	if _, err := a.inbox.Post(ctx, auth.PlannerMainInbox, relay); err != nil {
+		log.Printf("factoryapp: consumer: relay %s from %s to planner: %v", env.Type, env.From, err)
+	}
+}
+
+// notifyUnhandled tells the operator about a factory:main envelope no
+// handler consumes (informational: no planner wake). The payload names
+// the envelope so the operator can see what was posted and by whom.
+func (a *App) notifyUnhandled(ctx context.Context, env wire.MessageEnvelope) {
+	a.notifyOperator(ctx, "notify.unhandled", map[string]any{
+		"envelope_id": env.ID,
+		"type":        env.Type,
+		"from":        env.From,
+		"job_id":      env.JobID,
+		"note":        "no handler on factory:main for this type; the envelope was acked after this notice",
+	})
 }
 
 // notifyDispatched posts the job.request envelope for one dispatched job.

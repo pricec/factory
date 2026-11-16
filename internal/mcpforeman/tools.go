@@ -27,11 +27,45 @@ type inboxAckArgs struct {
 
 // postToFactoryArgs is post_to_factory's argument set (spec §9.3).
 // job_id is required for job-scoped types - the envelope carries it
-// (spec §3.1).
+// (spec §3.1). to is optional: omitted or the parent inbox
+// (factory:main) is the only routable destination; anything else is a
+// loud tool error (spec §9.3 unroutable-address rule).
 type postToFactoryArgs struct {
 	Type    string `json:"type"`
 	Payload any    `json:"payload,omitempty"`
 	JobID   string `json:"job_id,omitempty"`
+	To      string `json:"to,omitempty"`
+}
+
+// TypeForemanReport is the envelope type a foreman uses to report to
+// the operator (spec §3.2, §9.5): the factory relays it into
+// planner:main and wakes the planner, so no direct /v1/chat post is
+// needed.
+const TypeForemanReport = "foreman.report"
+
+// checkPostTarget validates post_to_factory's to and the type/payload
+// pairing before anything is staged (spec §9.3). A destination other
+// than the parent inbox is refused with a hint naming the routable
+// path: silently parking an envelope in an inbox nothing reads is the
+// failure mode this guards (2026-11-16 foreman.report incident).
+func checkPostTarget(parentInbox string, in postToFactoryArgs) error {
+	if in.To != "" && in.To != parentInbox {
+		hint := "post with no \"to\" (it routes to " + parentInbox + ")"
+		switch in.To {
+		case "planner:main":
+			hint = "planner:main is the operator inbox; foremen cannot write it directly - post type \"" +
+				TypeForemanReport + "\" with no \"to\" and the factory relays it there and wakes the planner"
+		case "factory:planner":
+			hint = "factory:planner is the planner's auth identity, not an inbox; " +
+				"post type \"" + TypeForemanReport + "\" with no \"to\" to reach the operator"
+		}
+		return fmt.Errorf("unroutable_address: post_to_factory to %q is not an inbox the factory routes; %s",
+			in.To, hint)
+	}
+	if in.Type == TypeForemanReport && in.Payload == nil {
+		return fmt.Errorf("payload: required for %s (the operator reads it)", TypeForemanReport)
+	}
+	return nil
 }
 
 // spawnWorkerArgs is spawn_worker's argument set (spec §9.3).
@@ -95,6 +129,9 @@ func inboxAckTool(cfg Config) mcp.ToolHandlerFor[inboxAckArgs, any] {
 // id; job-scoped types must carry a job_id (spec §3.1).
 func postToFactoryTool(cfg Config) mcp.ToolHandlerFor[postToFactoryArgs, any] {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, in postToFactoryArgs) (*mcp.CallToolResult, any, error) {
+		if err := checkPostTarget(cfg.ParentInboxID, in); err != nil {
+			return nil, nil, err
+		}
 		env := wire.MessageEnvelope{
 			Type:  in.Type,
 			JobID: in.JobID,

@@ -68,11 +68,11 @@ fi
 # Worker CLIs (spec §8.4, §7.1), same contract as install.sh: a factory
 # machine runs the planner brain via opencode (spec §8.4), and a foreman
 # onboarded here needs opencode (the pinned GLM tiers) plus the Claude Code
-# CLI (claude-* worker models) for its spawned workers. systemd runs the
-# unit with the DEFAULT service PATH below - the service user's
-# ~/.local/bin and ~/.opencode/bin are NOT on it (the 2026-11-15 user-unit
-# PATH gotcha) - so each CLI is installed as the service user (its
-# self-updater keeps working) and symlinked into /usr/local/bin.
+# CLI (claude-* worker models) for its spawned workers. The unit pins PATH
+# to SERVICE_PATH (below), which carries the service user's ~/.local/bin
+# and ~/.opencode/bin (systemd's default service PATH omits them: the
+# 2026-11-15 user-unit PATH gotcha). Each CLI is installed as the service
+# user (its self-updater keeps working) and symlinked into /usr/local/bin.
 # Idempotent: a service-visible install is detected and kept. Every step
 # verifies with command -v against the service PATH - the same lookup the
 # harness's exec performs at run time - and a failed or unverifiable
@@ -80,7 +80,10 @@ fi
 # (re-run: idempotent).
 SERVICE_USER=factory
 SERVICE_HOME=/var/lib/factory
-SERVICE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# The pinned unit PATH (rendered into the unit below as Environment=PATH and
+# used for every verification here): the service user's own bins first, so a
+# CLI installed under its home resolves without a symlink.
+SERVICE_PATH=/var/lib/factory/.opencode/bin:/var/lib/factory/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 mkdir -p "$SERVICE_HOME"
 chown "$SERVICE_USER" "$SERVICE_HOME"
 if ! command -v su >/dev/null 2>&1; then
@@ -135,6 +138,7 @@ Wants=network-online.target
 Type=simple
 User=factory
 StateDirectory=factory
+Environment=PATH={{SERVICE_PATH}}
 ExecStart=/opt/factory/factory -data /var/lib/factory -addr :{{PORT}} -downloads /var/lib/factory/downloads
 Environment=FACTORY_PLANNER_TOKEN={{PLANNER_TOKEN}}
 EnvironmentFile=/etc/factory/factory.env
@@ -147,6 +151,8 @@ EOF
 # {{PORT}} and {{PLANNER_TOKEN}} are local values (digits/hex) - sed-safe.
 sed -i "s|{{PORT}}|$PORT|" /etc/systemd/system/factory.service
 sed -i "s|{{PLANNER_TOKEN}}|$PLANNER_TOKEN|" /etc/systemd/system/factory.service
+# The pinned PATH (see SERVICE_PATH above): the planner brain execs opencode.
+sed -i "s|{{SERVICE_PATH}}|$SERVICE_PATH|" /etc/systemd/system/factory.service
 # The unit carries the planner token (the v1 operator credential); keep it
 # root-only.
 chmod 600 /etc/systemd/system/factory.service
