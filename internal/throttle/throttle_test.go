@@ -335,3 +335,20 @@ func TestGateKillSwitchAndOverride(t *testing.T) {
 		t.Fatalf("auto: %+v", ev)
 	}
 }
+
+func TestRulePaused(t *testing.T) {
+	cases := []struct {
+		name string
+		req  Request
+		hold bool
+	}{
+		{"chat wake passes", Request{Kind: KindChatWake}, false},
+		{"P0 job held", Request{Kind: KindJob, P0: true, JobPriority: 1}, true},
+		{"normal job held", Request{Kind: KindJob, JobPriority: 5}, true},
+	}
+	for _, c := range cases {
+		if hold, _ := Rule(Paused, c.req, Load{}); hold != c.hold {
+			t.Errorf("%s: hold=%v want %v", c.name, hold, c.hold)
+		}
+	}
+}
