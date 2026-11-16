@@ -30,8 +30,10 @@ const (
 	alertChangedType = "alert.changed"
 
 	// Default alert priorities of the factory's own producers.
-	alertPriorityPending   = 1 // notify.pending
-	alertPriorityUnhandled = 2 // notify.unhandled
+	alertPriorityPending       = 1 // notify.pending
+	alertPriorityUnhandled     = 2 // notify.unhandled
+	alertPriorityPlannerFailed = 0 // planner-session failure (S5 glue)
+	alertPriorityUnattributed  = 2 // unattributed foreman.report / brain.failed (S5 glue)
 
 	// Default TTLs (operator decision 5): P0/P1 never expire.
 	alertTTLP2    = 24 * time.Hour
@@ -128,7 +130,12 @@ func (a *App) RaisePlannerAlert(ctx context.Context, in mcpfactory.RaiseAlertInp
 // raiseSystemAlert is the factory-internal producer path: failures log,
 // never propagate (like notifyOperator).
 func (a *App) raiseSystemAlert(ctx context.Context, priority int, title, body, source string) {
-	if _, err := a.raiseAlert(ctx, mcpfactory.RaiseAlertInput{Priority: priority, Title: title, Body: body}, source); err != nil {
+	a.raiseSystemAlertForTask(ctx, priority, title, body, source, "")
+}
+
+// raiseSystemAlertForTask is raiseSystemAlert linked to taskID ("" = none).
+func (a *App) raiseSystemAlertForTask(ctx context.Context, priority int, title, body, source, taskID string) {
+	if _, err := a.raiseAlert(ctx, mcpfactory.RaiseAlertInput{Priority: priority, Title: title, Body: body, TaskID: taskID}, source); err != nil {
 		log.Printf("factoryapp: raise alert %q: %v", title, err)
 	}
 }

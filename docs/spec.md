@@ -95,7 +95,7 @@ response is the full envelope with server-assigned `id` and `ts` (#1).
 The type set is open: `post_to_factory` and `message_foreman` accept arbitrary
 type strings, and unmatched types route to the brain (#4). An envelope that
 reaches `factory:main` with no handler is never acked silently: the operator
-gets a P2 alert (`notify.unhandled` before the 2026-11-16 inbox redesign; §9.5.2).
+gets a P2 alert (`notify.unhandled` before the 2026-11-16 inbox redesign; §9.5.3).
 
 Inbox destinations for the worker conversation flow (resolution of TODO-2;
 transcribed from #17, #18, with the corrected #11 scope model): a worker's
@@ -526,7 +526,7 @@ factory planner's list view carries summaries only (#7, #19).
   anyone noticed. A periodic check in the factory server (1-minute tick,
   §11) re-runs the Matcher over the pending set; every job past the
   threshold that still matches no online foreman raises one P1 alert
-  (§9.5.2; formerly a `notify.pending` chat row) naming the job id, its requires,
+  (§9.5.3; formerly a `notify.pending` chat row) naming the job id, its requires,
   and why nothing matched (required tags no foreman advertises, or the
   tags living only on offline foremen). A pending job that DOES match an
   online foreman is skipped: the pending picker dispatches it on its next
@@ -569,6 +569,7 @@ factory planner's list view carries summaries only (#7, #19).
 | `GET /v1/inboxes/{id}/recent` | recent envelopes for one inbox, acked included (UI; §4.1) |
 | `POST /v1/chat` | `{text, task_id?}` -> chat.message envelope in the operator inbox, filed under a task (new without `task_id`; 404 for an unknown one); wakes the LLM planner (§9.5, §9.5.2) |
 | `GET /v1/tasks`, `GET /v1/tasks/{id}`, `POST /v1/tasks` | task list, task + thread, and the "new task" alias of chat (§9.5.2) |
+| `GET /v1/alerts`, `POST /v1/alerts/{id}/ack`, `POST /v1/alerts/{id}/reply` | open alerts, ack, and reply-creates-a-task (§9.5.3) |
 | `GET /v1/inboxes/planner:main/stream` | permissive SSE stream of the operator inbox for the chat UI (§9.5) |
 | `GET /` | operator web UI (single page; §4.1) |
 | `POST /v1/pairing-tokens` | planner-credential auth (v1: the planner token doubles as the operator credential); issues a one-time pairing token, `200 {pairing_token, expires_at}` (#23) |
@@ -950,7 +951,7 @@ Kill the entire process group at `timeout_s`; post a JobResult with
   inbox redesign: raised from 2KB for the task tools of §9.5.2 and
   the `task_id` arguments, with headroom for the alert tool; 2026-11-15
   amendments: raised from 1.5KB for the incident-driven `cancel_job` tool,
-  2026-11-16: 2.5KB for the `raise_alert` tool (§9.5.2), and `create_job` must state the requires tag-name forms - §6.7 -
+  2026-11-16: 2.5KB for the `raise_alert` tool (§9.5.3), and `create_job` must state the requires tag-name forms - §6.7 -
   because undocumented semantics let the planner pass capability
   values as requires, parking two jobs pending for ~7h). Names,
   descriptions, and advertised input/output schemas all count toward the
@@ -1251,67 +1252,58 @@ routing (2026-11-16 planner-claude amendment, the §8.4 worker twin):
   stdout when stderr is empty; an unauthenticated claude planner
   therefore names the auth error instead of failing silently.
 
-### 9.5 Conversational surface: the operator inbox
+### 9.5 Conversational surface: tasks, alerts and the operator inbox
 
-The factory planner is conversational: the human operator drives the
-factory through one inbox, `planner:main`, rendered by the web UI (§4.1
-`GET /`).
+The factory planner is conversational. Since the inbox redesign
+(2026-11-16, operator GO 14:30Z) the operator's world is TWO things, rendered
+by the web UI (§4.1 `GET /`), both stored in the factory's `inbox.db`:
 
-Envelope types in `planner:main`:
+- **Tasks** (§9.5.2): every conversation is a task. A message belongs
+  to a task through `messages.thread_id`. The planner is woken per task and
+  sees only that task's thread. Jobs are NOT part of the operator's
+  interface: job traffic is stored in the task thread but hidden by default.
+- **Alerts** (§9.5.3): notifications that are not chat (a pending job, an
+  unhandled envelope, a failed planner, anything a foreman or the planner
+  raises). They have a priority, a TTL, and are acked or replied to.
 
-- `chat.message` (from `human:operator`, payload `{text}`) - the operator's
-  message, via `POST /v1/chat {text}` (unauthenticated like the rest of the
-  UI surface, §7.5).
-- `brain.reply` (from `factory:brain`, payload `{text}`) - the LLM
-  planner's answer, posted by the `notify_operator` tool (§9.4).
-- `foreman.report` (from `foreman:{id}`, payload free-form, typically `{text}`)
-  - a foreman's report to the operator (2026-11-16 amendment). The factory
-  consumer relays it verbatim from `factory:main` into `planner:main` (same
-  type, `from`, `job_id`, and payload; the store assigns id and ts) and wakes the
-  planner. It arrives there with no direct `POST /v1/chat`.
-- `brain.failed` (from `foreman:{id}`, payload `{envelope_id, envelope_type,
-  error}`) - a foreman brain session failed on a delegated envelope (§3.3,
-  2026-11-15 amendment). Relayed and wakes the planner exactly like
-  `foreman.report`, so a failed delegation is never silent.
-- `notify.unhandled` (**legacy**: since the inbox redesign S3 the factory raises a P2 alert instead, §9.5.2; old rows stay readable) - an envelope reached `factory:main` with
-  no handler (2026-11-16 amendment). Payload `{envelope_id, type, from, job_id,
-  note}`. Informational: no planner wake. Without it the envelope would be acked
-  and parked unseen.
-- `notify.job` (from `factory`) - job terminal-state notification (id,
-  state, foreman, last_error, over_budget, summary), posted on every
-  terminal transition (done/failed/timed_out/dead/cancelled/superseded) to
-  bring completions and failures to the operator's attention.
-- `notify.pending` (**legacy**: since S3 a P1 alert, §9.5.2; old rows stay readable) - long-pending job alert (2026-11-15
-  amendment, §6.7): posted when a job has sat `pending` with no matching
-  online foreman for more than 30 minutes. Payload
-  `{job_id, requires, pending_since, pending_minutes, reason, missing_tags,
-  offline_foremen, foremen_online, foremen_total}`; `reason` states why
-  nothing matched - `no foremen are registered`, `no foreman advertises:
-  <tags>`, `only offline foremen have: <tags>` (with the offending foremen
-  and their `last_seen` in `offline_foremen`), `all foremen are offline`,
-  or `no single online foreman has all required tags`, joined with `; `
-  when several apply. Informational for the human: no planner wake.
+`planner:main` remains the planner's wake queue: the one inbox that the
+operator's UI streams and the planner loop drains. Sections of this chapter:
+§9.5.1 storage, §9.5.2 task API, relay stamping and per-task wakes,
+§9.5.3 alerts, §9.5.4 cross-slice glue, §9.5.5 UI, §9.5.6 live acceptance. Where an earlier amendment contradicts
+this chapter, this chapter wins.
+
+Envelope types in `planner:main` (the "internal" flag is derived from the type,
+never stored: only `chat.message` and `brain.reply` are operator-visible,
+`tasks.IsInternal`, §9.5.1):
+
+| Type | From / payload | Internal | Wakes planner | Notes |
+|---|---|---|---|---|
+| `chat.message` | `human:operator`, `{text}` | no | yes | `POST /v1/chat {text, task_id?}` / `POST /v1/tasks {text}`; unauthenticated like the UI surface, §7.5 |
+| `brain.reply` | `factory:brain` or `factory`, `{text}` | no | no | the planner's `notify_operator` (§9.4), the planner-failure note, and the alert seed of §9.5.3 |
+| `foreman.report` | `foreman:{id}`, free-form (typically `{text}`) | yes | yes | relayed verbatim from `factory:main`, stamped with its task (§9.5.2 relay stamping) |
+| `brain.failed` | `foreman:{id}`, `{envelope_id, envelope_type, error}` | yes | yes | a foreman brain session failed on a delegated envelope (§3.3); relayed exactly like `foreman.report`, so a failed delegation is never silent |
+| `notify.job` | `factory`, `{id, state, foreman, last_error, over_budget, summary}` and `job_id` | yes | no | terminal job transition (done/failed/timed_out/dead/cancelled/superseded); stamped with its task when attributable, else unthreaded; hidden by default, no chips (operator DECISION 2) |
+| `task.changed`, `alert.changed` | synthetic, payload = Task / Alert | n/a | no | SSE hints only, NOT persisted (§9.5.2, §9.5.3) |
+| `notify.pending`, `notify.unhandled` | `factory` | yes | no | **legacy**: no longer produced; since the redesign they are P1 and P2 alerts (§9.5.3). Old rows stay readable (backfilled into the legacy task) |
 
 Planner loop (internal/factoryapp, twin of the consumer loop): drains
-`planner:main`; `chat.message`, `foreman.report`, and `brain.failed` wake
-the planner - since the inbox redesign, ONE session per touched task with
-that task's thread as context (§9.5.2, which supersedes the "recent inbox
-history" wording below); historically one planner session (§9.4 surface, planner bearer, model via
-`FACTORY_PLANNER_MODEL`, default per §6.5; the child CLI routes on that model -
-the Claude Code CLI for claude-* ids, opencode otherwise, §9.4) with the recent
-inbox history replayed into the prompt (per-payload 2KB caps, §6.6). The wake
-reason names the trigger: operator chat needs a reply; a foreman report must be
-relayed to the operator and acted on. Everything else is informational and
-acked without a wake. A failed session
-posts a `brain.reply` error note so the operator is never left waiting.
-The child's MCP endpoint is the factory's loopback address, NOT the
-advertised URL (#28): the child runs on the factory's own host, and the
-MCP SDK's streamable-HTTP server rejects non-loopback Host headers
-(DNS-rebinding protection) - the advertised hostname yields "403 invalid
-Host header" and a session silently stripped of every factory tool.
-Acking never deletes: history stays replayable via
-`GET /v1/inboxes/planner:main/recent` and streams to browsers via the
-permissive SSE `GET /v1/inboxes/planner:main/stream`.
+`planner:main`; `chat.message`, `foreman.report` and `brain.failed` wake the
+planner, ONE session per touched task with that task's thread as context
+(§9.5.2). A session is the §9.4 surface with the planner bearer and the model
+from `FACTORY_PLANNER_MODEL` (default per §6.5; the child CLI routes on the
+model: the Claude Code CLI for claude-* ids, opencode otherwise, §9.4).
+Per-payload 2KB caps apply (§6.6). The wake reason names the trigger:
+operator chat needs a reply; a foreman report must be relayed to the operator
+and acted on. Everything else is informational and acked without a wake. A
+failed session is never silent: a `brain.reply` note INTO the task AND a P0
+alert (§9.5.4). The child's MCP endpoint is the factory's loopback address,
+NOT the advertised URL (#28): the child runs on the factory's own host, and
+the MCP SDK's streamable-HTTP server rejects non-loopback Host headers
+(DNS-rebinding protection); the advertised hostname yields "403 invalid Host
+header" and a session silently stripped of every factory tool. Acking never
+deletes: history stays replayable via `GET /v1/inboxes/planner:main/recent`
+and streams to browsers via the permissive SSE
+`GET /v1/inboxes/planner:main/stream`.
 
 #### 9.5.1 Storage: threads, tasks, alerts (inbox redesign S1, 2026-11-16)
 
@@ -1502,6 +1494,57 @@ task_id|null}`; `priority` is an integer, 0 = most urgent.
   `planner:main` stream (contract I5).
 - **MCP sizes.** `raise_alert` pushed the planner surface budget to < 2.5KB
   and the foreman surface to < 2KB (§9.1).
+
+#### 9.5.4 Cross-slice glue (inbox redesign S5, 2026-11-16)
+
+Behaviors that need both the task and the alert machinery, owned by neither:
+
+- **Planner-session failure -> P0 alert.** When a planner session errors,
+  panics, or is refused by the wake limiter, the factory posts the
+  `brain.reply` note INTO the task (§9.5.2) AND raises a P0 alert, source
+  `factory:planner`, title `Planner session failed`, body = the error,
+  `task_id` = the task (when the store knows it). P0 never expires (§9.5.3).
+  A shutdown posts neither.
+- **Unattributed report -> task AND P2 alert.** A `foreman.report` or
+  `brain.failed` that cannot be attributed to a task opens a new task
+  (§9.5.2); the factory also raises a P2 alert, source `factory:relay`, title
+  `Unattributed <type>: <task title>`, linked to that task, so the operator
+  sees it in the alert pane even if no one opens the task. An unattributed
+  `notify.job` stays unthreaded and hidden, with no alert.
+- **Alert reply wakes the planner via `thread_id`.** `POST
+  /v1/alerts/{id}/reply` posts the operator's reply as a `chat.message`
+  carrying the new task's `thread_id`; the per-task wake (§9.5.2) groups on
+  that thread, so the planner session's prompt is the task thread: the alert
+  seed (`brain.reply`) then the reply. No alert-specific wake path exists.
+
+All three are asserted end to end by `test/e2e/inbox_test.go`.
+
+#### 9.5.5 UI (inbox redesign S4, 2026-11-16)
+
+`GET /` is a single page. Tabs: Tasks (formerly Chat), Foremen, Jobs, Inboxes
+(the last three unchanged). The Tasks tab has three panes: LEFT alerts
+(priority badge, ack button, reply box; `GET /v1/alerts`, `POST
+/v1/alerts/{id}/ack|reply`); CENTER a "new task" box (`POST /v1/tasks`), the
+expanded thread of the selected task with a composer (`POST /v1/chat
+{text, task_id}`) and a per-task "show internal" toggle (refetches
+`GET /v1/tasks/{id}?internal=1`); RIGHT the ranked task list with an "only
+active" toggle (default ON, `status=open`) and a search box (`q=`). Job and
+other internal rows are hidden by default and carry no chips (operator
+DECISION 2). Live updates: the `planner:main` SSE stream; any event
+(`message`, `task.changed`, `alert.changed`) debounces a refetch, with a 10s
+poll as fallback. If `/v1/tasks` or `/v1/alerts` 404s (slice not deployed),
+the page degrades to the legacy chat log or an "alerts not available" note.
+
+#### 9.5.6 Live acceptance (inbox redesign S5)
+
+`scripts/inbox-live-acceptance.sh <factory-url>` drives the four steps with
+curl against a running factory: (a) operator chat opens a task; (b) a planner
+reply lands in the task thread; (c) a job-attached foreman.report is filed
+under its task and hidden by default (visible with `?internal=1`); (d) a
+foreman `raise_alert` shows in `GET /v1/alerts` and acks. Steps (c) and (d)
+need credentials (a foreman bearer, the planner bearer) passed by
+environment, as documented in the script header. The e2e suite
+(`test/e2e/inbox_test.go`) is the automated twin.
 
 ## 10. Error model
 
