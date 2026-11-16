@@ -69,6 +69,10 @@ func Handler(cfg Config) (http.Handler, error) {
 		Description: "Read one job's full results and spec.",
 	}, readResultTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "cancel_job",
+		Description: "Terminal-cancel a non-terminal job: cancelled (default) or superseded=true. Returns {job_id, state}; terminal jobs error.",
+	}, cancelJobTool(cfg))
+	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "message_foreman",
 		Description: "Post to a foreman's inbox; foreman_id accepts bare or foreman:-prefixed ids.",
 	}, messageForemanTool(cfg))

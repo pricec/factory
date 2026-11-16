@@ -300,16 +300,37 @@ Anything outside the subset rejects at validation.
 attempts INT 0, next_attempt_at NULL, last_error, usage JSON, results JSON
 array, over_budget INT 0, created_at, updated_at}` (#9).
 
-States: `pending | dispatched | running | done | failed | timed_out | dead`.
-Legal transitions (#9, with retry/dead transitions from #10):
+States: `pending | dispatched | running | done | failed | timed_out | dead |
+cancelled | superseded`.
+Legal transitions (#9, with retry/dead transitions from #10 and the
+cancel/supersede transitions from the 2026-11-15 amendment):
 
 - `pending -> dispatched`
 - `dispatched -> running`
 - `running -> {done, failed, timed_out}`
 - `failed -> dispatched` (retry, #10)
 - `failed -> dead` (#10)
+- `pending -> {cancelled, superseded}` (cancel API, 2026-11-15 amendment)
+- `dispatched -> {cancelled, superseded}` (cancel API, 2026-11-15 amendment)
+- `running -> {cancelled, superseded}` (cancel API, 2026-11-15 amendment)
+- `failed -> {cancelled, superseded}` (cancel API, 2026-11-15 amendment;
+  also clears the armed retry so the picker cannot re-dispatch)
 
 Anything else: log + ignore (never panic) (#9).
+
+Cancel/supersede (2026-11-15 amendment, post-incident: a duplicate pending
+job had to be killed by a direct `jobs.db` write because no API path
+existed - direct production DB writes are never the workaround). `cancelled`
+and `superseded` are TERMINAL states: `Terminal` admits no further
+transitions, and a late `job.result` for a cancelled job is the usual
+terminal-idempotent no-op (§6.4). Every non-terminal job (pending,
+dispatched, running, failed) may cancel; every terminal job rejects the
+cancel with `409 already_terminal` (§6.9, §10). v1 records the factory-side
+state change only: there is no foreman-side kill, so in-flight worker work
+is not force-stopped, and a cancelled running job's late result is ignored
+rather than re-transitioning the job. The cancel reason rides the job's
+`last_error` (`"<to>: <reason>"`), surfacing in the §9.5 `notify.job`
+payload and `GET /v1/jobs/{id}`.
 
 ### 6.2 Job events & sweeper (#9)
 
@@ -463,6 +484,7 @@ factory planner's list view carries summaries only (#7, #19).
 | `POST /v1/jobs` | UI twin of the MCP `create_job` tool (§9.4): body `{task, requires[], result_schema, tier, timeout_s, priority, schedule_cron}`; runs the same spend breaker + capability match (no match -> `pending`); `201 + {job_id, state, foreman}`. `requires` entries are tag names, validated at creation against the union of registered foremen tag keys (§6.7, 2026-11-15 amendment): unknown tag names -> `400 unknown_requires`; a loud `warnings` array rides the 201 when nothing could be validated (no foremen registered) |
 | `POST /v1/foremen/{id}/messages` | UI twin of the MCP `message_foreman` tool (§9.4): body `{type, payload, job_id?}` posted from the planner identity; `201` + envelope. `{id}` accepts the bare foreman id or the full `foreman:{id}` form - both normalize to the same inbox (§7.3), never a double-prefixed one. `payload` is required (any JSON value; `{}` for an empty body); a null/missing payload is `400`. An id matching no registered foreman is `404 unknown_foreman` - posting never opens an inbox no foreman consumes (2026-11-14 amendment) |
 | `GET /v1/jobs/{id}` | (#9) |
+| `POST /v1/jobs/{id}/cancel` | Cancel/supersede a job (2026-11-15 amendment, §6.1): optional body `{reason?, terminal_state?}` with `terminal_state` = `cancelled` (default) \| `superseded`; an empty body is a plain cancel. Every non-terminal state moves to that terminal state; every terminal job is rejected `409 already_terminal`; unknown job `404`; malformed body `400`. `200` + the refreshed job record. UI twin of the MCP `cancel_job` tool (§9.4) |
 | `GET /v1/foremen` | returns `id, online, capabilities` (#9) |
 | `GET /v1/deadletter` | job + `last_error` + results (#10) |
 | `POST /v1/deadletter/{id}/requeue` | resets attempts, state `pending` (#10) |
@@ -746,11 +768,11 @@ Kill the entire process group at `timeout_s`; post a JobResult with
   section (#17, #15).
 - Tool descriptions stay tiny (per-turn token cost for every LLM caller,
   #6); byte budgets asserted by test: worker surface < 1KB total (#17);
-  foreman surface < 1.5KB (#18); factory surface < 1.75KB (2026-11-15
-  amendment: `create_job` must state the requires tag-name forms -
-  §6.7 - because undocumented semantics let the planner pass capability
-  values as requires, parking two jobs pending for ~7h; worth ~170 bytes
-  per planner turn). Names,
+  foreman surface < 1.5KB (#18); factory surface < 2KB (2026-11-15
+  amendments: raised from 1.5KB for the incident-driven `cancel_job` tool,
+  and `create_job` must state the requires tag-name forms - §6.7 -
+  because undocumented semantics let the planner pass capability
+  values as requires, parking two jobs pending for ~7h). Names,
   descriptions, and advertised input/output schemas all count toward the
   budget (2026-11-14 amendment: typed handlers advertise input schemas so
   callers can introspect argument names).
@@ -837,6 +859,13 @@ Tools (exact):
   daily spend breaker is open (#13).
 - `read_result(job_id)` - full result payload; the ONLY path by which full
   payloads enter LLM context (#19; #7 point 3).
+- `cancel_job(job_id, reason?, supersede?)` - terminal-cancels a
+  non-terminal job through the §6.1 state machine (`pending | dispatched |
+  running | failed -> cancelled`, or `-> superseded` with `supersede=true`);
+  returns `{ok, job_id, state}` with the resulting state. A terminal job is
+  a tool error naming the state; an unknown id is a tool error
+  (`unknown job`). The planner's alternative to direct `jobs.db` writes
+  (2026-11-15 amendment).
 - `message_foreman(foreman_id, type, payload)` - envelope to that
   foreman's inbox; `foreman_id` accepts the bare id or the full
   `foreman:{id}` form (normalized - never double-prefixed); `payload`
@@ -872,8 +901,8 @@ Envelope types in `planner:main`:
   planner's answer, posted by the `notify_operator` tool (§9.4).
 - `notify.job` (from `factory`) - job terminal-state notification (id,
   state, foreman, last_error, over_budget, summary), posted on every
-  terminal transition (done/failed/timed_out/dead) to bring completions
-  and failures to the operator's attention.
+  terminal transition (done/failed/timed_out/dead/cancelled/superseded) to
+  bring completions and failures to the operator's attention.
 
 Planner loop (internal/factoryapp, twin of the consumer loop): drains
 `planner:main`; `chat.message` wakes one opencode planner session (§9.4
@@ -908,8 +937,10 @@ Pinned status codes:
 | `401` | unknown/invalid token; revoked token (row deleted) | #11 |
 | `403` | wrong scope (post to foreign inbox; read without `may_read`) | #11 |
 | `409` | duplicate `job.result` for the same `(inbox_id, job_id)`; response carries the original envelope id | #1 |
+| `409` | cancel/supersede of a terminal job (`already_terminal`, `POST /v1/jobs/{id}/cancel`) | 2026-11-15 amendment |
 | `404` | `POST /v1/foremen/{id}/messages` where `{id}` matches no registered foreman (`unknown_foreman`) | 2026-11-14 amendment |
 | `400` | job creation (`POST /v1/jobs`, MCP `create_job`) whose `requires` entries name no registered foreman tag key (`unknown_requires`) | 2026-11-15 amendment |
+| `404` | cancel of an unknown job id (`POST /v1/jobs/{id}/cancel`) | 2026-11-15 amendment |
 
 Pinned error codes: `spend_cap_exceeded` (#13), `unknown_foreman`,
 `unknown_requires`. Validation rejects anything
@@ -936,7 +967,7 @@ outside the `result_schema` subset at validation time (#3).
 | Bearer token | 32B random, stored SHA-256 only | #11 |
 | Long-poll window | `wait_seconds` 0-60 | #1 |
 | Inbox fetch limit | default 50, max 500 | #1 |
-| MCP description budgets | worker < 1KB; foreman < 1.5KB; factory < 1.5KB | #17, #18, #19 |
+| MCP description budgets | worker < 1KB; foreman < 1.5KB; factory < 2KB (2026-11-15 amendment) | #17, #18, #19 |
 | JobSpec defaults | `timeout_s` 300; `priority` 5 (1-9, 9 highest); `budget` `{max_prompt_bytes 32768, max_output_tokens 8192, max_cost_usd 5.0}` | #3 |
 
 ---

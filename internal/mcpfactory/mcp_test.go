@@ -237,12 +237,13 @@ func TestToolsListAndBudget(t *testing.T) {
 	_, out = e.rpc(e.planner, "tools/list", nil)
 	res := resultOf(t, out)
 	tools, ok := res["tools"].([]any)
-	if !ok || len(tools) != 6 {
-		t.Fatalf("tools/list: want 6 tools, got %v", res["tools"])
+	if !ok || len(tools) != 7 {
+		t.Fatalf("tools/list: want 7 tools, got %v", res["tools"])
 	}
 	want := map[string]bool{
 		"list_foremen": false, "list_jobs": false, "create_job": false,
-		"read_result": false, "message_foreman": false, "notify_operator": false,
+		"read_result": false, "cancel_job": false, "message_foreman": false,
+		"notify_operator": false,
 	}
 	var budget int
 	for _, tl := range tools {
@@ -270,11 +271,11 @@ func TestToolsListAndBudget(t *testing.T) {
 			t.Errorf("tools/list missing %q", name)
 		}
 	}
-	// Spec §9.1 budget: factory surface < 1.75KB (2026-11-15 amendment -
-	// create_job documents the requires tag-name forms after capability
-	// values parked two jobs pending ~7h).
-	if budget >= 1792 {
-		t.Errorf("description budget = %d bytes, want < 1792", budget)
+	// Spec §9.1 budget: factory surface < 2KB (2026-11-15 amendments -
+	// raised from 1536 for cancel_job; create_job documents the requires
+	// tag-name forms after capability values parked two jobs pending ~7h).
+	if budget >= 2048 {
+		t.Errorf("description budget = %d bytes, want < 2048", budget)
 	}
 	t.Logf("description budget: %d bytes", budget)
 }
@@ -867,4 +868,74 @@ func TestAuth(t *testing.T) {
 	if status != 200 {
 		t.Errorf("planner bearer status = %d, want 200", status)
 	}
+}
+
+// TestCancelJobTool: the planner's cancel/supersede surface (spec §9.4,
+// 2026-11-15 amendment) - non-terminal jobs transition through the state
+// machine and the tool reports the resulting state; terminal jobs and
+// unknown ids are tool errors.
+func TestCancelJobTool(t *testing.T) {
+	e := newEnv(t, budgets.DefaultConfig())
+	ctx := context.Background()
+
+	seed := func(t *testing.T) string {
+		t.Helper()
+		spec := wire.NewJobSpec("cancel me", "factory")
+		if err := e.store.Create(ctx, spec); err != nil {
+			t.Fatalf("store.Create: %v", err)
+		}
+		return spec.ID
+	}
+
+	t.Run("pending -> cancelled", func(t *testing.T) {
+		id := seed(t)
+		sc := structured(t, resultOf(t, e.callTool("cancel_job", map[string]any{"job_id": id})))
+		if sc["state"] != "cancelled" || sc["ok"] != true || sc["job_id"] != id {
+			t.Fatalf("structured = %v, want {ok, job_id, state: cancelled}", sc)
+		}
+		if job, ok, err := e.store.Get(ctx, id); err != nil || !ok || job.State != jobs.StateCancelled {
+			t.Fatalf("stored state = %+v ok=%v err=%v, want cancelled", job, ok, err)
+		}
+	})
+	t.Run("pending -> superseded", func(t *testing.T) {
+		id := seed(t)
+		sc := structured(t, resultOf(t, e.callTool("cancel_job", map[string]any{
+			"job_id": id, "supersede": true, "reason": "duplicate",
+		})))
+		if sc["state"] != "superseded" {
+			t.Fatalf("state = %v, want superseded", sc["state"])
+		}
+	})
+	t.Run("running -> cancelled", func(t *testing.T) {
+		id := seed(t)
+		if err := e.store.Dispatch(ctx, id, "alpha"); err != nil {
+			t.Fatalf("Dispatch: %v", err)
+		}
+		if err := e.store.ApplyEvent(ctx, id, "started"); err != nil {
+			t.Fatalf("ApplyEvent: %v", err)
+		}
+		sc := structured(t, resultOf(t, e.callTool("cancel_job", map[string]any{"job_id": id})))
+		if sc["state"] != "cancelled" {
+			t.Fatalf("state = %v, want cancelled (running cancel is allowed)", sc["state"])
+		}
+	})
+	t.Run("terminal job rejected", func(t *testing.T) {
+		spec := e.seedFinished(t, "already done", "ok", json.RawMessage(`{}`), 0)
+		msg := toolError(t, "cancel_job", e.callTool("cancel_job", map[string]any{"job_id": spec.ID}))
+		if !strings.Contains(msg, "terminal") || !strings.Contains(msg, "done") {
+			t.Errorf("tool error = %q, want terminal-state mention", msg)
+		}
+	})
+	t.Run("unknown job rejected", func(t *testing.T) {
+		msg := toolError(t, "cancel_job", e.callTool("cancel_job", map[string]any{"job_id": "job_missing"}))
+		if !strings.Contains(msg, "unknown job") {
+			t.Errorf("tool error = %q, want unknown-job mention", msg)
+		}
+	})
+	t.Run("missing job_id rejected", func(t *testing.T) {
+		msg := toolError(t, "cancel_job", e.callTool("cancel_job", map[string]any{}))
+		if !strings.Contains(msg, "job_id") {
+			t.Errorf("tool error = %q, want job_id mention", msg)
+		}
+	})
 }

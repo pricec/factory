@@ -187,6 +187,40 @@ func TestNotifyJobOnTerminal(t *testing.T) {
 	})
 }
 
+// TestNotifyJobOnCancel: a job cancelled through the cancel API posts a
+// notify.job envelope with the resulting state into planner:main (spec
+// §9.5, 2026-11-15 amendment) - the operator sees cancellations like any
+// other terminal transition. No pairing: the job stays pending, which is
+// the incident path the cancel API exists for.
+func TestNotifyJobOnCancel(t *testing.T) {
+	e := newEnv(t)
+
+	created := struct {
+		JobID string `json:"job_id"`
+	}{}
+	if status := e.do("POST", "/v1/jobs", "", map[string]any{"task": "duplicate job"}, &created); status != http.StatusCreated {
+		t.Fatalf("create status = %d", status)
+	}
+	if status := e.do("POST", "/v1/jobs/"+created.JobID+"/cancel", "",
+		map[string]any{"reason": "duplicate", "terminal_state": "superseded"}, nil); status != http.StatusOK {
+		t.Fatalf("cancel status = %d", status)
+	}
+
+	waitFor(t, "notify.job (superseded) in planner:main", 5*time.Second, func() bool {
+		var envs []wire.MessageEnvelope
+		if status := e.do("GET", "/v1/inboxes/planner:main/recent?limit=20", "", nil, &envs); status != http.StatusOK {
+			return false
+		}
+		for _, env := range envs {
+			if env.Type == "notify.job" && strings.Contains(string(env.Payload), created.JobID) &&
+				strings.Contains(string(env.Payload), "superseded") {
+				return true
+			}
+		}
+		return false
+	})
+}
+
 func snippetOf(s string, n int) string {
 	if len(s) > n {
 		return s[:n]

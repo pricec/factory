@@ -47,6 +47,11 @@ type (
 	readResultArgs struct {
 		JobID string `json:"job_id"`
 	}
+	cancelJobArgs struct {
+		JobID     string `json:"job_id"`
+		Reason    string `json:"reason,omitempty"`
+		Supersede bool   `json:"supersede,omitempty"`
+	}
 	messageForemanArgs struct {
 		ForemanID string `json:"foreman_id"`
 		Type      string `json:"type"`
@@ -248,6 +253,36 @@ func readResultTool(cfg Config) mcp.ToolHandlerFor[readResultArgs, any] {
 			"state":   job.State,
 			"results": job.Results,
 			"spec":    job.Spec,
+		}), nil, nil
+	}
+}
+
+// cancelJobTool serves the cancel_job tool (spec §9.4, 2026-11-15
+// amendment): terminal-cancels a non-terminal job through the jobs state
+// machine (pending/dispatched/running/failed -> cancelled, or superseded
+// with supersede=true) - the planner's alternative to direct jobs.db
+// writes. The result surfaces the resulting state; terminal jobs and
+// unknown ids are tool errors.
+func cancelJobTool(cfg Config) mcp.ToolHandlerFor[cancelJobArgs, any] {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, in cancelJobArgs) (*mcp.CallToolResult, any, error) {
+		if in.JobID == "" {
+			return nil, nil, fmt.Errorf("job_id: required")
+		}
+		to := jobs.StateCancelled
+		if in.Supersede {
+			to = jobs.StateSuperseded
+		}
+		job, err := cfg.Store.Cancel(ctx, in.JobID, to, in.Reason)
+		if err != nil {
+			if errors.Is(err, jobs.ErrNoSuchJob) {
+				return nil, nil, fmt.Errorf("unknown job %q (see list_jobs)", in.JobID)
+			}
+			return nil, nil, err
+		}
+		return structuredResult(map[string]any{
+			"ok":     true,
+			"job_id": job.ID,
+			"state":  job.State,
 		}), nil, nil
 	}
 }

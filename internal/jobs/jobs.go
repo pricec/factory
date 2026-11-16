@@ -18,7 +18,9 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// Job states (spec §6.1).
+// Job states (spec §6.1). cancelled and superseded are the cancel API's
+// terminal states (2026-11-15 amendment, spec §6.9): a real state change
+// recorded through the transition machinery, never a direct DB write.
 const (
 	StatePending    = "pending"
 	StateDispatched = "dispatched"
@@ -27,23 +29,30 @@ const (
 	StateFailed     = "failed"
 	StateTimedOut   = "timed_out"
 	StateDead       = "dead"
+	StateCancelled  = "cancelled"
+	StateSuperseded = "superseded"
 )
 
-// legal transitions (spec §6.1, with #10's retry/dead edges).
+// legal transitions (spec §6.1, with #10's retry/dead edges and the
+// cancel/supersede edges from every non-terminal state).
 var legal = map[string]map[string]bool{
-	StatePending:    {StateDispatched: true},
-	StateDispatched: {StateRunning: true},
-	StateRunning:    {StateDone: true, StateFailed: true, StateTimedOut: true},
-	StateFailed:     {StateDispatched: true, StateDead: true},
+	StatePending:    {StateDispatched: true, StateCancelled: true, StateSuperseded: true},
+	StateDispatched: {StateRunning: true, StateCancelled: true, StateSuperseded: true},
+	StateRunning:    {StateDone: true, StateFailed: true, StateTimedOut: true, StateCancelled: true, StateSuperseded: true},
+	StateFailed:     {StateDispatched: true, StateDead: true, StateCancelled: true, StateSuperseded: true},
 }
 
 // Terminal reports whether state admits no further transitions.
 func Terminal(state string) bool {
-	return state == StateDone || state == StateTimedOut || state == StateDead
+	return state == StateDone || state == StateTimedOut || state == StateDead ||
+		state == StateCancelled || state == StateSuperseded
 }
 
 // AllStates is every state, for validation and tests.
-var AllStates = []string{StatePending, StateDispatched, StateRunning, StateDone, StateFailed, StateTimedOut, StateDead}
+var AllStates = []string{
+	StatePending, StateDispatched, StateRunning, StateDone, StateFailed,
+	StateTimedOut, StateDead, StateCancelled, StateSuperseded,
+}
 
 const (
 	// timeoutGrace is the sweeper's grace past a job's timeout_s (spec §6.2).

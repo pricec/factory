@@ -76,7 +76,8 @@
     font-family: var(--mono); font-size: 12px; }
   .bubble.notify .state { font-weight: 700; }
   .bubble.notify .st-done { color: var(--ok); } .bubble.notify .st-failed,
-  .bubble.notify .st-timed_out, .bubble.notify .st-dead { color: var(--bad); }
+  .bubble.notify .st-timed_out, .bubble.notify .st-dead, .bubble.notify .st-cancelled,
+  .bubble.notify .st-superseded { color: var(--bad); }
   /* markdown-rendered bubble bodies (renderMarkdown) */
   .bubble .md { white-space: normal; }
   .bubble .md p { margin: 0 0 8px; } .bubble .md p:last-child { margin: 0; }
@@ -161,6 +162,7 @@
         <option value="">all states</option>
         <option>pending</option><option>dispatched</option><option>running</option>
         <option>done</option><option>failed</option><option>timed_out</option><option>dead</option>
+        <option>cancelled</option><option>superseded</option>
       </select>
       <span style="margin-left:auto" id="refreshed"></span>
     </div>

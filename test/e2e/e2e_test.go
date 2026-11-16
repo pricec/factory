@@ -40,6 +40,7 @@ func TestE2E(t *testing.T) {
 	t.Run("HappyPath", func(t *testing.T) { testHappyPath(t, s) })
 	t.Run("QuestionLoop", func(t *testing.T) { testQuestionLoop(t, s) })
 	t.Run("DeadLetter", func(t *testing.T) { testDeadLetter(t, s) })
+	t.Run("CancelAPI", func(t *testing.T) { testCancelAPI(t, s) })
 	t.Run("SummaryView", func(t *testing.T) { testSummaryView(t, s) })
 }
 
@@ -189,6 +190,86 @@ func testQuestionLoop(t *testing.T, s *stack) {
 	}
 	if elapsed > 10*time.Second {
 		t.Errorf("ask_parent timeout took %v, want ~1s", elapsed)
+	}
+}
+
+// testCancelAPI: the cancel/supersede surface (2026-11-15 amendment, spec
+// §6.9): a scratch pending job cancels over HTTP into the cancelled
+// terminal state, the MCP cancel_job tool reports the same transition, a
+// second cancel is rejected 409, and the terminal notify.job reaches the
+// operator inbox. No foreman-kill exists in v1, so this drives only
+// factory-side state.
+func testCancelAPI(t *testing.T, s *stack) {
+	ctx := s.ctx
+
+	// Scratch pending job: created directly on the store (the
+	// testDeadLetter pattern for jobs whose lifecycle the test controls).
+	spec := wire.NewJobSpec("e2e cancel scratch", "factory")
+	if err := s.factory.Jobs().Create(ctx, spec); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// HTTP cancel: pending -> cancelled (200 + job record).
+	var cancelled jobs.Job
+	if st := s.do("POST", "/v1/jobs/"+spec.ID+"/cancel", "",
+		map[string]any{"reason": "duplicate dispatch", "terminal_state": "superseded"}, &cancelled); st != http.StatusOK {
+		t.Fatalf("POST cancel status = %d, want 200", st)
+	}
+	if cancelled.State != jobs.StateSuperseded {
+		t.Fatalf("cancelled job state = %s, want superseded", cancelled.State)
+	}
+	if !strings.Contains(cancelled.LastError, "duplicate dispatch") {
+		t.Errorf("last_error = %q, want the reason", cancelled.LastError)
+	}
+	var got jobs.Job
+	_ = s.do("GET", "/v1/jobs/"+spec.ID, "", nil, &got)
+	if got.State != jobs.StateSuperseded {
+		t.Fatalf("GET after cancel: state = %s, want superseded", got.State)
+	}
+
+	// Cancelling a terminal job is rejected (409 already_terminal).
+	var conflict map[string]any
+	if st := s.do("POST", "/v1/jobs/"+spec.ID+"/cancel", "", nil, &conflict); st != http.StatusConflict {
+		t.Fatalf("re-cancel status = %d, want 409: %v", st, conflict)
+	}
+
+	// The terminal transition notified the operator (spec §9.5).
+	waitFor(t, "notify.job (superseded) in planner:main", 5*time.Second, func() bool {
+		var envs []wire.MessageEnvelope
+		if status := s.do("GET", "/v1/inboxes/planner:main/recent?limit=50", "", nil, &envs); status != http.StatusOK {
+			return false
+		}
+		for _, env := range envs {
+			if env.Type == "notify.job" && strings.Contains(string(env.Payload), spec.ID) &&
+				strings.Contains(string(env.Payload), "superseded") {
+				return true
+			}
+		}
+		return false
+	})
+
+	// MCP tool: cancel_job on a fresh pending job surfaces the state; the
+	// already-terminal job is a tool error naming the state.
+	fresh := wire.NewJobSpec("e2e cancel scratch 2", "factory")
+	if err := s.factory.Jobs().Create(ctx, fresh); err != nil {
+		t.Fatalf("Create 2: %v", err)
+	}
+	sc := s.callTool(s.factoryMCP(), s.factory.PlannerToken(), "cancel_job",
+		map[string]any{"job_id": fresh.ID})
+	if sc["state"] != jobs.StateCancelled {
+		t.Fatalf("cancel_job state = %v, want cancelled", sc["state"])
+	}
+	_, out := s.rpc(s.factoryMCP(), s.factory.PlannerToken(), "tools/call", map[string]any{
+		"name":      "cancel_job",
+		"arguments": map[string]any{"job_id": fresh.ID},
+	})
+	res, _ := out["result"].(map[string]any)
+	if isErr, _ := res["isError"].(bool); !isErr {
+		t.Fatalf("cancel_job on terminal job: want tool error, got %v", out)
+	}
+	raw, _ := json.Marshal(res)
+	if !strings.Contains(string(raw), "already terminal") || !strings.Contains(string(raw), "cancelled") {
+		t.Errorf("tool error should name the terminal state: %s", raw)
 	}
 }
 
