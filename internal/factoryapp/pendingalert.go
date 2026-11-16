@@ -44,10 +44,6 @@ const (
 	pendingAlertLimit = 1000
 )
 
-// notifyPending is the operator-inbox envelope type for the long-pending
-// alert (spec §9.5); from "factory", like notify.job.
-const notifyPending = "notify.pending"
-
 // pendingAlertLoop ticks the check until ctx is done. Pass errors are
 // logged, never fatal: a transient store hiccup must not kill the loop
 // (the next tick retries).
@@ -105,17 +101,11 @@ func (a *App) PendingAlertPass(ctx context.Context) (int, error) {
 		if !alertable {
 			continue // registry changed mid-pass; re-evaluate next tick
 		}
-		a.notifyOperator(ctx, notifyPending, map[string]any{
-			"job_id":          job.ID,
-			"requires":        job.Spec.Requires,
-			"pending_since":   job.UpdatedAt,
-			"pending_minutes": int(waited.Minutes()),
-			"reason":          diag.reason,
-			"missing_tags":    diag.missing,
-			"offline_foremen": diag.offline,
-			"foremen_online":  diag.online,
-			"foremen_total":   diag.total,
-		})
+		a.raiseSystemAlert(ctx, alertPriorityPending,
+			"Job "+job.ID+" pending "+waited.Truncate(time.Minute).String()+" with no matching foreman",
+			fmt.Sprintf("%s\nrequires: %s\nforemen online %d of %d; pending since %s",
+				diag.reason, strings.Join(job.Spec.Requires, ", "), diag.online, diag.total, job.UpdatedAt),
+			"factory:pending")
 		a.markAlerted(job.ID, job.UpdatedAt)
 		posted++
 		log.Printf("factoryapp: pending alert: job %s pending %s with no match: %s",

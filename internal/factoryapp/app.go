@@ -139,6 +139,7 @@ func New(cfg Config) (*App, error) {
 	}
 	a.jobs.Now = now
 	a.auth.Now = now
+	a.tasks.Now = now
 
 	// Liveness: any authed request or SSE connect bumps last_seen (spec
 	// §6.3); the SSE hub reports connect/disconnect.
@@ -191,6 +192,8 @@ func New(cfg Config) (*App, error) {
 		// Task tools + woken-task defaults (spec §9.5.2).
 		Tasks:       a.tasks,
 		TaskChanged: a.publishTaskChanged,
+		// raise_alert tool (spec §9.5.3).
+		RaiseAlert: a.RaisePlannerAlert,
 	})
 	if err != nil {
 		_ = a.Close()
@@ -261,6 +264,7 @@ func (a *App) Run(ctx context.Context) error {
 	run("consumer", func() error { a.consumeLoop(ctx); return nil })
 	run("planner", func() error { a.plannerLoop(ctx); return nil })
 	run("dispatch notifier", func() error { a.notifyLoop(ctx); return nil })
+	run("alert expiry", func() error { a.alertExpiryLoop(ctx); return nil })
 	run("pending alert", func() error { a.pendingAlertLoop(ctx); return nil })
 	run("task reaper", func() error { a.reaper.Run(ctx, taskReapInterval); return nil })
 	wg.Wait()
@@ -328,6 +332,7 @@ func buildMux(a *App, mcpH http.Handler) http.Handler {
 	mux.Handle("GET /v1/inboxes/planner:main/stream", notify.StreamHandler(a.hub, nil))
 	// Brain drive surface (spec §6.9): UI twins of the MCP create_job and
 	// message_foreman tools (§9.4) - same stores, same matcher, same breaker.
+	a.mountAlertRoutes(mux)
 	mux.HandleFunc("POST /v1/jobs", a.handleCreateJob)
 	mux.HandleFunc("POST /v1/foremen/{id}/messages", a.handleMessageForeman)
 	// Onboarding surfaces (#24): top-level, outside /v1. /install.sh is
