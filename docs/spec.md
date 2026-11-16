@@ -1527,14 +1527,21 @@ Chat and task API (unauthenticated, like the rest of the UI surface,
   task" box).
 - Task JSON: `{id, title, status open|closed, priority int (0 = most
   urgent), created_at, updated_at, closed_at?, close_reason?, job_ids[],
-  last_activity_at, preview}`. `preview` is the newest operator-visible
+  last_activity_at, preview, awaiting, awaiting_since?}`. `preview` is the newest operator-visible
   message (`chat.message`/`brain.reply`) of the thread, whitespace
   collapsed, at most 120 characters, and "" if there is none.
+  `awaiting` is `operator` iff the task is open AND its newest
+  operator-visible message is a `brain.reply` (internal rows never count);
+  otherwise (closed, no visible message, or the operator spoke last) it is
+  `factory`. `awaiting_since` is the ts of that unanswered `brain.reply`
+  (only when `awaiting` is `operator`).
 - `GET /v1/tasks?status=open|closed|all&q=&limit=` -> `{tasks}`. `status`
   defaults to `all`, `limit` defaults to 200 (clamped at 1000), and a bad
   status or limit returns 400. Ranking: open first, then priority ASC,
   then last_activity_at DESC. `q` matches a title substring, an id prefix
-  or a `YYYY-MM-DD` date prefix.
+  or a `YYYY-MM-DD` date prefix. `awaiting=operator|factory` keeps only
+  tasks awaiting that party (a bad value returns 400); the operator list
+  is in triage order: priority ASC (0 first), then oldest `awaiting_since`.
 - `GET /v1/tasks/{id}?internal=1&limit=` -> `{task, messages: [{id, type,
   from, job_id, ts, payload, internal}]}`: the thread oldest first,
   limited to the last `limit` rows (default 500, max 5000). Internal rows

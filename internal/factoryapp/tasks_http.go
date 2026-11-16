@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/pricec/factory/internal/tasks"
 )
@@ -30,7 +31,9 @@ func (a *App) registerTaskRoutes(mux *http.ServeMux) {
 
 // handleListTasks serves GET /v1/tasks?status=open|closed|all&q=&limit=
 // -> {"tasks":[Task]}: open first, then priority ASC, then
-// last_activity_at DESC. status defaults to all; q matches a title
+// last_activity_at DESC. awaiting=operator|factory keeps only tasks awaiting
+// that party (operator results come in triage order: priority ASC, oldest
+// waiting first). status defaults to all; q matches a title
 // substring, an id prefix or a YYYY-MM-DD date prefix.
 func (a *App) handleListTasks(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
@@ -47,16 +50,54 @@ func (a *App) handleListTasks(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	list, err := a.tasks.ListTasks(r.Context(), tasks.TaskFilter{Status: status, Query: q.Get("q"), Limit: limit})
+	awaiting := q.Get("awaiting")
+	switch awaiting {
+	case "", tasks.AwaitingOperator, tasks.AwaitingFactory:
+	default:
+		writeError(w, http.StatusBadRequest, "bad_request", "awaiting: want operator or factory")
+		return
+	}
+	filter := tasks.TaskFilter{Status: status, Query: q.Get("q"), Limit: limit}
+	if awaiting != "" {
+		filter.Limit = 0 // filter first, then cap
+	}
+	list, err := a.tasks.ListTasks(r.Context(), filter)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
 	out := make([]taskView, 0, len(list))
 	for _, t := range list {
-		out = append(out, a.taskView(r.Context(), t))
+		v := a.taskView(r.Context(), t)
+		if awaiting == "" || v.Awaiting == awaiting {
+			out = append(out, v)
+		}
+	}
+	if awaiting == tasks.AwaitingOperator {
+		out = orderWaitingViews(out)
+	}
+	if len(out) > limit {
+		out = out[:limit]
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"tasks": out})
+}
+
+// orderWaitingViews sorts awaiting-operator views into triage order
+// (tasks.OrderWaiting): priority ASC, oldest waiting first.
+func orderWaitingViews(views []taskView) []taskView {
+	items := make([]tasks.WaitingItem, len(views))
+	byID := make(map[string]taskView, len(views))
+	for i, v := range views {
+		since, _ := time.Parse(time.RFC3339Nano, v.AwaitingSince)
+		items[i] = tasks.WaitingItem{ID: v.ID, Priority: v.Priority, Since: since}
+		byID[v.ID] = v
+	}
+	tasks.OrderWaiting(items)
+	out := make([]taskView, len(items))
+	for i, it := range items {
+		out[i] = byID[it.ID]
+	}
+	return out
 }
 
 // taskMessage is one thread row of GET /v1/tasks/{id} (I3).
