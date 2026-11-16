@@ -14,10 +14,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
 	"github.com/pricec/factory/internal/auth"
+	"github.com/pricec/factory/internal/buildinfo"
 	"github.com/pricec/factory/internal/inbox"
 	"github.com/pricec/factory/internal/mcpforeman"
 	"github.com/pricec/factory/internal/mcpworker"
@@ -65,6 +67,9 @@ type Config struct {
 	WorkerHardestModel string
 	// Now is the clock; nil -> real UTC time.
 	Now func() time.Time
+	// Build is the build id reported in the caps push and compared against
+	// update adverts (spec §12); "" -> buildinfo.Current().
+	Build string
 }
 
 // App is the wired foreman agent host.
@@ -123,6 +128,18 @@ type App struct {
 	// URLs; the default derives them from cfg (see defaultHarnessConfig).
 	BuildHarnessConfig func(spec wire.JobSpec, bearer string) workerharness.Config
 
+	// Auto-update (spec §12): build is the running build id; updater is
+	// the self-updater fed by the caps push; gate is the drain gate on
+	// dispatch intake and the live-work count; exitCh carries the exit code
+	// the updater asks for (cmd/foreman exits with it); listenAddr is the
+	// bound listener the confirm self-check dials.
+	build      string
+	updater    *Updater
+	gate       *intakeGate
+	exitCh     chan int
+	listenMu   sync.Mutex
+	listenAddr string
+
 	handler http.Handler
 }
 
@@ -167,6 +184,12 @@ func New(cfg Config) (*App, error) {
 		now:         now,
 		childParent: map[string]string{},
 		childrenOf:  map[string]map[string]bool{},
+		build:       cfg.Build,
+		gate:        &intakeGate{},
+		exitCh:      make(chan int, 1),
+	}
+	if a.build == "" {
+		a.build = buildinfo.Current()
 	}
 	if a.advertise == "" {
 		a.advertise = defaultAdvertiseURL(cfg.Addr)
@@ -293,6 +316,21 @@ func New(cfg Config) (*App, error) {
 		Token:   a.paired.Bearer,
 		Handler: a.handleRemoteBatch,
 	}
+
+	// Self-updater (spec §12): fed by the caps push, drains via the gate.
+	a.updater = &Updater{
+		DataDir:    cfg.DataDir,
+		Running:    a.build,
+		Platform:   runtime.GOOS + "-" + runtime.GOARCH,
+		FactoryURL: cfg.FactoryURL,
+		Bearer:     a.paired.Bearer,
+		Now:        now,
+		Exit:       a.requestExit,
+		Busy:       a.gate.busy,
+		Pause:      a.gate.pause,
+		Resume:     a.resumeIntake,
+		SelfCheck:  a.selfCheck,
+	}
 	return a, nil
 }
 
@@ -335,11 +373,18 @@ func (a *App) BrainInboxID() string { return a.brainInboxID }
 // done. v1 fails fast: a definitive remote-loop error is logged and the
 // loop ends.
 func (a *App) Run(ctx context.Context) error {
+	// Auto-update boot step (spec §12.5): a leftover marker is confirmed
+	// (after the first successful caps push), discarded, or blocklisted.
+	a.updater.Boot()
 	if err := a.pushCapabilities(ctx); err != nil {
 		log.Printf("foremanapp: initial capabilities push: %v", err)
 	}
 	var wg sync.WaitGroup
-	wg.Add(5)
+	wg.Add(6)
+	go func() {
+		defer wg.Done()
+		a.updater.Run(ctx)
+	}()
 	go func() {
 		defer wg.Done()
 		if err := a.client.Run(ctx); err != nil && ctx.Err() == nil {
@@ -401,6 +446,24 @@ func (a *App) handleRemoteBatch(ctx context.Context, envs []wire.MessageEnvelope
 func (a *App) handleBatch(ctx context.Context, envs []wire.MessageEnvelope, ack func(context.Context, []string) error) error {
 	var ids []string
 	for _, env := range envs {
+		// Auto-update drain (spec §12.4): while intake is paused a NEW
+		// dispatch stays unacked in its inbox (redelivered on resume or
+		// after the restart); admitted ones count as live work until
+		// their spawn has registered the worker.
+		if env.Type == "job.request" {
+			if !a.gate.beginDispatch() {
+				log.Printf("foremanapp: job.request %s deferred: draining for auto-update (not acked; redelivered)", env.ID)
+				continue
+			}
+			err := a.router.Handle(ctx, env)
+			a.gate.endDispatch()
+			if err != nil {
+				log.Printf("foremanapp: route %s %s: %v (not acked; redelivered)", env.Type, env.ID, err)
+				continue
+			}
+			ids = append(ids, env.ID)
+			continue
+		}
 		if routing.DelegatesToBrain(env.Type) {
 			if err := a.enqueueBrain(ctx, env); err != nil {
 				log.Printf("foremanapp: brain queue %s %s: %v (not acked; redelivered)", env.Type, env.ID, err)
@@ -578,10 +641,20 @@ func (a *App) brainQueueLoop(ctx context.Context) {
 			continue
 		}
 		env := envs[0]
+		// Auto-update drain (spec §12.4): no new brain session starts
+		// while intake is paused; the copy stays queued.
+		if !a.gate.beginBrain() {
+			if !sleepCtx(ctx, time.Second) {
+				return
+			}
+			continue
+		}
 		// The full rule table applies, but handleBatch only ever
 		// enqueues brain-delegated types, so this always lands on the
 		// brain action (job.question keeps its 60s SLA there).
-		if err := a.router.Handle(ctx, env); err != nil {
+		err = a.router.Handle(ctx, env)
+		a.gate.endBrain()
+		if err != nil {
 			// Unreachable for brain-delegated types (the router logs
 			// brain errors and returns nil); kept at-least-once:
 			// leave unacked and retry rather than drop.
@@ -629,6 +702,11 @@ func (a *App) localLoop(ctx context.Context) {
 		}
 		if err := a.handleBatch(ctx, envs, a.ackLocal); err != nil {
 			log.Printf("foremanapp: local consumer: %v", err)
+		}
+		// A deferred (draining) envelope stays unacked and Get returns it
+		// at once: back off instead of spinning.
+		if a.gate.isPaused() && !sleepCtx(ctx, time.Second) {
+			return
 		}
 	}
 }
@@ -690,11 +768,27 @@ func (a *App) capsLoop(ctx context.Context) {
 	}
 }
 
-// pushCapabilities POSTs the detected capability tags to the factory
-// (spec §6.7): POST /v1/foreman/capabilities with the paired bearer.
+// pushCapabilities POSTs the detected capability tags plus the running
+// build id (spec §6.7, §12.2) to the factory: POST
+// /v1/foreman/capabilities with the paired bearer. A 200 body carries the
+// factory's foreman_update advert (spec §12.3), handed to the updater; 204
+// means nothing is advertised. A successful push is also the post-update
+// confirm trigger (spec §12.5).
 func (a *App) pushCapabilities(ctx context.Context) error {
-	return postJSON(ctx, a.factoryURL+"/v1/foreman/capabilities", a.paired.Bearer,
-		map[string]any{"capabilities": detectCapabilities()})
+	caps := detectCapabilities()
+	caps["build"] = a.build
+	status, body, err := postJSONResponse(ctx, a.factoryURL+"/v1/foreman/capabilities", a.paired.Bearer,
+		map[string]any{"capabilities": caps})
+	if err != nil {
+		return err
+	}
+	adv, err := parseCapsResponse(status, body)
+	if err != nil {
+		log.Printf("foremanapp: auto-update: %v (ignored)", err)
+	}
+	a.updater.Observe(adv)
+	a.updater.Confirm(ctx)
+	return nil
 }
 
 // ackLocal acks ids in the local inbox service.

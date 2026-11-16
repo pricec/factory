@@ -1340,6 +1340,158 @@ outside the `result_schema` subset at validation time (#3).
 | JobSpec defaults | `timeout_s` 300; `priority` 5 (1-9, 9 highest); `budget` `{max_prompt_bytes 32768, max_output_tokens 8192, max_cost_usd 5.0}` | #3 |
 | Long-pending alert | `pending` with no matching online foreman for > 30 min -> one `notify.pending` in `planner:main` (dedupe per job per pending episode); check tick 1 min | 2026-11-15 amendment |
 
+## 12. Foreman auto-update (v1) (2026-11-16 amendment)
+
+Operator-approved plan 2026-11-15, GO 2026-11-16; shared contract
+C1-C8 (`investigations/auto-update-contract.md`). Scope: foremen only,
+all-at-once rollout, SHA-256 integrity only (no signatures), detection via
+the capabilities response. This section pins the FOREMAN side (C1, C4-C7);
+the factory advert (C3), the release manifest (C2) and the install-time
+crash-loop guard (C8) are summarized where the foreman depends on them.
+
+### 12.1 Build id (C1)
+
+- Package `internal/buildinfo`: `var ID` is stamped at link time
+  (`-ldflags "-X github.com/pricec/factory/internal/buildinfo.ID=$(BUILD_ID)"`).
+  Format `<UTC commit time YYYYMMDDTHHMMSSZ>-<12-char lowercase git sha>`,
+  e.g. `20261116T141100Z-38a6368abcde`.
+- `Current()`: `ID` if stamped; else the embedded `vcs.time` +
+  `vcs.revision` in the same format; else `"dev"`.
+- `Newer(candidate, running)`: true only when both ids parse and the
+  candidate's timestamp is strictly later. Ties (even with a different
+  sha), `"dev"` and unparseable ids are false - never downgrade, never loop.
+- The foreman logs `foreman build <id>` as its first startup line.
+
+### 12.2 Build report (C4)
+
+The 60s capabilities push (§6.7) carries `capabilities["build"] =
+buildinfo.Current()`. The pairing payload is unchanged.
+
+### 12.3 Advert (C3, factory side; foreman consumption)
+
+`POST /v1/foreman/capabilities` answers 200 `application/json`
+`{"foreman_update":{"build":"<id>","platforms":{"linux-amd64":{"sha256":"<hex>","path":"/download/foreman/foreman-linux-amd64"},...}}}`
+when the factory holds a verified manifest, else 204 as before. The
+foreman: 204 (or any 2xx without a body / without `foreman_update`) = no
+advert; a malformed 200 body is logged and treated as no advert (the push
+still succeeds); a failed push keeps the last advert. `path` is resolved
+against the factory URL (an absolute `http(s)://` URL is used as is; a
+relative path not starting with `/` is a download failure). The paired
+bearer is sent on the download (the endpoint is unauthenticated today).
+
+### 12.4 Drain and update (C5, C6)
+
+Layout (C5), all in `<data>/bin`: `foreman` (live; systemd `ExecStart`),
+`foreman.prev` (previous build), `foreman.new` (staging),
+`update-pending.json` (marker `{"from","to","started_at" RFC3339,
+"attempts", "rolled_back"?}`), `update-boots` (guard counter, C8),
+`update-blocklist` (one build id per line).
+
+Each caps push hands the advert to the updater, which acts only when ALL
+hold: the advert's build is `Newer` than the running build; it is not
+blocklisted (§12.5); the advert lists this foreman's `<GOOS>-<GOARCH>` with
+a sha256 and path; the running executable (symlinks resolved) IS
+`<data>/bin/foreman` and that directory is writable (probe file). A layout
+failure logs ONE loud `AUTO-UPDATE DISABLED: binary not in writable layout`
+line per advertised build and does nothing else (un-migrated hosts keep
+working). No update is attempted while the running build is itself
+unconfirmed (§12.5).
+
+Drain (C6). Live work = spawned workers (from spawn until the harness
+returns), the running brain session, and `job.request` dispatches between
+their intake check and their spawn. The updater pauses intake FIRST and
+then samples live work (pause and admission share one lock, so an idle
+sample stays idle through the swap):
+
+- Idle: update now (below).
+- Busy: drain. While paused, a NEW `job.request` (factory or local inbox)
+  is not routed and not acked (redelivered on resume or after the
+  restart), and no new brain session starts (brain-delegated envelopes
+  still enter the durable brain queue, §3.3, and wait there). All other
+  traffic (results, events, forwards) flows normally. Live workers and
+  brain sessions are never interrupted or killed; workers they spawn
+  (`spawn_worker`, `spawn_child`) are admitted and counted. The drain is
+  re-checked every 5s; the moment it is idle, the update runs.
+- Ceiling: still busy 10 min after the drain began -> intake resumes (the
+  foreman re-snapshots its factory inbox at once so deferred dispatches
+  are delivered without waiting for new traffic), and that build is NOT
+  drained for again: only a later 60s tick that finds the foreman idle
+  updates. A newer advertised build starts its own drain. A withdrawn
+  advert (204, older build, blocklisted) ends any drain.
+
+Update (all-or-nothing; any failure before the final rename leaves
+`foreman`, `foreman.prev` and the marker exactly as before, removes the
+staging/temp files, resumes intake, logs `AUTO-UPDATE FAILED`, and retries
+at the next caps push):
+
+1. Download into `foreman.new` (status must be 200; byte count must equal
+   Content-Length; <= 512 MiB; 5 min timeout), fsync, verify sha256 (hex,
+   case-insensitive), chmod 0755.
+2. Copy `foreman` to `foreman.prev.tmp` (fsync, 0755), rename to
+   `foreman.prev`.
+3. Delete a stale `update-boots`; write the marker
+   (`from`=running, `to`=advertised, `attempts`= this process's attempt
+   count for that build) via temp file + fsync + rename.
+4. `rename(2)` `foreman.new` over `foreman`; fsync the directory.
+5. Exit 0 (intake stays paused until exit): `cmd/foreman` shuts its
+   listener and stores down gracefully and exits with the code the updater
+   requested; systemd `Restart=always` starts the new binary.
+
+### 12.5 Confirm, rollback, blocklist (C7)
+
+On startup (before the first caps push) the foreman reads the marker:
+
+- Absent: nothing to do.
+- `to` == own build: the swap is unconfirmed. After each successful caps
+  push the self-checks run - inbox store and auth store answer a query,
+  and the bound listener accepts a TCP connection. Pass -> delete the
+  marker AND `update-boots`, log `build <id> confirmed`. Fail -> retry at
+  the next push.
+- Not confirmed within 3 min of startup: copy `foreman.prev` over
+  `foreman` (temp + rename, 0755), set `rolled_back: true` in the marker,
+  exit 1 (systemd restarts the previous build). A copy/rename failure is
+  logged and retried on the next 5s poll. If `foreman.prev` is missing or
+  the binary is not in the layout, rollback is impossible: log loudly,
+  delete marker + `update-boots`, keep running the new build.
+- `to` != own build and `rolled_back` is true (we are the previous build
+  after a rollback by the foreman or by the C8 guard): log
+  `AUTO-UPDATE ROLLED BACK`, delete marker + `update-boots`, and append
+  `to` to `update-blocklist`. A build is refused while it is not strictly
+  `Newer` than some blocklisted (parseable) build, or equals a blocklist
+  entry: only a newer build re-enables updating. The blocklist persists
+  across restarts; a write failure still refuses the build in-process.
+- `to` != own build without `rolled_back`: the previous process stopped
+  between writing the marker and the swap rename (or an operator
+  installed another build by hand). Log `AUTO-UPDATE INTERRUPTED`, delete
+  marker + `update-boots`; the build stays eligible.
+- Unreadable/corrupt marker: logged; a corrupt one is deleted.
+
+C8 (install.sh, root-owned guard, `ExecStartPre=+`): counts unconfirmed
+starts in `update-boots` and at the third restores `foreman.prev` and sets
+`rolled_back: true` - which the restored foreman then handles as above.
+
+### 12.6 Local-state compatibility policy
+
+A new foreman build MUST open the existing `inbox.db`, `auth.db` and
+`paired.json` written by any earlier build: schema changes are additive
+and migrate in place on open; nothing is renamed, re-keyed, or requires
+re-pairing. A build that cannot honor this is not eligible for
+auto-update (it would fail its confirm self-checks and roll back, and the
+rolled-back previous build must still open the state the new one touched -
+so a new build must never rewrite state into a form the previous build
+cannot read).
+
+### 12.7 Constants
+
+| Constant | Value |
+|---|---|
+| Update check | every caps push (60s, §6.7) |
+| Drain re-check / confirm-deadline poll | 5s |
+| Drain ceiling | 10 min |
+| Confirm timeout | 3 min from startup |
+| Max download / download timeout | 512 MiB / 5 min |
+| Exit codes | 0 after a swap; 1 after a rollback |
+
 ---
 
 Future tickets: reference this document; do not re-pin contracts (#16).

@@ -80,6 +80,9 @@ func (a *App) SpawnWorker(ctx context.Context, spec wire.JobSpec) error {
 			log.Printf("foremanapp: job.event %s for %s: %v", event, spec.ID, err)
 		}
 	}
+	// Live-work count for the auto-update drain (spec §12.4): registered
+	// before the goroutine starts, released when the harness returns.
+	a.gate.workerStarted()
 	go a.runWorker(spec, hcfg)
 	return nil
 }
@@ -98,6 +101,7 @@ func (a *App) SpawnWorker(ctx context.Context, spec wire.JobSpec) error {
 // itself delivered is ignored as a duplicate. No report is synthesized when
 // the foreman itself is stopping (a.workerCtx done): the App is going away.
 func (a *App) runWorker(spec wire.JobSpec, hcfg workerharness.Config) {
+	defer a.gate.workerDone()
 	if err := workerharness.Run(a.workerCtx, hcfg); err != nil {
 		if a.workerCtx.Err() != nil {
 			log.Printf("foremanapp: worker %s: %v (foreman stopping)", spec.ID, err)

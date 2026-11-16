@@ -126,7 +126,9 @@ func TestSpawnFailureSurfacesAsFailedJob(t *testing.T) {
 	var job jobs.Job
 	waitFor(t, "job failed at the factory", 10*time.Second, func() bool {
 		_ = fac.do("GET", "/v1/jobs/"+spec.ID, "", nil, &job)
-		return job.State == jobs.StateFailed
+		// jobs.ApplyResult sets the state and last_error in two
+		// statements: wait for both, or a poll in between flakes.
+		return job.State == jobs.StateFailed && job.LastError != ""
 	})
 	if job.State != jobs.StateFailed {
 		t.Fatalf("job state = %s, want failed", job.State)
@@ -248,7 +250,9 @@ func TestSpawnFailureVisibleInFactoryRegistry(t *testing.T) {
 	var job jobs.Job
 	waitFor(t, "locally-spawned job failed at the factory", 15*time.Second, func() bool {
 		_ = fac.do("GET", "/v1/jobs/"+spec.ID, "", nil, &job)
-		return job.State == jobs.StateFailed
+		// jobs.ApplyResult sets the state and last_error in two
+		// statements: wait for both, or a poll in between flakes.
+		return job.State == jobs.StateFailed && job.LastError != ""
 	})
 	if job.State != jobs.StateFailed {
 		t.Fatalf("job state = %s, want failed", job.State)
