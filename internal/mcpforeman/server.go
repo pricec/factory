@@ -61,7 +61,7 @@ func Handler(cfg Config) (http.Handler, error) {
 	}, inboxAckTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "post_to_factory",
-		Description: "Post an envelope to the factory inbox. Report to the operator with type foreman.report + payload (the factory relays it to the operator and wakes the planner). Omit to, or to=factory:main; any other to is refused.",
+		Description: "Post an envelope to the factory inbox. Report to the operator with type foreman.report + payload (the factory relays it to the operator and wakes the planner). task_id threads the report into that existing open task. Omit to, or to=factory:main; any other to is refused.",
 	}, postToFactoryTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "spawn_worker",

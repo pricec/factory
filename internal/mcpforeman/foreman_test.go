@@ -648,3 +648,40 @@ func TestPostToFactoryStringifiedObjectPayload(t *testing.T) {
 		t.Fatalf("string payload = %s, want a JSON string", got.Payload)
 	}
 }
+
+// TestPostToFactoryTaskIDArg: the optional task_id argument sets
+// payload.task_id for every payload shape (spec §9.5.2 threading).
+func TestPostToFactoryTaskIDArg(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	for name, tc := range map[string]struct {
+		payload any
+		want    map[string]any
+	}{
+		"object":          {map[string]any{"text": "hi"}, map[string]any{"text": "hi", "task_id": "task_x"}},
+		"stringified":     {`{"text": "hi"}`, map[string]any{"text": "hi", "task_id": "task_x"}},
+		"plain string":    {"hi", map[string]any{"text": "hi", "task_id": "task_x"}},
+		"overrides inner": {map[string]any{"text": "hi", "task_id": "task_old"}, map[string]any{"text": "hi", "task_id": "task_x"}},
+	} {
+		sc := structured(t, resultOf(t, e.callTool("post_to_factory", map[string]any{
+			"type": "foreman.report", "payload": tc.payload, "task_id": "task_x",
+		})))
+		if sc["ok"] != true {
+			t.Fatalf("%s: %v", name, sc)
+		}
+		envs, err := e.svc.Get(ctx, parentInbox, 1, 0)
+		if err != nil || len(envs) != 1 {
+			t.Fatalf("%s: Get: %v (%d)", name, err, len(envs))
+		}
+		_ = e.svc.Ack(ctx, parentInbox, []string{envs[0].ID})
+		var got map[string]any
+		if err := json.Unmarshal(envs[0].Payload, &got); err != nil || len(got) != len(tc.want) {
+			t.Fatalf("%s: payload = %s (%v)", name, envs[0].Payload, err)
+		}
+		for k, v := range tc.want {
+			if got[k] != v {
+				t.Errorf("%s: payload[%s] = %v, want %v", name, k, got[k], v)
+			}
+		}
+	}
+}
