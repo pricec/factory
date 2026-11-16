@@ -65,6 +65,29 @@
   main.wide { max-width: none; }
   #inbox3 { display: grid; grid-template-columns: 280px minmax(0, 1fr) 300px; gap: 14px;
     height: calc(100vh - 110px); }
+  #inbox3.tp-collapsed { grid-template-columns: 280px minmax(0, 1fr) 44px; }
+  #inbox3.tp-collapsed #taskpane > :not(.tp-head):not(#rail-badge) { display: none; }
+  #inbox3.tp-collapsed #taskpane { padding: 10px 4px; align-items: center; }
+  #inbox3.tp-collapsed .tp-head { flex-direction: column; }
+  #inbox3.tp-collapsed .tp-head h2 { writing-mode: vertical-rl; margin: 8px 0 0; }
+  .tp-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+  .tp-head h2 { margin: 0 0 8px; }
+  .iconbtn { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 5px;
+    padding: 1px 8px; cursor: pointer; font: 12px var(--mono); min-width: 26px; }
+  .iconbtn:hover { border-color: var(--accent); }
+  .iconbtn:disabled { opacity: .4; cursor: default; }
+  #rail-badge { display: none; }
+  #inbox3.tp-collapsed #rail-badge { display: block; writing-mode: vertical-rl; margin-top: 10px; color: var(--warn); font: 700 11px var(--mono); }
+  #focusbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 4px 8px; font-size: 12px; }
+  #focusbar .waiting { font: 700 12px var(--mono); color: var(--warn); }
+  #focusbar .spacer { flex: 1; }
+  #modetoggle.on { border-color: var(--accent); color: var(--accent); }
+  #kbhelp { color: var(--dim); font: 11px var(--mono); padding: 4px; }
+  kbd { background: var(--bg); border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px;
+    padding: 0 5px; font: 11px var(--mono); color: var(--text); }
+  .task .needs { color: var(--warn); font: 700 10px var(--mono); margin-left: 6px; }
+  #focus-empty { text-align: center; padding: 60px 16px; }
+  #focus-empty .big { font-size: 20px; color: var(--ok); margin-bottom: 6px; font-style: normal; }
   @media (max-width: 900px) { #inbox3 { grid-template-columns: 1fr; height: auto; } #chat { height: 60vh; } }
   .pane { display: flex; flex-direction: column; min-height: 0; background: var(--panel);
     border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
@@ -175,6 +198,22 @@
           <textarea id="newtask-input" placeholder="new task — tell the factory what you need…" rows="1"></textarea>
           <button type="submit" id="newtask-send">new task</button>
         </form>
+        <div id="focusbar">
+          <button type="button" id="modetoggle" class="iconbtn" title="toggle focus / list view (l)"></button>
+          <span class="waiting" id="waiting-count"></span>
+          <span class="spacer"></span>
+          <span id="focus-controls">
+            <button type="button" id="focus-prev" class="iconbtn" title="previous (k)">&larr; prev</button>
+            <button type="button" id="focus-skip" class="iconbtn" title="skip: send to the back of the queue (s)">skip</button>
+            <button type="button" id="focus-next" class="iconbtn" title="next (j)">next &rarr;</button>
+          </span>
+          <button type="button" id="kb-toggle" class="iconbtn" title="keyboard shortcuts (?)">?</button>
+        </div>
+        <div id="kbhelp" style="display:none">
+          <kbd>j</kbd>/<kbd>&rarr;</kbd> next · <kbd>k</kbd>/<kbd>&larr;</kbd> previous · <kbd>s</kbd> skip (to back of queue) ·
+          <kbd>r</kbd> or <kbd>/</kbd> focus reply · <kbd>Enter</kbd> send &amp; advance · <kbd>Esc</kbd> leave the reply box ·
+          <kbd>l</kbd> focus/list view · <kbd>n</kbd> toggle needs-input filter · <kbd>[</kbd> collapse/expand tasks panel · <kbd>?</kbd> this help
+        </div>
         <div id="threadhead" style="display:none">
           <span id="thread-title"></span>
           <label class="toggle"><input type="checkbox" id="show-internal"> show internal</label>
@@ -189,10 +228,15 @@
         </div>
       </section>
       <section id="taskpane" class="pane">
-        <h2>tasks</h2>
+        <div class="tp-head">
+          <h2>tasks</h2>
+          <button type="button" id="tp-toggle" class="iconbtn" title="collapse / expand the tasks panel ([)" aria-expanded="true">&#9656;</button>
+        </div>
+        <span id="rail-badge"></span>
         <div class="tasktools">
           <input id="task-search" type="search" placeholder="search title, id or date (YYYY-MM-DD)">
           <label class="toggle"><input type="checkbox" id="only-active" checked> only active</label>
+          <label class="toggle"><input type="checkbox" id="needs-input"> needs input</label>
         </div>
         <div id="tasklist"></div>
       </section>
@@ -282,6 +326,10 @@ function table(headers, rows) {
 const st = {
   tasks: [], alerts: [], selected: null, thread: null, // thread = {task, messages}
   onlyActive: true, q: "", showInternal: false,
+  needsInput: false,
+  mode: "focus",          // "focus" (default on every load) | "list"
+  queue: [], focusId: null, // triage queue: ids awaiting the operator, on-screen order
+  panelCollapsed: false,
   tasksAvailable: true,   // false once /v1/tasks 404s -> legacy single-log view
   alertsAvailable: true,  // false once /v1/alerts 404s
 };
@@ -460,11 +508,82 @@ async function replyAlert(form) {
   }
 }
 
+/* ----- triage queue helpers (mirror internal/tasks/awaiting.go; ordering itself is server-side) ----- */
+
+// mergeQueue keeps the on-screen queue stable: ids still waiting keep their
+// place, answered ones drop out, newly waiting ones join at the end.
+function mergeQueue(prev, fresh) {
+  const waiting = new Set(fresh), seen = new Set(), out = [];
+  for (const id of prev) if (waiting.has(id) && !seen.has(id)) { out.push(id); seen.add(id); }
+  for (const id of fresh) if (!seen.has(id)) { out.push(id); seen.add(id); }
+  return out;
+}
+// advance returns the id after current (wrapping), "" when nothing else waits;
+// when current is not in the queue (answered and dropped) it is the head.
+function advance(queue, current) {
+  const i = queue.indexOf(current);
+  if (i < 0) return queue.length ? queue[0] : "";
+  for (let k = 1; k < queue.length; k++) { const id = queue[(i + k) % queue.length]; if (id !== current) return id; }
+  return "";
+}
+window.__queue = { mergeQueue, advance };
+
+async function loadQueue() {
+  if (!st.tasksAvailable) return;
+  try {
+    const fresh = ((await getJ("/v1/tasks?status=open&awaiting=operator&limit=500")).tasks || []).map(t => t.id);
+    st.queue = mergeQueue(st.queue, fresh);
+  } catch (e) { if (api404(e)) st.tasksAvailable = false; return; }
+  if (st.mode === "focus" && !st.queue.includes(st.focusId)) {
+    // the focused task was answered elsewhere / closed: move to the head.
+    st.focusId = st.queue.length ? st.queue[0] : null;
+    st.selected = st.focusId; st.thread = null;
+  }
+  renderFocusBar();
+}
+
+function setFocus(id) {
+  st.focusId = id || null; st.selected = st.focusId; st.thread = null;
+  renderFocusBar(); renderTasks();
+  return loadThread();
+}
+function focusStep(delta) {
+  if (!st.queue.length) return;
+  const i = st.queue.indexOf(st.focusId);
+  return setFocus(st.queue[((i < 0 ? 0 : i + delta) % st.queue.length + st.queue.length) % st.queue.length]);
+}
+function focusSkip() {
+  if (st.queue.length < 2) return;
+  const cur = st.focusId, nxt = advance(st.queue, cur);
+  st.queue = st.queue.filter(id => id !== cur).concat([cur]);
+  return setFocus(nxt);
+}
+
+function setMode(m) {
+  st.mode = m;
+  if (m === "focus") { st.focusId = null; st.selected = null; st.thread = null; }
+  renderFocusBar();
+  return loadChat();
+}
+
+function renderFocusBar() {
+  const n = st.queue.length, focus = st.mode === "focus";
+  $("waiting-count").textContent = n + " waiting";
+  $("rail-badge").textContent = n ? n + " waiting" : "";
+  $("modetoggle").textContent = focus ? "◉ focus mode · switch to list" : "☰ list view · switch to focus";
+  $("modetoggle").classList.toggle("on", focus);
+  $("focus-controls").style.display = focus ? "" : "none";
+  $("focus-prev").disabled = $("focus-next").disabled = n < 2;
+  $("focus-skip").disabled = n < 2;
+  $("kbhelp").style.display = st.kbHelp ? "block" : "none";
+}
+
 /* ----- tasks (right pane) ----- */
 
 async function loadTasks() {
   if (!st.tasksAvailable) return;
-  const qs = "?status=" + (st.onlyActive ? "open" : "all") + "&limit=100" + (st.q ? "&q=" + encodeURIComponent(st.q) : "");
+  const qs = "?status=" + (st.onlyActive ? "open" : "all") + "&limit=100" + (st.q ? "&q=" + encodeURIComponent(st.q) : "") +
+    (st.needsInput ? "&awaiting=operator" : "");
   try { st.tasks = (await getJ("/v1/tasks" + qs)).tasks || []; }
   catch (e) {
     if (api404(e)) { st.tasksAvailable = false; st.tasks = []; renderTasks(); await loadLegacy(); return; }
@@ -477,14 +596,19 @@ function renderTasks() {
   const box = $("tasklist");
   if (!st.tasksAvailable) { box.innerHTML = '<div class="empty">tasks not available on this factory yet - showing the legacy log</div>'; return; }
   if (!st.tasks.length) {
-    box.innerHTML = '<div class="empty">' + (st.q ? "no matching tasks" : st.onlyActive ? "no active tasks" : "no tasks yet") + "</div>"; return;
+    box.innerHTML = '<div class="empty">' + (st.q ? "no matching tasks" : st.needsInput ? "nothing needs your input" : st.onlyActive ? "no active tasks" : "no tasks yet") + "</div>"; return;
   }
   box.innerHTML = st.tasks.map(t =>
     '<div class="task' + (t.id === st.selected ? " selected" : "") + (t.status === "closed" ? " closed" : "") + '" data-id="' + esc(t.id) + '">' +
-    '<div class="thead">' + prioBadge(t.priority) + ' <span class="ttitle">' + esc(t.title) + "</span></div>" +
+    '<div class="thead">' + prioBadge(t.priority) + ' <span class="ttitle">' + esc(t.title) + "</span>" +
+    (t.awaiting === "operator" ? '<span class="needs" title="waiting on you">● needs input</span>' : "") + "</div>" +
     (t.preview ? '<div class="tprev">' + esc(t.preview) + "</div>" : "") +
     '<div class="tmeta">' + esc(t.status) + " · " + esc(rel(t.last_activity_at || t.updated_at)) + " · " + esc(t.id) + "</div></div>").join("");
-  for (const el of box.querySelectorAll(".task")) el.onclick = () => selectTask(el.dataset.id);
+  for (const el of box.querySelectorAll(".task")) el.onclick = () => {
+    // picking a task from the list opens it in the list view.
+    if (st.mode === "focus") { st.mode = "list"; renderFocusBar(); }
+    selectTask(el.dataset.id);
+  };
 }
 
 /* ----- thread (center pane) ----- */
@@ -497,6 +621,7 @@ async function selectTask(id) {
 
 async function loadThread() {
   if (!st.tasksAvailable) return;
+  if (!st.selected && st.mode === "focus" && st.focusId) st.selected = st.focusId;
   if (!st.selected) { renderThread(); return; }
   try { st.thread = await getJ("/v1/tasks/" + encodeURIComponent(st.selected) + (st.showInternal ? "?internal=1" : "")); }
   catch (e) {
@@ -510,6 +635,15 @@ function renderThread() {
   const log = $("chatlog");
   const head = $("threadhead");
   if (!st.tasksAvailable) return;
+  $("chatform").style.display = "";
+  if (!st.thread && st.mode === "focus" && !st.focusId) {
+    head.style.display = "none";
+    log.innerHTML = '<div id="focus-empty" class="empty"><div class="big">Nothing needs your input</div>' +
+      "all caught up - tasks that need a reply will appear here</div>";
+    $("typing").style.display = "none";
+    $("chatform").style.display = "none";
+    return;
+  }
   if (!st.thread) {
     head.style.display = "none";
     log.innerHTML = '<div class="empty">select a task, or start a new one above</div>';
@@ -588,9 +722,18 @@ $("chatform").onsubmit = async (ev) => {
   if (st.tasksAvailable && !st.selected) return;
   $("chat-send").disabled = true;
   try {
+    const replied = st.selected;
     await sendText(text, st.tasksAvailable ? st.selected : null);
     $("chat-input").value = "";
-    if (st.tasksAvailable) { await loadThread(); await loadTasks(); } else await loadLegacy();
+    if (st.tasksAvailable && st.mode === "focus") {
+      // advance to the next waiting task (computed from the queue as it was
+      // when the reply was sent); loadQueue drops the answered one.
+      const nxt = advance(st.queue, replied);
+      st.focusId = nxt || null; st.selected = st.focusId; st.thread = null;
+      await loadQueue();
+      if (!st.queue.includes(st.focusId)) { st.focusId = st.queue[0] || null; st.selected = st.focusId; }
+      await loadThread(); await loadTasks();
+    } else if (st.tasksAvailable) { await loadThread(); await loadTasks(); await loadQueue(); } else await loadLegacy();
   } catch (e) {
     $("chatlog").insertAdjacentHTML("beforeend", '<div class="err">' + esc(e.message) + "</div>");
   } finally { $("chat-send").disabled = false; }
@@ -602,6 +745,44 @@ $("newtask-input").addEventListener("keydown", (ev) => {
   if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); $("newtaskform").requestSubmit(); }
 });
 
+$("needs-input").onchange = () => { st.needsInput = $("needs-input").checked; loadTasks(); };
+$("modetoggle").onclick = () => setMode(st.mode === "focus" ? "list" : "focus");
+$("focus-next").onclick = () => focusStep(1);
+$("focus-prev").onclick = () => focusStep(-1);
+$("focus-skip").onclick = () => focusSkip();
+$("kb-toggle").onclick = () => { st.kbHelp = !st.kbHelp; renderFocusBar(); };
+
+/* collapsible tasks panel: state survives reloads (localStorage) */
+function setPanelCollapsed(c, persist) {
+  st.panelCollapsed = c;
+  $("inbox3").classList.toggle("tp-collapsed", c);
+  $("tp-toggle").innerHTML = c ? "&#9666;" : "&#9656;";
+  $("tp-toggle").setAttribute("aria-expanded", c ? "false" : "true");
+  if (persist) { try { localStorage.setItem("factory.tasksPanelCollapsed", c ? "1" : "0"); } catch (e) { /* private mode */ } }
+}
+$("tp-toggle").onclick = () => setPanelCollapsed(!st.panelCollapsed, true);
+try { setPanelCollapsed(localStorage.getItem("factory.tasksPanelCollapsed") === "1", false); } catch (e) { /* no storage */ }
+
+/* keyboard shortcuts (documented in #kbhelp, toggled by ?) */
+document.addEventListener("keydown", (ev) => {
+  if (tab !== "chat" || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+  const typing = ["TEXTAREA", "INPUT", "SELECT"].includes(ev.target.tagName);
+  if (typing) { if (ev.key === "Escape") ev.target.blur(); return; }
+  const focus = st.mode === "focus";
+  switch (ev.key) {
+    case "j": case "ArrowRight": if (focus) focusStep(1); else return; break;
+    case "k": case "ArrowLeft": if (focus) focusStep(-1); else return; break;
+    case "s": if (focus) focusSkip(); else return; break;
+    case "r": case "/": $("chat-input").focus(); break;
+    case "l": setMode(focus ? "list" : "focus"); break;
+    case "n": $("needs-input").checked = st.needsInput = !st.needsInput; loadTasks(); break;
+    case "[": setPanelCollapsed(!st.panelCollapsed, true); break;
+    case "?": st.kbHelp = !st.kbHelp; renderFocusBar(); break;
+    default: return;
+  }
+  ev.preventDefault();
+});
+
 $("only-active").onchange = () => { st.onlyActive = $("only-active").checked; loadTasks(); };
 let searchTimer = null;
 $("task-search").oninput = () => {
@@ -610,7 +791,7 @@ $("task-search").oninput = () => {
 };
 
 async function loadChat() {
-  await Promise.all([loadAlerts(), loadTasks()]);
+  await Promise.all([loadAlerts(), loadTasks(), loadQueue()]);
   if (st.tasksAvailable) await loadThread(); else await loadLegacy();
 }
 
