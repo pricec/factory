@@ -6,6 +6,7 @@ package foremanapp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -105,6 +106,18 @@ type App struct {
 	// workerCancel ends workerCtx.
 	workerCancel context.CancelFunc
 
+	// childMu guards the child-spawn state (spec §9.2, 2026-11-15
+	// sub-spawning amendment). childParent maps each spawned child job id
+	// to its parent job id: the consumer copies the child's terminal
+	// job.result into the parent's per-job inbox job:{parent}, where the
+	// parent collects it via collect_children. childrenOf maps each parent
+	// job id to the children spawned in its CURRENT attempt - reset when a
+	// fresh attempt of the same job id spawns (a retried parent must never
+	// collect a previous attempt's results); each spawn_child adds to it.
+	childMu     sync.Mutex
+	childParent map[string]string
+	childrenOf  map[string]map[string]bool
+
 	// BuildHarnessConfig builds the workerharness.Config the spawner runs
 	// for one job. A field so tests can replace the opencode binary and
 	// URLs; the default derives them from cfg (see defaultHarnessConfig).
@@ -145,13 +158,15 @@ func New(cfg Config) (*App, error) {
 	cfg.WorkerHardestModel = models.Resolve(cfg.WorkerHardestModel, models.WorkerHardest)
 
 	a := &App{
-		cfg:        cfg,
-		factoryURL: cfg.FactoryURL,
-		id:         cfg.ID,
-		inboxID:    "foreman:" + cfg.ID,
-		dataDir:    cfg.DataDir,
-		advertise:  cfg.AdvertiseURL,
-		now:        now,
+		cfg:         cfg,
+		factoryURL:  cfg.FactoryURL,
+		id:          cfg.ID,
+		inboxID:     "foreman:" + cfg.ID,
+		dataDir:     cfg.DataDir,
+		advertise:   cfg.AdvertiseURL,
+		now:         now,
+		childParent: map[string]string{},
+		childrenOf:  map[string]map[string]bool{},
 	}
 	if a.advertise == "" {
 		a.advertise = defaultAdvertiseURL(cfg.Addr)
@@ -229,13 +244,18 @@ func New(cfg Config) (*App, error) {
 		Spawner: spawnerFunc(a.SpawnWorker),
 	}
 
-	// MCP surfaces (spec §9.2, §9.3).
+	// MCP surfaces (spec §9.2, §9.3). The worker surface's spawn_child and
+	// collect_children (2026-11-15 sub-spawning amendment) share the
+	// foreman's Spawn seam and read the spawn state below.
 	workerH, err := mcpworker.Handler(mcpworker.Config{
 		Auth:           a.auth,
 		Inbox:          a.inbox,
 		ForemanInboxID: a.inboxID,
 		WorkDir:        cfg.DataDir,
 		Now:            now,
+		Spawn:          a.SpawnWorker,
+		ParentSpec:     a.parentSpec,
+		ChildJobs:      a.childrenOfJob,
 	})
 	if err != nil {
 		_ = a.Close()
@@ -386,6 +406,17 @@ func (a *App) handleBatch(ctx context.Context, envs []wire.MessageEnvelope, ack 
 			ids = append(ids, env.ID)
 			continue
 		}
+		// Child-result copy (spec §9.2, 2026-11-15 sub-spawning amendment):
+		// a terminal child job.result is copied into the parent's per-job
+		// inbox BEFORE the factory forward, so a copy failure redelivers
+		// the whole envelope and nothing is acked early. The copy is
+		// idempotent (the inbox dedupes job.result per inbox + job id).
+		if env.Type == "job.result" {
+			if err := a.copyChildResult(ctx, env); err != nil {
+				log.Printf("foremanapp: child result copy %s: %v (not acked; redelivered)", env.ID, err)
+				continue
+			}
+		}
 		if err := a.router.Handle(ctx, env); err != nil {
 			log.Printf("foremanapp: route %s %s: %v (not acked; redelivered)", env.Type, env.ID, err)
 			continue
@@ -401,6 +432,99 @@ func (a *App) handleBatch(ctx context.Context, envs []wire.MessageEnvelope, ack 
 		return nil
 	}
 	return ack(ctx, ids)
+}
+
+// copyChildResult routes one terminal child job.result to its parent's
+// per-job inbox job:{parent} (spec §9.2, 2026-11-15 sub-spawning
+// amendment): the parent worker collects child results itself via
+// collect_children - the envelope payload stays byte-identical (§3.4) and
+// never detours through the foreman brain. Only children this process
+// spawned are copied (childParent state; a foreman restart empties it, and
+// with it every child it spawned is gone too). The §8.5 synthesized
+// spawn-failure results flow through the same path, so a harness failure
+// is loud at the parent, not only at the factory. Duplicate posts
+// (redelivery after copy-but-crash-before-ack) are idempotent success: the
+// inbox dedupes job.result per (inbox, job_id).
+func (a *App) copyChildResult(ctx context.Context, env wire.MessageEnvelope) error {
+	parent, ok := a.childParentOf(env.JobID)
+	if !ok {
+		return nil // not a spawned child
+	}
+	_, err := a.inbox.Post(ctx, "job:"+parent, wire.MessageEnvelope{
+		Type:    env.Type,
+		JobID:   env.JobID,
+		From:    env.From,
+		Payload: env.Payload,
+	})
+	var dup *inbox.DuplicateError
+	if errors.As(err, &dup) {
+		return nil
+	}
+	return err
+}
+
+// recordSpawnState tracks the child-spawn state the §9.2 sub-spawning
+// amendment runs on (called by SpawnWorker before the harness starts, so
+// the state always precedes any possible report). A fresh (non-child)
+// spawn opens a new attempt generation: its child set starts empty, so a
+// retried parent never collects a previous attempt's copies. A child spawn
+// is recorded under its parent for both the consumer copy (childParent)
+// and the collect_children filter (childrenOf).
+func (a *App) recordSpawnState(spec wire.JobSpec) {
+	a.childMu.Lock()
+	defer a.childMu.Unlock()
+	if spec.ParentJobID == "" {
+		a.childrenOf[spec.ID] = map[string]bool{}
+		return
+	}
+	a.childParent[spec.ID] = spec.ParentJobID
+	set, ok := a.childrenOf[spec.ParentJobID]
+	if !ok {
+		set = map[string]bool{}
+		a.childrenOf[spec.ParentJobID] = set
+	}
+	set[spec.ID] = true
+}
+
+// childParentOf returns the parent job id of a spawned child, if any.
+func (a *App) childParentOf(jobID string) (string, bool) {
+	a.childMu.Lock()
+	defer a.childMu.Unlock()
+	parent, ok := a.childParent[jobID]
+	return parent, ok
+}
+
+// childrenOfJob returns the child job ids the given parent spawned in its
+// current attempt (the mcpworker collect_children filter seam, spec §9.2).
+func (a *App) childrenOfJob(parent string) []string {
+	a.childMu.Lock()
+	defer a.childMu.Unlock()
+	set := a.childrenOf[parent]
+	out := make([]string, 0, len(set))
+	for id := range set {
+		out = append(out, id)
+	}
+	return out
+}
+
+// parentSpec reads a job's persisted JobSpec (the mcpworker spawn_child
+// seam, spec §9.2): the spawner writes jobs/{id}/job.json before the
+// harness starts, so a running job always has one. Normalize refills
+// fields left at zero so inheritance caps compare against applied values.
+func (a *App) parentSpec(jobID string) (wire.JobSpec, bool, error) {
+	data, err := os.ReadFile(filepath.Join(a.dataDir, jobsDirName, jobID, "job.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return wire.JobSpec{}, false, nil
+	}
+	if err != nil {
+		return wire.JobSpec{}, false, err
+	}
+	var spec wire.JobSpec
+	if err := json.Unmarshal(data, &spec); err != nil {
+		return wire.JobSpec{}, false, fmt.Errorf("job spec %s: %w", jobID, err)
+	}
+	spec.Normalize()
+	return spec, true, nil
 }
 
 // enqueueBrain durably hands one brain-delegated envelope to the brain

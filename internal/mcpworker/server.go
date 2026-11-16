@@ -1,5 +1,6 @@
 // Package mcpworker exposes the worker's MCP tool surface (spec §9.2):
-// report_result and ask_parent, a streamable-HTTP MCP server authed by
+// report_result, ask_parent, and - 2026-11-15 sub-spawning amendment -
+// spawn_child and collect_children: a streamable-HTTP MCP server authed by
 // per-job worker tokens (spec §7.3), mounted on the foreman at
 // /v1/mcp/worker.
 package mcpworker
@@ -18,6 +19,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/pricec/factory/internal/auth"
 	"github.com/pricec/factory/internal/inbox"
+	"github.com/pricec/factory/internal/wire"
 )
 
 // Pinned constants (spec §9.2, §11).
@@ -46,6 +48,21 @@ type Config struct {
 	WorkDir string
 	// Now is the clock; injectable for tests. Nil means time.Now.
 	Now func() time.Time
+	// Spawn enqueues a child JobSpec to the worker harness queue (spec
+	// §9.2, 2026-11-15 sub-spawning amendment) - the same seam the
+	// foreman brain's spawn_worker uses (§9.3); the integration wires
+	// foremanapp.SpawnWorker. It must return immediately - spawn_child
+	// never blocks on the child - and its errors surface as tool errors.
+	Spawn func(ctx context.Context, spec wire.JobSpec) error
+	// ParentSpec resolves a job's persisted JobSpec (the spec the spawner
+	// writes before the harness starts): spawn_child reads the caller's
+	// own spec for the depth cap and the tier/timeout/budget inheritance
+	// (spec §9.2). ok is false when no spec is persisted for the job.
+	ParentSpec func(jobID string) (spec wire.JobSpec, ok bool, err error)
+	// ChildJobs reports the child job ids the given parent spawned in its
+	// current attempt - the spawn state lives foreman-side, next to the
+	// spawner; collect_children filters the per-job inbox to these.
+	ChildJobs func(parentJobID string) []string
 }
 
 func (c *Config) now() time.Time {
@@ -55,7 +72,7 @@ func (c *Config) now() time.Time {
 	return time.Now()
 }
 
-// Handler builds the worker MCP endpoint (spec §9.2): the two-tool MCP
+// Handler builds the worker MCP endpoint (spec §9.2): the four-tool MCP
 // server behind bearer auth that resolves the per-job worker token to a
 // job_id and rejects tokens without a job scope.
 func Handler(cfg Config) (http.Handler, error) {
@@ -68,6 +85,12 @@ func Handler(cfg Config) (http.Handler, error) {
 		return nil, fmt.Errorf("mcpworker: Config.ForemanInboxID is required")
 	case cfg.WorkDir == "":
 		return nil, fmt.Errorf("mcpworker: Config.WorkDir is required")
+	case cfg.Spawn == nil:
+		return nil, fmt.Errorf("mcpworker: Config.Spawn is required")
+	case cfg.ParentSpec == nil:
+		return nil, fmt.Errorf("mcpworker: Config.ParentSpec is required")
+	case cfg.ChildJobs == nil:
+		return nil, fmt.Errorf("mcpworker: Config.ChildJobs is required")
 	}
 
 	srv := mcp.NewServer(&mcp.Implementation{Name: "factory-worker", Version: "v1"}, nil)
@@ -79,6 +102,14 @@ func Handler(cfg Config) (http.Handler, error) {
 		Name:        "ask_parent",
 		Description: "Ask the parent foreman a question; returns its answer.",
 	}, askParentTool(cfg))
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "spawn_child",
+		Description: "Spawn one child worker job; returns its job_id. Tier/timeout/budget inherit this job's; timeout and budget are caps.",
+	}, spawnChildTool(cfg))
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "collect_children",
+		Description: "Long-poll this job's inbox for child job results; returns the pending ones.",
+	}, collectChildrenTool(cfg))
 
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})

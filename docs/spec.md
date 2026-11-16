@@ -256,6 +256,13 @@ Defaults shown; `priority` 1-9, 9 highest (#3). `tier` selects the
 worker's model tier (#28, #29): `flash` (or absent - the cost-biased
 default), `default`, or `hardest`; see §6.5.
 
+`parent_job_id` (2026-11-15 sub-spawning amendment, §9.2) appears only on
+child jobs spawned by a worker's `spawn_child` tool and is absent otherwise
+(factory-dispatched and brain-spawned jobs never carry it): it names the
+parent job, whose per-job inbox receives a copy of the child's terminal
+`job.result`. Validation requires a `job_`-prefixed id different from the
+job's own id. `spawn_child` is the only writer of the field.
+
 ### 5.2 JobResult (#3)
 
 ```json
@@ -764,8 +771,9 @@ Kill the entire process group at `timeout_s`; post a JobResult with
 (#11 scope); it resolves `job_id` and provides no other auth context.
 
 Tools (exact; opencode exposes each as `<server>_<tool>` - with the server
-named `inbox`, the agent sees `inbox_report_result` and `inbox_ask_parent`
-(#28), and §8.3's prompt wording matches):
+named `inbox`, the agent sees `inbox_report_result`, `inbox_ask_parent`,
+`inbox_spawn_child`, and `inbox_collect_children` (#28), and §8.3's prompt
+wording matches):
 
 - `report_result(status, summary, result?, error?, usage?)` - validate via
   `internal/wire`; post the JobResult to the result inbox (409 dedupe
@@ -775,6 +783,50 @@ named `inbox`, the agent sees `inbox_report_result` and `inbox_ask_parent`
   foreman's inbox `foreman:{id}` (§3.2); long-poll `job:{job_id}` for
   `job.answer`; return the answer; on timeout return "proceed with your best
   judgment" (never blocks forever).
+
+Sub-spawning (2026-11-15 amendment): a worker can split ONE large dispatch
+into child worker jobs without funneling anything through a foreman-brain
+session - brain/chat history stays small, the parent worker does the
+collecting:
+
+- `spawn_child(task, result_schema?, tier?, timeout_s?, budget?)` - builds a
+  child JobSpec with `parent_job_id` set to the calling job (§5.1) and
+  enqueues it through the SAME Spawn seam the foreman brain's `spawn_worker`
+  uses (§9.3): the child is an ordinary foreman-spawned job - registry
+  visible via the accepted/started events (§6.2; no second visibility
+  path), run by the same harness, and loud on harness failure (the §8.5
+  synthesized failed result applies at the factory AND is copied to the
+  parent's per-job inbox, so the parent sees the failure too). Returns
+  `job_id` immediately (never blocks on the child). DEPTH is hard-capped at
+  ONE level: a job that is itself a spawned child (its persisted spec
+  carries `parent_job_id`) is refused - children never spawn children, and
+  the refusal is a loud tool error. Inheritance and caps, enforced against
+  the caller's persisted JobSpec: the child's `tier` is the caller's
+  argument, or the parent's tier when unset; `timeout_s` defaults to and is
+  hard-capped at the parent's timeout_s (a child never outlives its
+  parent); every budget field defaults to the parent's field and is
+  hard-capped at it (a child never out-spends its parent). `created_by` is
+  `worker:{parent_job_id}`.
+- `collect_children(wait_seconds=60)` - long-polls the CALLER's per-job
+  inbox `job:{job_id}` for terminal `job.result` copies of the children the
+  current attempt spawned: the foreman's consumer copies every child's
+  terminal result there (byte-identical payload, §3.4) before forwarding it
+  to the factory, so collection never routes through the foreman brain
+  (zero LLM calls). The copies include the §8.5 synthesized spawn-failure
+  results. Non-matching envelopes stay untouched (`job.answer` remains
+  available to `ask_parent`; copies of other/previous attempts stay in
+  place), returned copies are acked (consumed). Returns
+  `{"results": [...]}` as soon as at least one child result is pending,
+  `{"results": []}` once `wait_seconds` elapses (capped at 60, like
+  `ask_parent`); the caller re-polls until every `spawn_child` job_id has
+  reported or it gives up. The child filter (which copies belong to the
+  current attempt) is foreman-side state next to the spawner: a restarted
+  foreman - which kills its whole worker tree anyway - collects nothing
+  rather than a previous attempt's stale results.
+
+The depth cap and the inheritance caps read the caller's persisted JobSpec
+(the spawner's `jobs/{id}/job.json`) through a foreman-provided seam; the
+Spawn seam itself is unchanged.
 
 ### 9.3 Foreman brain surface: `/v1/mcp/foreman` (#18)
 
@@ -800,6 +852,13 @@ prompt (#18). The brain token is a LOCAL foreman credential on the foreman's
 own auth store (the factory-paired bearer lives in the factory's store and
 cannot authenticate against the foreman's local endpoints); the foreman
 mints it at startup (#21).
+
+The `spawn_worker` seam is shared (2026-11-15 sub-spawning amendment): the
+worker surface's `spawn_child` (§9.2) enqueues through the same Spawn seam,
+so worker-spawned child jobs get the identical registry-visibility (§6.2)
+and loud-failure treatment as brain-spawned jobs. The brain surface itself
+gains nothing: children are the parent worker's responsibility, and no
+child result ever relays through a brain session.
 
 ### 9.4 Factory planner surface: `/v1/mcp/factory` (#19)
 
