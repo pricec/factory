@@ -160,6 +160,115 @@ func TestTransitionTable(t *testing.T) {
 	}
 }
 
+// TestRegisterSpawned covers the spawn-visibility registration (spec §6.2,
+// 2026-11-15 amendment): insert-if-absent in state dispatched, attributed to
+// the spawning foreman, never a duplicate or clobber.
+func TestRegisterSpawned(t *testing.T) {
+	t.Run("creates dispatched row with spec and foreman", func(t *testing.T) {
+		s := openStore(t)
+		ctx := context.Background()
+		spec := newSpec(t, func(s *wire.JobSpec) { s.Task = "locally spawned work" })
+
+		created, err := s.RegisterSpawned(ctx, spec, "foreman:alpha")
+		if err != nil {
+			t.Fatalf("RegisterSpawned: %v", err)
+		}
+		if !created {
+			t.Fatal("RegisterSpawned created = false, want true for a fresh id")
+		}
+		job, ok, err := s.Get(ctx, spec.ID)
+		if err != nil || !ok {
+			t.Fatalf("get %s: ok=%v err=%v", spec.ID, ok, err)
+		}
+		if job.State != StateDispatched {
+			t.Errorf("state = %s, want dispatched", job.State)
+		}
+		if job.ForemanID != "foreman:alpha" {
+			t.Errorf("foreman_id = %q, want foreman:alpha", job.ForemanID)
+		}
+		if job.Spec.Task != "locally spawned work" {
+			t.Errorf("spec task = %q, want the carried spec's task", job.Spec.Task)
+		}
+
+		// The registered row drives the ordinary lifecycle from here.
+		mustApplyEvent(t, s, spec.ID, "started")
+		if got := state(t, s, spec.ID); got != StateRunning {
+			t.Errorf("state after started = %s, want running", got)
+		}
+	})
+
+	t.Run("re-delivered accepted event is a no-op", func(t *testing.T) {
+		s := openStore(t)
+		ctx := context.Background()
+		spec := newSpec(t, nil)
+
+		if _, err := s.RegisterSpawned(ctx, spec, "foreman:alpha"); err != nil {
+			t.Fatalf("first RegisterSpawned: %v", err)
+		}
+		// Simulate re-delivery (at-least-once posting, spec §4) and a
+		// lifecycle step between deliveries.
+		mustApplyEvent(t, s, spec.ID, "started")
+
+		created, err := s.RegisterSpawned(ctx, spec, "foreman:alpha")
+		if err != nil {
+			t.Fatalf("second RegisterSpawned: %v", err)
+		}
+		if created {
+			t.Error("re-delivered RegisterSpawned created = true, want false")
+		}
+		if got := state(t, s, spec.ID); got != StateRunning {
+			t.Errorf("state = %s, want running (registration must not reset it)", got)
+		}
+	})
+
+	t.Run("existing factory-created row is untouched", func(t *testing.T) {
+		s := openStore(t)
+		ctx := context.Background()
+		spec := newSpec(t, nil)
+		driveTo(t, s, spec, StateRunning)
+
+		// A spawn event for an id the factory already created (a retry
+		// re-dispatch spawning on the foreman): must not duplicate or
+		// modify the row.
+		spawned := spec
+		spawned.Task = "mutated spec must not land"
+		created, err := s.RegisterSpawned(ctx, spawned, "foreman:alpha")
+		if err != nil {
+			t.Fatalf("RegisterSpawned: %v", err)
+		}
+		if created {
+			t.Error("RegisterSpawned on existing row created = true, want false")
+		}
+		job, ok, err := s.Get(ctx, spec.ID)
+		if err != nil || !ok {
+			t.Fatalf("get %s: ok=%v err=%v", spec.ID, ok, err)
+		}
+		if job.State != StateRunning {
+			t.Errorf("state = %s, want running (untouched)", job.State)
+		}
+		if job.Spec.Task != "do the thing" {
+			t.Errorf("spec task = %q, want the factory-created spec untouched", job.Spec.Task)
+		}
+		if job.ForemanID != "foreman:alpha" {
+			t.Errorf("foreman_id = %q, want foreman:alpha (untouched)", job.ForemanID)
+		}
+	})
+
+	t.Run("invalid spec rejected without a row", func(t *testing.T) {
+		s := openStore(t)
+		ctx := context.Background()
+		spec := newSpec(t, nil)
+		spec.Task = ""
+
+		if _, err := s.RegisterSpawned(ctx, spec, "foreman:alpha"); err == nil {
+			t.Fatal("RegisterSpawned with invalid spec = nil error, want validation error")
+		}
+		if _, ok, _ := s.Get(ctx, spec.ID); ok {
+			t.Error("invalid spec left a row behind")
+		}
+	})
+}
+
 func TestApplyResultTerminalIdempotent(t *testing.T) {
 	s := openStore(t)
 	ctx := context.Background()

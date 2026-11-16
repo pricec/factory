@@ -38,6 +38,7 @@ func TestE2E(t *testing.T) {
 	})
 
 	t.Run("HappyPath", func(t *testing.T) { testHappyPath(t, s) })
+	t.Run("BrainSpawnVisibility", func(t *testing.T) { testBrainSpawnVisibility(t, s) })
 	t.Run("QuestionLoop", func(t *testing.T) { testQuestionLoop(t, s) })
 	t.Run("DeadLetter", func(t *testing.T) { testDeadLetter(t, s) })
 	t.Run("SummaryView", func(t *testing.T) { testSummaryView(t, s) })
@@ -137,6 +138,68 @@ func testHappyPath(t *testing.T, s *stack) {
 	}
 	if totals.Total < 0 {
 		t.Errorf("spend total_usd = %f, want >= 0", totals.Total)
+	}
+}
+
+// testBrainSpawnVisibility: the spawn-visibility proof (spec §6.2, 2026-11-15
+// spawn-visibility amendment). A job spawned through the REAL brain-MCP
+// spawn_worker tool - the foreman-local path that mints its JobSpec on the
+// foreman, never through a factory dispatch - must appear in the factory job
+// registry (GET /v1/jobs and GET /v1/jobs/{id}) with the ordinary lifecycle:
+// registered by the accepted event's carried spec, running via started, done
+// via the forwarded result, attributed to the spawning foreman, exactly one
+// row. Before the amendment such jobs existed only in the foreman's local
+// jobs/ store and were invisible here.
+func testBrainSpawnVisibility(t *testing.T, s *stack) {
+	task := "e2e brain-local spawn: registry visibility"
+
+	sc := s.callTool(s.brainMCP(), s.foreman.BrainToken(), "spawn_worker", map[string]any{
+		"task": task,
+	})
+	jobID, _ := sc["job_id"].(string)
+	if !strings.HasPrefix(jobID, "job_") {
+		t.Fatalf("spawn_worker job_id = %v, want job_-prefixed", sc)
+	}
+
+	// The whole stack processes it with no factory-side dispatch:
+	// spawn events (accepted carries the spec) -> registered + running ->
+	// fake opencode -> harness fallback post -> local consumer forward ->
+	// factory consumer apply.
+	var job jobs.Job
+	waitFor(t, "brain-spawned job done in the registry", 8*time.Second, func() bool {
+		_ = s.do("GET", "/v1/jobs/"+jobID, "", nil, &job)
+		return job.State == jobs.StateDone
+	})
+	if job.State != jobs.StateDone {
+		t.Fatalf("job state = %s, want done", job.State)
+	}
+	if job.ForemanID != foremanInbox {
+		t.Errorf("job foreman_id = %q, want %s (the spawning foreman)", job.ForemanID, foremanInbox)
+	}
+	if job.Spec.Task != task {
+		t.Errorf("registry spec task = %q, want the carried spec's %q", job.Spec.Task, task)
+	}
+	var results []wire.JobResult
+	if err := json.Unmarshal(job.Results, &results); err != nil {
+		t.Fatalf("parse results %s: %v", job.Results, err)
+	}
+	if len(results) != 1 || results[0].Status != wire.StatusDone {
+		t.Errorf("results = %s, want exactly one done result", job.Results)
+	}
+
+	// Exactly one registry entry: GET /v1/jobs lists the spawned id once.
+	var list []jobs.Job
+	if st := s.do("GET", "/v1/jobs", "", nil, &list); st != http.StatusOK {
+		t.Fatalf("GET /v1/jobs = %d, want 200", st)
+	}
+	rows := 0
+	for _, j := range list {
+		if j.ID == jobID {
+			rows++
+		}
+	}
+	if rows != 1 {
+		t.Errorf("GET /v1/jobs holds %d rows for %s, want 1 (no duplicates)", rows, jobID)
 	}
 }
 
