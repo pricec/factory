@@ -65,7 +65,7 @@ func ModelArg(model string) string {
 // FINAL positional argument - --mcp-config is variadic and would otherwise
 // swallow it.
 func Args(model, configPath, prompt string) []string {
-	args := []string{"-p", "--output-format", "json"}
+	args := []string{"-p", "--output-format", "stream-json", "--verbose"}
 	if model != "" {
 		args = append(args, "--model", ModelArg(model))
 	}

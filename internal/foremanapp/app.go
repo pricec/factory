@@ -280,7 +280,7 @@ func New(cfg Config) (*App, error) {
 	a.brain.OnUsage = func(ctx context.Context, u claudecli.Usage) {
 		ev := wire.UsageEvent{
 			Kind: wire.UsageKindBrain, ForemanID: cfg.ID, Model: u.Model, Input: u.Input, Output: u.Output,
-			CacheCreate: u.CacheCreate, CacheRead: u.CacheRead, CostUSD: u.CostUSD, SessionID: u.SessionID, Limit: u.Limit,
+			CacheCreate: u.CacheCreate, CacheRead: u.CacheRead, CostUSD: u.CostUSD, SessionID: u.SessionID, Limit: u.Limit, RateLimit: u.RateLimit,
 		}
 		if ev.Model == "" {
 			ev.Model = cfg.BrainModel

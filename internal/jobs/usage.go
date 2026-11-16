@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/pricec/factory/internal/wire"
 )
@@ -50,12 +51,18 @@ func (s *Store) RecordUsage(ctx context.Context, ev wire.UsageEvent) error {
 			ev.ForemanID = j.ForemanID
 		}
 	}
+	// limit_raw holds the rate_limit_info JSON when the run had one (the
+	// stream-json signal), else the raw limit-error text.
+	limitRaw := ev.Limit
+	if ev.RateLimit != "" {
+		limitRaw = ev.RateLimit
+	}
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO usage_events (ts, kind, job_id, task_id, foreman_id, model, tier,
 			input, output, cache_create, cache_read, cost_usd, session_id, limit_raw)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
 		s.now(), ev.Kind, ev.JobID, ev.TaskID, ev.ForemanID, ev.Model, ev.Tier,
-		ev.Input, ev.Output, ev.CacheCreate, ev.CacheRead, ev.CostUSD, ev.SessionID, ev.Limit)
+		ev.Input, ev.Output, ev.CacheCreate, ev.CacheRead, ev.CostUSD, ev.SessionID, limitRaw)
 	if err != nil {
 		return fmt.Errorf("jobs: record usage: %w", err)
 	}
@@ -112,4 +119,21 @@ func (s *Store) UsageEvents(ctx context.Context, jobID string) ([]wire.UsageEven
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// UsageSums is the factory's own spend over a time window.
+type UsageSums struct {
+	Tokens  int64   `json:"tokens"` // input + output + cache_create (cache reads excluded)
+	CostUSD float64 `json:"cost_usd"`
+}
+
+// UsageSince sums usage_events with ts >= since (RFC3339 UTC text sorts
+// lexically, matching how ts is written by s.now()).
+func (s *Store) UsageSince(ctx context.Context, since time.Time) (UsageSums, error) {
+	var tok sql.NullInt64
+	var cost sql.NullFloat64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT SUM(input + output + cache_create), SUM(cost_usd) FROM usage_events WHERE ts >= ?`,
+		since.UTC().Format(time.RFC3339)).Scan(&tok, &cost)
+	return UsageSums{Tokens: tok.Int64, CostUSD: cost.Float64}, err
 }

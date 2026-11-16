@@ -21,6 +21,9 @@ type Usage struct {
 	// Limit is the raw rate-limit / usage-limit text the CLI emitted
 	// (e.g. "Claude AI usage limit reached|1760000000"), "" when none.
 	Limit string `json:"limit,omitempty"`
+	// RateLimit is the raw rate_limit_event.rate_limit_info JSON from a
+	// stream-json run ("" when none).
+	RateLimit string `json:"rate_limit,omitempty"`
 }
 
 // IsZero reports whether nothing was parsed.
@@ -51,7 +54,8 @@ type resultObj struct {
 		CacheCreate int `json:"cache_creation_input_tokens"`
 		CacheRead   int `json:"cache_read_input_tokens"`
 	} `json:"usage"`
-	ModelUsage map[string]json.RawMessage `json:"modelUsage"`
+	ModelUsage    map[string]json.RawMessage `json:"modelUsage"`
+	RateLimitInfo json.RawMessage            `json:"rate_limit_info"`
 }
 
 var limitRe = regexp.MustCompile(`(?i)usage limit|limit reached|hit your limit|rate.?limit|too many requests|\b429\b|limit will reset|resets? (at|in|on)?\s*\d`)
@@ -67,20 +71,42 @@ func ParseOutput(raw string) Output {
 		return fallback
 	}
 	var obj *resultObj
+	var rateLimit string
+	// events: a JSON array, or newline-delimited objects (stream-json).
+	var events []resultObj
 	switch trim[0] {
 	case '{':
 		var o resultObj
 		if json.Unmarshal(trim, &o) == nil {
-			obj = &o
+			events = []resultObj{o}
+		} else {
+			for _, line := range bytes.Split(trim, []byte("\n")) {
+				line = bytes.TrimSpace(line)
+				if len(line) == 0 || line[0] != '{' {
+					continue
+				}
+				var e resultObj
+				if json.Unmarshal(line, &e) == nil {
+					events = append(events, e)
+				}
+			}
 		}
 	case '[':
-		var arr []resultObj
-		if json.Unmarshal(trim, &arr) == nil {
-			for i := len(arr) - 1; i >= 0; i-- {
-				if arr[i].Type == "result" {
-					obj = &arr[i]
-					break
-				}
+		_ = json.Unmarshal(trim, &events)
+	}
+	for i := range events {
+		e := &events[i]
+		if e.Type == "rate_limit_event" && len(e.RateLimitInfo) > 0 {
+			rateLimit = string(e.RateLimitInfo)
+		}
+	}
+	if len(events) == 1 {
+		obj = &events[0]
+	} else {
+		for i := len(events) - 1; i >= 0; i-- {
+			if events[i].Type == "result" {
+				obj = &events[i]
+				break
 			}
 		}
 	}
@@ -107,6 +133,7 @@ func ParseOutput(raw string) Output {
 	if (obj.IsError || strings.Contains(strings.ToLower(obj.Subtype), "limit")) && limitRe.MatchString(out.Text) {
 		u.Limit = out.Text
 	}
+	u.RateLimit = rateLimit
 	out.Usage = u
 	return out
 }

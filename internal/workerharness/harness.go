@@ -213,7 +213,7 @@ func recordUsage(ctx context.Context, cfg Config, spec wire.JobSpec, u claudecli
 	ev := wire.UsageEvent{
 		Kind: wire.UsageKindWorker, JobID: spec.ID, Model: u.Model, Tier: spec.Tier,
 		Input: u.Input, Output: u.Output, CacheCreate: u.CacheCreate, CacheRead: u.CacheRead,
-		CostUSD: u.CostUSD, SessionID: u.SessionID, Limit: u.Limit,
+		CostUSD: u.CostUSD, SessionID: u.SessionID, Limit: u.Limit, RateLimit: u.RateLimit,
 	}
 	if ev.Model == "" {
 		ev.Model = cfg.Model
@@ -308,7 +308,7 @@ func runArgs(cfg Config, prompt string) []string {
 // worker, nothing to resume); and the prompt as the FINAL positional
 // argument - `--mcp-config` is variadic and would otherwise swallow it.
 func claudeArgs(cfg Config, mcpFile, prompt string) []string {
-	args := []string{"-p", "--output-format", "json"}
+	args := []string{"-p", "--output-format", "stream-json", "--verbose"}
 	if cfg.Model != "" {
 		args = append(args, "--model", claudeModelArg(cfg.Model))
 	}

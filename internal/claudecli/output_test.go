@@ -1,6 +1,9 @@
 package claudecli
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseOutput(t *testing.T) {
 	tests := []struct {
@@ -56,5 +59,34 @@ func TestParseOutput(t *testing.T) {
 				t.Fatalf("usage = %+v, want %+v", got.Usage, tc.want)
 			}
 		})
+	}
+}
+
+func TestParseOutputStreamJSON(t *testing.T) {
+	raw := `{"type":"system","subtype":"init","session_id":"s9"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1794871800,"rateLimitType":"five_hour","unifiedWindows":{"five_hour":{"utilization":0.09,"resetsAt":1794871800,"status":"allowed"},"seven_day":{"utilization":0.06,"resetsAt":1794999600,"status":"allowed"}}}}
+{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"s9","total_cost_usd":0.01,"usage":{"input_tokens":3,"output_tokens":4}}
+`
+	o := ParseOutput(raw)
+	if !o.Parsed || o.Text != "ok" || o.Usage.Input != 3 || o.Usage.Output != 4 || o.Usage.SessionID != "s9" || o.Usage.CostUSD != 0.01 {
+		t.Fatalf("result not used: %+v", o)
+	}
+	if o.Usage.RateLimit == "" || !strings.Contains(o.Usage.RateLimit, `"seven_day"`) || !strings.Contains(o.Usage.RateLimit, `"resetsAt":1794871800`) {
+		t.Fatalf("rate limit not captured: %q", o.Usage.RateLimit)
+	}
+	// no rate_limit_event: empty; garbage lines skipped; non-result stream -> raw text
+	o = ParseOutput("{\"type\":\"system\"}\nnot json\n{\"type\":\"result\",\"result\":\"r\"}\n")
+	if !o.Parsed || o.Text != "r" || o.Usage.RateLimit != "" {
+		t.Fatalf("%+v", o)
+	}
+	raw = "{\"type\":\"system\"}\n{\"type\":\"assistant\"}\n"
+	if o := ParseOutput(raw); o.Parsed || o.Text != raw {
+		t.Fatalf("want raw fallback: %+v", o)
+	}
+	// array form also carries the event
+	o = ParseOutput(`[{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}},{"type":"result","result":"x"}]`)
+	if o.Usage.RateLimit != `{"status":"rejected"}` {
+		t.Fatalf("array: %q", o.Usage.RateLimit)
 	}
 }

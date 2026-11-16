@@ -120,6 +120,8 @@ type UsageEvent struct {
 	CostUSD     float64 `json:"cost_usd"`
 	SessionID   string  `json:"session_id,omitempty"`
 	Limit       string  `json:"limit,omitempty"`
+	// RateLimit is the raw rate_limit_event.rate_limit_info JSON (stream-json).
+	RateLimit string `json:"rate_limit,omitempty"`
 }
 
 // Usage event kinds and envelope types.

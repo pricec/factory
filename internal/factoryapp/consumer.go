@@ -90,7 +90,7 @@ func (a *App) handleEnvelope(ctx context.Context, env wire.MessageEnvelope, seen
 		if env.Type == wire.TypeJobUsage {
 			ev.Kind = wire.UsageKindWorker
 		}
-		if err := a.jobs.RecordUsage(ctx, ev); err != nil {
+		if err := a.recordUsage(ctx, ev); err != nil {
 			log.Printf("factoryapp: consumer: record usage: %v", err)
 		}
 	case "job.event":

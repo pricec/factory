@@ -74,7 +74,7 @@ func TestArgs(t *testing.T) {
 	}
 	for _, tc := range tests {
 		got := Args(tc.model, tc.config, prompt)
-		want := []string{"-p", "--output-format", "json"}
+		want := []string{"-p", "--output-format", "stream-json", "--verbose"}
 		if tc.model != "" {
 			want = append(want, "--model", ModelArg(tc.model))
 		}
