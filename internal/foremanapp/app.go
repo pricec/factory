@@ -65,6 +65,9 @@ type Config struct {
 	WorkerHardestModel string
 	// Now is the clock; nil -> real UTC time.
 	Now func() time.Time
+	// ProcRoot is the process table the startup orphan probe reads (spec
+	// §8.7); "" -> /proc. A test seam: tests point it at a fake tree.
+	ProcRoot string
 }
 
 // App is the wired foreman agent host.
@@ -118,6 +121,13 @@ type App struct {
 	childParent map[string]string
 	childrenOf  map[string]map[string]bool
 
+	// spawnedMu guards spawned: every job id this process started a worker
+	// for (spec §8.7). The startup orphan pass never fails these.
+	spawnedMu sync.Mutex
+	spawned   map[string]bool
+	// procRoot is the process table the orphan probe reads (spec §8.7).
+	procRoot string
+
 	// BuildHarnessConfig builds the workerharness.Config the spawner runs
 	// for one job. A field so tests can replace the opencode binary and
 	// URLs; the default derives them from cfg (see defaultHarnessConfig).
@@ -167,6 +177,11 @@ func New(cfg Config) (*App, error) {
 		now:         now,
 		childParent: map[string]string{},
 		childrenOf:  map[string]map[string]bool{},
+		spawned:     map[string]bool{},
+		procRoot:    cfg.ProcRoot,
+	}
+	if a.procRoot == "" {
+		a.procRoot = defaultProcRoot
 	}
 	if a.advertise == "" {
 		a.advertise = defaultAdvertiseURL(cfg.Addr)
@@ -335,6 +350,11 @@ func (a *App) BrainInboxID() string { return a.brainInboxID }
 // done. v1 fails fast: a definitive remote-loop error is logged and the
 // loop ends.
 func (a *App) Run(ctx context.Context) error {
+	// Orphan recovery (spec §8.7) runs BEFORE any loop starts, so no spawn
+	// can race the registry reconciliation: a freshly started foreman has no
+	// live worker children, and jobs its previous process left 'running' are
+	// failed (crash) here so their retries re-arm.
+	a.recoverOrphans(ctx)
 	if err := a.pushCapabilities(ctx); err != nil {
 		log.Printf("foremanapp: initial capabilities push: %v", err)
 	}

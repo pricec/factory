@@ -318,7 +318,8 @@ cancel/supersede transitions from the 2026-11-15 amendment):
 
 - `pending -> dispatched`
 - `dispatched -> running`
-- `running -> {done, failed, timed_out}`
+- `running -> {done, failed, timed_out}` (`failed` also via a startup
+  orphan result after a foreman restart, 2026-11-16 amendment, §8.7)
 - `failed -> dispatched` (retry, #10)
 - `failed -> dead` (#10)
 - `pending -> {cancelled, superseded}` (cancel API, 2026-11-15 amendment)
@@ -367,6 +368,11 @@ payload and `GET /v1/jobs/{id}`.
   `timed_out`.
 - Offline foreman's jobs are left as-is unless past timeout + grace ->
   `timed_out`.
+- Foreman restart orphans (2026-11-16 orphan-recovery amendment, §8.7): a
+  restarted foreman fails its own running jobs that have no live worker
+  process at startup (`crash`, retry armed). The sweeper above is the
+  backstop for what that pass cannot reach; its `timed_out` is terminal and
+  never retries.
 
 ### 6.3 Foremen registry & liveness (#9, #12, #2)
 
@@ -924,6 +930,73 @@ sentence stay byte-identical across runners.
 Kill the entire process group at `timeout_s`; post a JobResult with
 `error.kind = timeout`.
 
+### 8.7 Worker lifecycle across a foreman restart (2026-11-16 orphan-recovery amendment)
+
+Workers are children of the foreman process (§8.1, §8.4): their goroutine,
+process group and per-job credentials all die with it. The factory does not
+learn of the restart by itself, so a job the previous foreman process was
+running stays `running` at the factory with nothing behind it. Live
+incident: brain-claude-routing job `job_01M7J7SH29WG7T4WQFFKNZD3H1`
+dispatched 13:12:24Z; the foreman restarted 13:14:36Z; the worker died
+mid-flight; the registry kept `running` until an operator cancelled it at
+13:45Z. This amendment makes a starting foreman reconcile the registry
+against the processes it actually has.
+
+**When and what.** Once per foreman process start, inside `Run`, before any
+loop starts (the inbox client, capabilities push, brain queue, parent
+forwarder). No spawn can race the pass: a job's worker exists only after a
+spawn, and no spawn path runs before the loops. The pass covers only jobs
+owned by THIS foreman:
+
+- It lists `GET /v1/jobs?state=running&foreman=<owner>&limit=1000` once for
+  each owner spelling a foreman's jobs carry in `foreman_id`: `foreman:{id}`
+  (the inbox identity) and the bare `{id}`. A returned row whose
+  `foreman_id` is not one of those spellings is ignored. Another foreman's
+  jobs are never listed, probed, or posted.
+- The reconciled state is `running` only. `dispatched` is not reconciled: the
+  foreman's durable inbox may still hold its unacknowledged `job.request`,
+  and failing the job could race its re-spawn. `pending` and `failed` have no
+  worker (a `failed` job's retry is already armed at the factory). Terminal
+  jobs are not touched.
+
+**Live workers are protected.** A job is live when some process's working
+directory is its job directory `<data>/jobs/<job_id>` or lies beneath it.
+That holds for a worker child, which runs with the job directory as its cwd
+(§8.4), and for anything it started that still has that cwd. The probe reads
+`/proc/*/cwd`. Exited processes and processes owned by another user are
+ignored. Any other read error aborts the whole pass, so nothing is failed
+without a complete view of the process table. A job this process spawned
+(recorded at spawn) is never reconciled. A live job stays `running`; its
+worker's results still post normally, because its credentials are still
+valid.
+
+**Orphans are failed loudly, and the retry re-arms.** For each job with no
+live worker, the foreman posts one `job.result` to `factory:main`:
+`from: foreman:{id}`, `status: failed`, `error.kind: crash`, summary
+`worker orphaned by foreman restart`, and an `error.message` naming the job
+and the restart. The factory applies it through the ordinary result path
+(`running -> failed`, §6.1) and arms the crash retry (§6.4: 2 retries on the
+30s / 2m backoff). The picker then re-dispatches the same job id (§6.4), or
+the job dead-letters once retries are exhausted. The result is
+terminal-idempotent (§6.4): a late genuine result for the same job is
+ignored. The foreman also revokes the job's worker credentials (§7.4); with
+no process behind them they are dead.
+
+**Failure handling.**
+
+- Registry listing fails: the pass retries up to 5 attempts, 2s apart, at
+  startup. If every attempt fails, the foreman still starts, logs
+  `ORPHAN RECOVERY SKIPPED`, and any stranded jobs fall to the §6.2 sweeper.
+- A result post fails: the pass continues with the remaining jobs. The
+  failed job stays `running` until the next foreman start or the sweeper.
+- A listing that returns the full 1000-row page is logged as truncated; the
+  remainder is handled by the next start.
+
+**Observability.** Each orphan logs `ORPHAN <job_id>`. The registry carries
+the message in `last_error`, and it surfaces in `GET /v1/jobs/{id}` and the
+dead-letter view if retries exhaust. A pass logs its outcome: listed,
+orphaned, live, and local job ids.
+
 ## 9. MCP surfaces
 
 ### 9.1 Common mechanics (#6, #15, #17, #18, #19)
@@ -1339,6 +1412,7 @@ outside the `result_schema` subset at validation time (#3).
 | MCP description budgets | worker < 1KB; foreman < 1.5KB; factory < 2KB (2026-11-15 amendment) | #17, #18, #19 |
 | JobSpec defaults | `timeout_s` 300; `priority` 5 (1-9, 9 highest); `budget` `{max_prompt_bytes 32768, max_output_tokens 8192, max_cost_usd 5.0}` | #3 |
 | Long-pending alert | `pending` with no matching online foreman for > 30 min -> one `notify.pending` in `planner:main` (dedupe per job per pending episode); check tick 1 min | 2026-11-15 amendment |
+| Foreman orphan recovery | startup pass before any loop; listing 1000 rows per owner spelling; 5 attempts, 2s apart; orphan result kind `crash` | 2026-11-16 orphan-recovery amendment, §8.7 |
 
 ---
 
