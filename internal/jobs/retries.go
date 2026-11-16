@@ -129,7 +129,10 @@ func NewRetryPicker(store *Store) *RetryPicker {
 
 // Pump runs one pick pass: failed jobs with next_attempt_at <= now get
 // attempts++, next_attempt_at cleared, and are re-dispatched (failed ->
-// dispatched) to their previous foreman. Returns how many were re-dispatched.
+// dispatched) to their previous foreman. A foreman-pinned job (§6.7)
+// retries to its pin by construction: its previous foreman IS the pin
+// (the pin is the only foreman it ever dispatched to), so retries never
+// consult the Matcher. Returns how many were re-dispatched.
 func (p *RetryPicker) Pump(ctx context.Context) (int, error) {
 	rows, err := p.store.db.QueryContext(ctx,
 		`SELECT id, attempts, next_attempt_at, foreman_id FROM jobs

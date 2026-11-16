@@ -71,6 +71,8 @@ func Handler(cfg Config) (http.Handler, error) {
 			"requires entries are capability tag NAMES - accepted forms: os:linux, arch:amd64, " +
 			"tools:<tool>, or a bare tag name (os, arch, tools); NEVER bare values like linux " +
 			"or amd64 (rejected as unknown_requires). " +
+			"foreman: optional explicit pin (bare or foreman:-prefixed id) - wins over requires " +
+			"matching; unknown foreman errors; offline pin pends until it returns. " +
 			"tier: flash (cheapest, default), default (Flash max-thinking), hardest (strongest); " +
 			"pick the cheapest that works. Refused past the spend cap.",
 	}, createJobTool(cfg))

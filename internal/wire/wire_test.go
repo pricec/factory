@@ -225,6 +225,9 @@ func TestSpecValidate(t *testing.T) {
 		}, false},
 		{"reject unprefixed parent_job_id", func(s *JobSpec) { s.ParentJobID = "abc" }, true},
 		{"reject self parent_job_id", func(s *JobSpec) { s.ParentJobID = s.ID }, true},
+		{"ok foreman pin (full form, §6.7)", func(s *JobSpec) { s.Foreman = "foreman:server" }, false},
+		{"ok foreman pin (bare form pre-normalization)", func(s *JobSpec) { s.Foreman = "server" }, false},
+		{"reject whitespace-only foreman pin", func(s *JobSpec) { s.Foreman = "   " }, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

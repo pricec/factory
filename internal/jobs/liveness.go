@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/pricec/factory/internal/notify"
+	"github.com/pricec/factory/internal/registry"
 )
 
 // Liveness implements notify.Observer (spec §6.3): activity and connects
@@ -69,6 +70,25 @@ func (s *Store) Foremen(ctx context.Context) ([]Foreman, error) {
 		out = append(out, f)
 	}
 	return out, rows.Err()
+}
+
+// FindForeman resolves a bare or foreman:-prefixed foreman reference
+// against the registry snapshot (spec §6.7 foreman pin): the returned
+// row is the registered foreman ref names; ok is false when ref names
+// no registered foreman, so the create paths reject it and the pickers
+// keep the job pending. found-but-offline is the caller's dispatch
+// decision: the pin never falls back to the Matcher.
+func FindForeman(ctx context.Context, s *Store, ref string) (f Foreman, ok bool, err error) {
+	foremen, err := s.Foremen(ctx)
+	if err != nil {
+		return Foreman{}, false, err
+	}
+	for _, row := range foremen {
+		if registry.SameForeman(row.ID, ref) {
+			return row, true, nil
+		}
+	}
+	return Foreman{}, false, nil
 }
 
 // Sweeper marks timed-out jobs and offline foremen (spec §6.2, §6.3). Pump

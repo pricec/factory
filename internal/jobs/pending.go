@@ -69,6 +69,26 @@ func (p *PendingPicker) Pump(ctx context.Context) (int, error) {
 
 	dispatched := 0
 	for _, c := range candidates {
+		// A pinned job never goes through the Matcher (spec §6.7
+		// foreman pin): it dispatches when its pinned foreman is
+		// online and pends otherwise - the pin is the operator's
+		// routing decision, so no capability fallback can move the
+		// job to a different foreman.
+		if c.spec.Foreman != "" {
+			pin, found, err := FindForeman(ctx, p.store, c.spec.Foreman)
+			if err != nil {
+				return dispatched, err
+			}
+			if !found || !pin.Online {
+				continue
+			}
+			if err := p.store.Dispatch(ctx, c.id, pin.ID); err != nil {
+				return dispatched, err
+			}
+			log.Printf("jobs: dispatched pending %s to pinned %s", c.id, pin.ID)
+			dispatched++
+			continue
+		}
 		f, ok, err := p.matcher.Match(ctx, c.spec.Requires)
 		if err != nil {
 			return dispatched, err

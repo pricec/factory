@@ -249,6 +249,7 @@ a different, fixed curve.)
   "payload": {},
   "result_schema": {},
   "requires": ["gpu"],
+  "foreman": "foreman:server",
   "tier": "flash",
   "timeout_s": 300,
   "priority": 5,
@@ -265,6 +266,13 @@ a different, fixed curve.)
 Defaults shown; `priority` 1-9, 9 highest (#3). `tier` selects the
 worker's model tier (#28, #29): `flash` (or absent - the cost-biased
 default), `default`, or `hardest`; see §6.5.
+
+`foreman` (2026-11-16 foreman-pin amendment, §6.7) is the explicit
+routing pin: when set, the job runs on that foreman instead of the
+Matcher's capability pick. Absent on ordinary matcher-dispatched jobs;
+when present it is the full `foreman:{id}` form at rest (the create
+paths normalize both forms, §7.3). `requires` stay informational on a
+pinned job.
 
 `parent_job_id` (2026-11-15 sub-spawning amendment, §9.2) appears only on
 child jobs spawned by a worker's `spawn_child` tool and is absent otherwise
@@ -535,6 +543,26 @@ factory planner's list view carries summaries only (#7, #19).
   deletes the stub (#8, #12).
 - No matching foreman: the job stays `pending`, log once (visible via
   `/v1/jobs`) (#8).
+- Explicit foreman pin (2026-11-16 amendment): a JobSpec's `foreman`
+  field (§5.1) routes the job explicitly - the pin WINS over the
+  Matcher, and a pinned job is never capability-matched. The create
+  paths (MCP `create_job`, `POST /v1/jobs`) normalize the pin (bare id
+  or `foreman:{id}`, §7.3) and resolve it against the registry: a pin
+  naming no registered foreman is a hard error (`unknown_foreman`, the
+  §6.9 message_foreman contract - it never parks a job pending behind a
+  typo); a registered, online foreman dispatches immediately; a
+  registered, offline foreman leaves the job `pending` with a loud
+  `warnings` entry, and the pending picker dispatches it when that
+  foreman returns (never to a different one - no capability fallback).
+  A pinned job skips creation-time requires validation: requires stay
+  informational on its spec, and the tag-name rules exist to prevent
+  silent matcher parking, which a pin cannot suffer. Retries re-dispatch
+  to the job's previous foreman (§6.4), which for a pinned job is always
+  the pin. Schedules carry the pin in the template, so every fired run
+  lands on the same foreman (§6.8). Rationale: dispatching agents were
+  pinned out of the routing decision - the Matcher's tags could not
+  express "this task belongs on THAT machine", and mis-routed requests
+  had no override.
 - Pending picker goroutine (10s tick, fake-clockable) (#27): every `pending`
   job is re-matched each pass, oldest first; a qualifying online foreman
   dispatches it (`pending -> dispatched` via the §6.1 transition), envelope
@@ -552,6 +580,11 @@ factory planner's list view carries summaries only (#7, #19).
   tags living only on offline foremen). A pending job that DOES match an
   online foreman is skipped: the pending picker dispatches it on its next
   pass, so a job merely queued behind a deliberate hold never alerts.
+  A pinned pending job (2026-11-16 foreman-pin amendment) is judged by
+  its pin instead of the Matcher: it alerts only while its pinned
+  foreman is offline or unregistered, the alert names the pin (its
+  requires ride along as informational), and a pinned job whose foreman
+  is online never alerts - the pending picker dispatches it.
   Dedupe is per job per pending episode (process-local, at-least-once like
   the dispatch notifier #20): one alert until the job leaves `pending`; a
   deadletter requeue (§6.4) starts a fresh episode and re-alerts.
@@ -566,13 +599,17 @@ factory planner's list view carries summaries only (#7, #19).
   `schedule_runs`: unique `(schedule_id, run_at)` - makes ticks idempotent.
 - Ticker goroutine (fake-clockable); on fire: instantiate a JobSpec (new ULID
   id, `created_at = run_at`) -> `jobs.Create` + dispatch via the Matcher.
+  A template's `foreman` pin (§6.7, 2026-11-16 amendment) rides every
+  fired run: pinned runs dispatch when the pinned foreman is online and
+  pend otherwise - the Matcher is bypassed, so the schedule stays on the
+  pinned machine.
 
 ### 6.9 Control-plane HTTP API (#8, #9, #10, #12, #13)
 
 | Method & path | Notes |
 |---|---|
 | `GET /v1/jobs?state=&foreman=` | filter by state and foreman (#9) |
-| `POST /v1/jobs` | UI twin of the MCP `create_job` tool (§9.4): body `{task, requires[], result_schema, tier, timeout_s, priority, schedule_cron}`; runs the same spend breaker + capability match (no match -> `pending`); `201 + {job_id, state, foreman}`. `requires` entries are tag names, validated at creation against the union of registered foremen tag keys (§6.7, 2026-11-15 amendment): unknown tag names -> `400 unknown_requires`; a loud `warnings` array rides the 201 when nothing could be validated (no foremen registered) |
+| `POST /v1/jobs` | UI twin of the MCP `create_job` tool (§9.4): body `{task, requires[], result_schema, tier, timeout_s, priority, schedule_cron, foreman?, task_id?}`; runs the same spend breaker + capability match (no match -> `pending`); `201 + {job_id, state, foreman}`. `requires` entries are tag names, validated at creation against the union of registered foremen tag keys (§6.7, 2026-11-15 amendment): unknown tag names -> `400 unknown_requires`; a loud `warnings` array rides the 201 when nothing could be validated (no foremen registered). `foreman` (2026-11-16 foreman-pin amendment, §6.7) pins the job to that foreman (bare or `foreman:{id}` form): the pin wins over the Matcher, requires validation is skipped (requires stay informational), an unknown foreman is `404 unknown_foreman` (the `POST /v1/foremen/{id}/messages` contract), and an offline pin leaves the job `pending` with a `warnings` entry until it returns |
 | `POST /v1/foremen/{id}/messages` | UI twin of the MCP `message_foreman` tool (§9.4): body `{type, payload, job_id?}` posted from the planner identity; `201` + envelope. `{id}` accepts the bare foreman id or the full `foreman:{id}` form - both normalize to the same inbox (§7.3), never a double-prefixed one. `payload` is required (any JSON value; `{}` for an empty body); a null/missing payload is `400`. An id matching no registered foreman is `404 unknown_foreman` - posting never opens an inbox no foreman consumes (2026-11-14 amendment) |
 | `GET /v1/jobs/{id}` | (#9) the job record; plus `task_id` when the job is directly linked to a task (§9.5.2; 2026-11-16 deploy-18 follow-up - omitted when unlinked, a read never writes lineage links) |
 | `POST /v1/jobs/{id}/cancel` | Cancel/supersede a job (2026-11-15 amendment, §6.1): optional body `{reason?, terminal_state?}` with `terminal_state` = `cancelled` (default) \| `superseded`; an empty body is a plain cancel. Every non-terminal state moves to that terminal state; every terminal job is rejected `409 already_terminal`; unknown job `404`; malformed body `400`. `200` + the refreshed job record. UI twin of the MCP `cancel_job` tool (§9.4) |
@@ -1255,7 +1292,8 @@ Tools (exact):
   over_budget}]}` (summaries only, per #7; record-wrapped per the
   `list_foremen` amendment).
 - `create_job(task, requires?, result_schema?, tier?, timeout_s?, priority?,
-  schedule_cron?)` - ad hoc dispatch via the Matcher interface; `requires`
+  schedule_cron?, foreman?)` - ad hoc dispatch via the Matcher interface;
+  `requires`
   entries are capability tag names - accepted forms `os:linux`,
   `arch:amd64`, `tools:<name>`, or a bare tag name (`os`, `arch`,
   `tools`) - never capability values like `linux`/`amd64`; entries naming
@@ -1274,7 +1312,12 @@ Tools (exact):
   S2, §9.5.2) files the job under a task (`task_jobs`), defaulting to the
   session's woken task; the link is written before dispatch, the result
   carries `task_id`, and an unknown task is a tool error with no job
-  created.
+  created. Optional `foreman` (2026-11-16 foreman-pin amendment, §6.7)
+  pins the job to that foreman (bare or `foreman:{id}` form): the pin
+  wins over the Matcher, requires validation is skipped (requires stay
+  informational), an unknown foreman is a tool error (`unknown
+  foreman`), and an offline pin leaves the job pending with a
+  `warnings` entry until the foreman returns.
 - `read_result(job_id)` - full result payload; the ONLY path by which full
   payloads enter LLM context (#19; #7 point 3).
 - `cancel_job(job_id, reason?, supersede?)` - terminal-cancels a
@@ -1688,6 +1731,7 @@ Pinned status codes:
 | `409` | duplicate `job.result` for the same `(inbox_id, job_id)`; response carries the original envelope id | #1 |
 | `409` | cancel/supersede of a terminal job (`already_terminal`, `POST /v1/jobs/{id}/cancel`) | 2026-11-15 amendment |
 | `404` | `POST /v1/foremen/{id}/messages` where `{id}` matches no registered foreman (`unknown_foreman`) | 2026-11-14 amendment |
+| `404` | `POST /v1/jobs` / MCP `create_job` whose `foreman` pin matches no registered foreman (`unknown_foreman`, §6.7) | 2026-11-16 foreman-pin amendment |
 | `400` | job creation (`POST /v1/jobs`, MCP `create_job`) whose `requires` entries name no registered foreman tag key (`unknown_requires`) | 2026-11-15 amendment |
 | `404` | cancel of an unknown job id (`POST /v1/jobs/{id}/cancel`) | 2026-11-15 amendment |
 | `404` | unknown task id (`POST /v1/chat` / `POST /v1/jobs` with `task_id`, `GET /v1/tasks/{id}`; code `unknown_task`) | 2026-11-16 inbox redesign S2 |

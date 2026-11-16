@@ -3,6 +3,7 @@ package wire
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -52,12 +53,20 @@ type JobSpec struct {
 	Payload      json.RawMessage `json:"payload,omitempty"`
 	ResultSchema json.RawMessage `json:"result_schema,omitempty"`
 	Requires     []string        `json:"requires,omitempty"`
-	Tier         string          `json:"tier,omitempty"`
-	TimeoutS     int             `json:"timeout_s"`
-	Priority     int             `json:"priority"`
-	Budget       Budget          `json:"budget"`
-	CreatedBy    string          `json:"created_by,omitempty"`
-	CreatedAt    string          `json:"created_at,omitempty"`
+	// Foreman is the explicit routing pin (§6.7, 2026-11-16
+	// foreman-pin amendment): when set, the job dispatches to that
+	// foreman instead of the Matcher's capability pick. Full
+	// `foreman:{id}` form at rest (the create paths normalize both
+	// forms via registry.InboxID); requires stay informational on a
+	// pinned job - the pin is the routing decision and is never
+	// capability-matched.
+	Foreman   string `json:"foreman,omitempty"`
+	Tier      string `json:"tier,omitempty"`
+	TimeoutS  int    `json:"timeout_s"`
+	Priority  int    `json:"priority"`
+	Budget    Budget `json:"budget"`
+	CreatedBy string `json:"created_by,omitempty"`
+	CreatedAt string `json:"created_at,omitempty"`
 	// ParentJobID is set on child jobs spawned by a worker via the
 	// worker-MCP spawn_child tool (§9.2, 2026-11-15 sub-spawning
 	// amendment): it names the parent job, whose per-job inbox receives a
@@ -136,6 +145,12 @@ func (s *JobSpec) validate(requireID bool) error {
 		if r == "" {
 			return fmt.Errorf("requires: entries must be non-empty")
 		}
+	}
+	// The pin is normalized to the full foreman:{id} form by the create
+	// paths before Validate (§6.7); a whitespace-only pin can only come
+	// from a hand-crafted spec and would silently pin nothing.
+	if s.Foreman != "" && strings.TrimSpace(s.Foreman) == "" {
+		return fmt.Errorf("foreman: must be a foreman id, got %q", s.Foreman)
 	}
 	if s.ParentJobID != "" {
 		if !isJobID(s.ParentJobID) {

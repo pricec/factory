@@ -298,3 +298,61 @@ func TestPendingAlertEmptyRequiresAllOffline(t *testing.T) {
 		t.Errorf("alert = %+v, want job id and the all-offline diagnosis", alerts[0])
 	}
 }
+
+// TestPendingAlertPinnedJob: a pinned pending job is judged by its pin
+// (spec §6.7 foreman pin), never by the Matcher - its requires match a
+// different online foreman, and the alert still names the offline pin.
+// A pinned job whose foreman is online never alerts: the pending picker
+// dispatches it.
+func TestPendingAlertPinnedJob(t *testing.T) {
+	e := newQuietEnv(t)
+	// The pinned foreman pairs then goes dark; another foreman with
+	// matching tags stays online, so a Matcher-based diagnosis would
+	// wrongly call the job dispatchable.
+	_ = e.pair("beta", map[string]string{"os": "linux"})
+	_ = e.pair("alpha", map[string]string{"os": "linux", "gpu": "a100"})
+	_ = e.markOffline("foreman:beta")
+
+	// Pin the job to the offline beta; requires match online alpha, but
+	// the pin never consults the Matcher (§6.7): the job pends.
+	var created struct {
+		JobID string `json:"job_id"`
+		State string `json:"state"`
+	}
+	body := map[string]any{"task": "pinned smoke", "foreman": "beta", "requires": []string{"os:linux"}}
+	if status := e.do("POST", "/v1/jobs", "", body, &created); status != http.StatusCreated || created.State != jobs.StatePending {
+		t.Fatalf("create = %d %+v, want 201 pending behind the offline pin", status, created)
+	}
+
+	e.clock.Advance(31 * time.Minute)
+	if n, err := e.a.PendingAlertPass(e.ctx); err != nil || n != 1 {
+		t.Fatalf("pass: posted=%d err=%v, want 1 alert", n, err)
+	}
+	alerts := e.pendingAlerts()
+	if len(alerts) != 1 {
+		t.Fatalf("alerts = %d, want 1", len(alerts))
+	}
+	if !strings.Contains(alerts[0].Title, created.JobID) {
+		t.Errorf("title %q lacks job id %q", alerts[0].Title, created.JobID)
+	}
+	if !strings.Contains(alerts[0].Body, "pinned foreman") || !strings.Contains(alerts[0].Body, "foreman:beta") {
+		t.Errorf("body %q lacks the pinned-foreman diagnosis", alerts[0].Body)
+	}
+
+	// The pin returns: a freshly created pinned job (still pending in
+	// the quiet env - no picker runs) never alerts while its foreman is
+	// online, and the previously alerted episode stays deduped.
+	jobs.NewLiveness(e.a.Jobs()).OnConnect("foreman:beta")
+	created = struct {
+		JobID string `json:"job_id"`
+		State string `json:"state"`
+	}{}
+	body = map[string]any{"task": "pinned online smoke", "foreman": "foreman:beta"}
+	if status := e.do("POST", "/v1/jobs", "", body, &created); status != http.StatusCreated {
+		t.Fatalf("online-pin create status = %d, want 201", status)
+	}
+	e.clock.Advance(time.Hour)
+	if n, err := e.a.PendingAlertPass(e.ctx); err != nil || n != 0 {
+		t.Fatalf("second pass: posted=%d err=%v, want 0 - an online pin never alerts", n, err)
+	}
+}

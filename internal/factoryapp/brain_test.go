@@ -245,3 +245,88 @@ func TestCreateJobSchedule(t *testing.T) {
 		t.Fatalf("template task = %q", tmpl.Task)
 	}
 }
+
+// TestCreateJobForemanPin pins the §6.7 foreman-pin contract on the UI
+// twin (POST /v1/jobs): the pin wins over the real capability Matcher
+// (beta takes the job even though alpha matches the requires), requires
+// validation is skipped for pinned jobs, an unknown foreman is a 404
+// (the message_foreman contract), and an offline pin pends with a loud
+// warning.
+func TestCreateJobForemanPin(t *testing.T) {
+	e := newEnv(t)
+
+	// alpha has gpu (the requires match), beta does not.
+	e.pair("alpha", map[string]string{"gpu": "a100"})
+	e.pair("beta", map[string]string{"os": "linux"})
+
+	// Unknown foreman: 404 unknown_foreman, no job created.
+	var errResp map[string]any
+	if status := e.do("POST", "/v1/jobs", "", map[string]any{
+		"task": "pin to nobody", "foreman": "ghost",
+	}, &errResp); status != http.StatusNotFound {
+		t.Fatalf("unknown foreman status = %d, want 404: %v", status, errResp)
+	}
+	if raw, _ := json.Marshal(errResp["error"]); !strings.Contains(string(raw), "unknown_foreman") {
+		t.Fatalf("error = %s, want unknown_foreman", raw)
+	}
+
+	// The pin wins over the Matcher: beta (no gpu) takes the job even
+	// though requires gpu matches alpha. The requires entries are
+	// capability VALUES - validation would 400 unknown_requires -
+	// proving pinned jobs skip requires validation.
+	var created struct {
+		JobID    string   `json:"job_id"`
+		State    string   `json:"state"`
+		Foreman  string   `json:"foreman"`
+		Warnings []string `json:"warnings"`
+	}
+	body := map[string]any{
+		"task":     "run on beta",
+		"foreman":  "beta",
+		"requires": []string{"gpu", "linux"},
+	}
+	if status := e.do("POST", "/v1/jobs", "", body, &created); status != http.StatusCreated {
+		t.Fatalf("pinned create status = %d, want 201", status)
+	}
+	if created.State != "dispatched" || created.Foreman != "foreman:beta" {
+		t.Fatalf("created = %+v, want dispatched to the pinned foreman:beta", created)
+	}
+	if len(created.Warnings) != 0 {
+		t.Errorf("warnings = %v, want none for an online pin", created.Warnings)
+	}
+	var job jobs.Job
+	if status := e.do("GET", "/v1/jobs/"+created.JobID, "", nil, &job); status != http.StatusOK {
+		t.Fatalf("get job status = %d", status)
+	}
+	if job.ForemanID != "foreman:beta" {
+		t.Errorf("foreman_id = %q, want foreman:beta", job.ForemanID)
+	}
+	if job.Spec.Foreman != "foreman:beta" {
+		t.Errorf("spec foreman = %q, want the normalized full form", job.Spec.Foreman)
+	}
+
+	// Offline pin: 201 pending, loud warning, no dispatch.
+	jobs.NewLiveness(e.a.Jobs()).OnDisconnect("foreman:beta")
+	created = struct {
+		JobID    string   `json:"job_id"`
+		State    string   `json:"state"`
+		Foreman  string   `json:"foreman"`
+		Warnings []string `json:"warnings"`
+	}{}
+	body = map[string]any{"task": "wait for beta", "foreman": "foreman:beta"}
+	if status := e.do("POST", "/v1/jobs", "", body, &created); status != http.StatusCreated {
+		t.Fatalf("offline-pin create status = %d, want 201", status)
+	}
+	if created.State != "pending" || created.Foreman != "" {
+		t.Fatalf("created = %+v, want pending with no foreman yet", created)
+	}
+	if len(created.Warnings) == 0 || !strings.Contains(created.Warnings[0], "offline") {
+		t.Fatalf("warnings = %v, want the offline-pin warning", created.Warnings)
+	}
+	if status := e.do("GET", "/v1/jobs/"+created.JobID, "", nil, &job); status != http.StatusOK {
+		t.Fatalf("get job status = %d", status)
+	}
+	if job.State != "pending" || job.ForemanID != "" {
+		t.Errorf("stored offline-pin job = %+v, want pending with no foreman", job)
+	}
+}

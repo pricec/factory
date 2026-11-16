@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/pricec/factory/internal/registry"
@@ -118,5 +119,73 @@ func TestPendingPickerDispatchesEveryPendingJob(t *testing.T) {
 	}
 	if len(pending) != 0 {
 		t.Fatalf("pending jobs left = %d, want 0", len(pending))
+	}
+}
+
+// TestPendingPickerForemanPin pins the §6.7 foreman-pin semantics at the
+// picker: a pinned job dispatches to its pinned foreman when online -
+// never to a matcher pick, even one whose capabilities would match - and
+// pends while the pin is offline or unregistered (the stub source would
+// match alpha with gpu, proving the pin's precedence).
+func TestPendingPickerForemanPin(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name        string
+		pin         string
+		online      bool
+		registered  bool
+		wantState   string
+		wantForeman string
+	}{
+		{"online pin dispatches to the pin", "foreman:beta", true, true, StateDispatched, "foreman:beta"},
+		{"bare pin form matches the full-id row", "beta", true, true, StateDispatched, "foreman:beta"},
+		{"offline pin pends", "foreman:beta", false, true, StatePending, ""},
+		{"unregistered pin pends", "foreman:ghost", true, false, StatePending, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := openStore(t)
+			ctx := context.Background()
+			// The store's own registry is the pin's source (the
+			// production wiring); rows carry the full id the way
+			// pairing upserts them. The matcher's stub source only
+			// serves the requires path.
+			if err := s.UpsertForeman(ctx, "foreman:beta", json.RawMessage(`{"os":"linux"}`)); err != nil {
+				t.Fatal(err)
+			}
+			live := NewLiveness(s)
+			if tc.online {
+				live.OnConnect("foreman:beta")
+			} else {
+				live.OnDisconnect("foreman:beta")
+			}
+			p := NewPendingPicker(s, &registry.CapabilityMatcher{Source: &stubForemen{rows: []registry.Foreman{
+				{ID: "foreman:alpha", Online: true, Capabilities: map[string]string{"gpu": "true"}},
+			}}})
+
+			// requires gpu would match stub-alpha; the pin must win.
+			spec := newSpec(t, func(sp *wire.JobSpec) {
+				sp.Foreman = tc.pin
+				sp.Requires = []string{"gpu"}
+			})
+			if err := s.Create(ctx, spec); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := p.Pump(ctx); err != nil {
+				t.Fatalf("Pump: %v", err)
+			}
+			job, ok, err := s.Get(ctx, spec.ID)
+			if err != nil || !ok {
+				t.Fatalf("Get: %v (ok %v)", err, ok)
+			}
+			if job.State != tc.wantState {
+				t.Errorf("state = %s, want %s", job.State, tc.wantState)
+			}
+			if job.ForemanID != tc.wantForeman {
+				t.Errorf("foreman_id = %q, want %q", job.ForemanID, tc.wantForeman)
+			}
+		})
 	}
 }

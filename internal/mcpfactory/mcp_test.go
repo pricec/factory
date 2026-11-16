@@ -28,9 +28,11 @@ type stubMatcher struct {
 	foreman  registry.Foreman
 	ok       bool
 	requires []string
+	calls    int
 }
 
 func (m *stubMatcher) Match(_ context.Context, requires []string) (registry.Foreman, bool, error) {
+	m.calls++
 	m.requires = requires
 	return m.foreman, m.ok, nil
 }
@@ -976,5 +978,81 @@ func TestRaiseAlertTool(t *testing.T) {
 	msg := toolError(t, "raise_alert", e.callTool("raise_alert", map[string]any{"priority": 1, "title": "x"}))
 	if !strings.Contains(msg, "not configured") {
 		t.Errorf("unconfigured error = %q", msg)
+	}
+}
+
+// TestCreateJobForemanPin pins the §6.7 foreman-pin contract on the
+// planner's create path: the pin wins over the Matcher (which is never
+// consulted), skips requires validation (requires stay informational),
+// errors on an unregistered foreman, and pends with a loud warning while
+// the pinned foreman is offline.
+func TestCreateJobForemanPin(t *testing.T) {
+	e := newEnv(t, budgets.DefaultConfig())
+	ctx := context.Background()
+	// newEnv registered foreman "alpha" in the jobs store's registry
+	// (the pin's real source) and left it online like pairing does.
+
+	// Unknown foreman: a hard tool error, no job created (the
+	// message_foreman contract - a pin never parks behind a typo).
+	msg := toolError(t, "create_job", e.callTool("create_job", map[string]any{
+		"task": "pin to nobody", "foreman": "ghost",
+	}))
+	if !strings.Contains(msg, "unknown foreman") {
+		t.Fatalf("tool error = %q, want unknown foreman", msg)
+	}
+
+	// Online pin: dispatched to the pinned foreman's row. The requires
+	// entries are capability VALUES - validation would reject them with
+	// unknown_requires (§6.7) - proving a pinned job skips requires
+	// validation: its routing never consults requires.
+	e.matcher.calls = 0
+	e.matcher.requires = nil
+	sc := structured(t, resultOf(t, e.callTool("create_job", map[string]any{
+		"task":     "build on alpha",
+		"foreman":  "alpha",
+		"requires": []string{"linux", "amd64"},
+	})))
+	if sc["state"] != "dispatched" || sc["foreman"] != "alpha" {
+		t.Fatalf("created = %v, want dispatched to the pinned alpha", sc)
+	}
+	job, ok, err := e.store.Get(ctx, sc["job_id"].(string))
+	if err != nil || !ok {
+		t.Fatalf("store.Get: %v (ok %v)", err, ok)
+	}
+	if job.State != "dispatched" || job.ForemanID != "alpha" {
+		t.Fatalf("stored job = %+v, want dispatched to the pinned alpha row", job)
+	}
+	if job.Spec.Foreman != "foreman:alpha" {
+		t.Errorf("spec foreman = %q, want the normalized full form on the wire spec", job.Spec.Foreman)
+	}
+	if e.matcher.calls != 0 || len(e.matcher.requires) != 0 {
+		t.Errorf("matcher consulted for a pinned job: calls=%d requires=%v (§6.7: the pin wins)", e.matcher.calls, e.matcher.requires)
+	}
+
+	// Offline pin: pending with a loud warning; the pin still never
+	// consults the Matcher.
+	jobs.NewLiveness(e.store).OnDisconnect("alpha")
+	sc = structured(t, resultOf(t, e.callTool("create_job", map[string]any{
+		"task": "wait for alpha", "foreman": "foreman:alpha",
+	})))
+	if sc["state"] != "pending" {
+		t.Fatalf("state = %v, want pending while the pin is offline", sc["state"])
+	}
+	warned, _ := sc["warnings"].([]any)
+	if len(warned) == 0 || !strings.Contains(fmt.Sprint(warned[0]), "offline") {
+		t.Fatalf("warnings = %v, want the offline-pin warning", sc["warnings"])
+	}
+	if e.matcher.calls != 0 {
+		t.Errorf("matcher calls = %d, want 0 - an offline pin pends, it never falls back", e.matcher.calls)
+	}
+	job, ok, err = e.store.Get(ctx, sc["job_id"].(string))
+	if err != nil || !ok {
+		t.Fatalf("store.Get: %v (ok %v)", err, ok)
+	}
+	if job.State != "pending" || job.ForemanID != "" {
+		t.Fatalf("stored job = %+v, want pending with no foreman yet", job)
+	}
+	if job.Spec.Foreman != "foreman:alpha" {
+		t.Errorf("offline spec foreman = %q, want the normalized pin", job.Spec.Foreman)
 	}
 }

@@ -90,6 +90,37 @@ func (a *App) PendingAlertPass(ctx context.Context) (int, error) {
 		if a.alreadyAlerted(job.ID, job.UpdatedAt) {
 			continue // one alert per pending episode (spec §6.7)
 		}
+		// A pinned pending job never consults the Matcher (spec §6.7
+		// foreman pin): it is stuck only while its pinned foreman is
+		// offline or unregistered, and the alert says so - a
+		// requires-based diagnosis would mislead (the pin, not the
+		// tags, is why nothing ran).
+		if job.Spec.Foreman != "" {
+			pin, found, err := jobs.FindForeman(ctx, a.jobs, job.Spec.Foreman)
+			if err != nil {
+				return posted, fmt.Errorf("pin lookup %s: %w", job.ID, err)
+			}
+			if found && pin.Online {
+				continue // the pending picker dispatches it on its next pass
+			}
+			reason := "pinned foreman " + job.Spec.Foreman + " is not registered"
+			if found {
+				reason = "pinned foreman " + pin.ID + " is offline"
+				if pin.LastSeen != "" {
+					reason += " (last seen " + pin.LastSeen + ")"
+				}
+			}
+			a.raiseSystemAlert(ctx, alertPriorityPending,
+				"Job "+job.ID+" pending "+waited.Truncate(time.Minute).String()+" on a pinned foreman",
+				fmt.Sprintf("%s\nforeman pin: %s\nrequires (informational): %s; pending since %s",
+					reason, job.Spec.Foreman, strings.Join(job.Spec.Requires, ", "), job.UpdatedAt),
+				"factory:pending")
+			a.markAlerted(job.ID, job.UpdatedAt)
+			posted++
+			log.Printf("factoryapp: pending alert: job %s pending %s pinned to %s: %s",
+				job.ID, waited.Truncate(time.Minute), job.Spec.Foreman, reason)
+			continue
+		}
 		// A pending job that matches an online foreman is about to be
 		// dispatched by the pending picker (spec §6.7): not stuck, skip.
 		if _, ok, err := a.matcher.Match(ctx, job.Spec.Requires); err != nil {

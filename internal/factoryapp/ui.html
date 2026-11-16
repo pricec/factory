@@ -212,6 +212,7 @@
         <div class="row">
           <div><label>schedule (cron, optional)</label><input id="job-cron" placeholder="0 3 * * *"></div>
           <div><label>result schema (JSON, optional)</label><input id="job-schema" placeholder='{"type":"object"}'></div>
+          <div><label>foreman (optional pin)</label><input id="job-foreman" placeholder="videochat or foreman:videochat"></div>
         </div>
         <button type="submit">create job</button>
         <span class="result-note" id="job-note"></span>
@@ -777,6 +778,7 @@ $("createjob").onsubmit = async (ev) => {
   if ($("job-timeout").value) body.timeout_s = parseInt($("job-timeout").value, 10);
   if ($("job-priority").value) body.priority = parseInt($("job-priority").value, 10);
   if ($("job-cron").value.trim()) body.schedule_cron = $("job-cron").value.trim();
+  if ($("job-foreman").value.trim()) body.foreman = $("job-foreman").value.trim();
   if ($("job-schema").value.trim()) {
     try { body.result_schema = JSON.parse($("job-schema").value); }
     catch (e) { note.style.color = "var(--bad)"; note.textContent = "result schema is not valid JSON: " + e.message; return; }
@@ -784,8 +786,11 @@ $("createjob").onsubmit = async (ev) => {
   try {
     const created = await postJSON("/v1/jobs", body);
     note.style.color = "var(--ok)";
-    note.textContent = "created " + created.job_id + " → " + created.state + (created.foreman ? " (foreman " + created.foreman + ")" : " (no matching foreman; pending)");
+    let text = "created " + created.job_id + " → " + created.state + (created.foreman ? " (foreman " + created.foreman + ")" : " (no foreman yet; pending)");
+    if (created.warnings) text += " — " + created.warnings.join("; ");
+    note.textContent = text;
     $("job-task").value = "";
+    $("job-foreman").value = "";
     await loadJobs();
   } catch (e) { note.style.color = "var(--bad)"; note.textContent = e.message; }
 };

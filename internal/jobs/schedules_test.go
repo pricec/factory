@@ -609,3 +609,74 @@ func TestSchedulesHandler(t *testing.T) {
 		t.Errorf("list after delete = %d, want 0", len(list))
 	}
 }
+
+// TestSchedulerPinnedTemplate (§6.7 foreman pin): a template's foreman pin
+// rides every fired run. The pinned run dispatches to the pinned foreman
+// when online - the Matcher is never consulted, even though the stub
+// matcher would pick a different foreman - and pends when the pin is
+// offline.
+func TestSchedulerPinnedTemplate(t *testing.T) {
+	s := schedStore(t)
+	now := schedClock()
+	s.Now = func() time.Time { return *now }
+	ctx := context.Background()
+	m := &schedMatcher{foreman: registry.Foreman{ID: "foreman:alpha"}, ok: true}
+	sched := NewScheduler(s, m)
+
+	seed := func(online bool) {
+		t.Helper()
+		if err := s.UpsertForeman(ctx, "foreman:beta", json.RawMessage(`{}`)); err != nil {
+			t.Fatal(err)
+		}
+		live := NewLiveness(s)
+		if online {
+			live.OnConnect("foreman:beta")
+		} else {
+			live.OnDisconnect("foreman:beta")
+		}
+	}
+
+	seed(true)
+	mustCreateSchedule(t, s, "*/1 * * * *", schedTemplate(func(sp *wire.JobSpec) {
+		sp.Foreman = "foreman:beta"
+		sp.Requires = []string{"gpu"}
+	}))
+	*now = now.Add(time.Minute)
+	if n, err := sched.Pump(ctx); err != nil || n != 1 {
+		t.Fatalf("pump = (%d, %v), want (1, nil)", n, err)
+	}
+	fired := schedJobs(t, s)
+	if len(fired) != 1 || fired[0].State != StateDispatched || fired[0].ForemanID != "foreman:beta" {
+		t.Fatalf("fired = %+v, want dispatched to the pinned foreman:beta", fired)
+	}
+	if m.calls != 0 {
+		t.Errorf("matcher calls = %d, want 0 - the pin bypasses the Matcher (§6.7)", m.calls)
+	}
+	if fired[0].Spec.Foreman != "foreman:beta" {
+		t.Errorf("fired spec foreman = %q, want the pin to ride the spec", fired[0].Spec.Foreman)
+	}
+
+	// Offline pin: the next run pends for the pending picker; still no matcher.
+	firstID := fired[0].ID
+	seed(false)
+	*now = now.Add(2 * time.Minute)
+	if n, err := sched.Pump(ctx); err != nil || n != 1 {
+		t.Fatalf("pump = (%d, %v), want (1, nil)", n, err)
+	}
+	all := schedJobs(t, s)
+	if len(all) != 2 {
+		t.Fatalf("jobs = %d, want 2", len(all))
+	}
+	var second Job
+	for _, j := range all {
+		if j.ID != firstID {
+			second = j
+		}
+	}
+	if second.ID == "" || second.State != StatePending || second.ForemanID != "" {
+		t.Fatalf("second run = %+v, want pending with no foreman while the pin is offline", second)
+	}
+	if m.calls != 0 {
+		t.Errorf("matcher calls = %d, want 0 on the offline pin too", m.calls)
+	}
+}

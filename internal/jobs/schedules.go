@@ -278,7 +278,25 @@ func (s *Scheduler) Pump(ctx context.Context) (int, error) {
 			return enqueued, err
 		}
 		enqueued++
-		if s.matcher == nil {
+		// A pinned template job bypasses the Matcher (spec §6.7 foreman
+		// pin): it dispatches when the pinned foreman is online, else
+		// pends for the pending picker. The pin rides the template, so
+		// every scheduled run lands on the same foreman.
+		if spec.Foreman != "" {
+			pin, found, err := FindForeman(ctx, s.store, spec.Foreman)
+			switch {
+			case err != nil:
+				log.Printf("scheduler: job %s left pending: pin lookup: %v", spec.ID, err)
+			case !found:
+				log.Printf("scheduler: job %s left pending: pinned %s not registered", spec.ID, spec.Foreman)
+			case !pin.Online:
+				log.Printf("scheduler: job %s left pending: pinned %s offline", spec.ID, spec.Foreman)
+			default:
+				if err := s.store.Dispatch(ctx, spec.ID, pin.ID); err != nil {
+					return enqueued, err
+				}
+			}
+		} else if s.matcher == nil {
 			log.Printf("scheduler: job %s left pending: no matcher wired", spec.ID)
 		} else {
 			foreman, ok, err := s.matcher.Match(ctx, spec.Requires)

@@ -37,14 +37,18 @@ type (
 		Limit *int   `json:"limit,omitempty"`
 	}
 	createJobArgs struct {
-		Task         string   `json:"task"`
-		Requires     []string `json:"requires,omitempty"`
-		ResultSchema any      `json:"result_schema,omitempty"`
-		Tier         string   `json:"tier,omitempty"`
-		TimeoutS     *int     `json:"timeout_s,omitempty"`
-		Priority     *int     `json:"priority,omitempty"`
-		ScheduleCron string   `json:"schedule_cron,omitempty"`
-		TaskID       string   `json:"task_id,omitempty"`
+		Task     string   `json:"task"`
+		Requires []string `json:"requires,omitempty"`
+		// Foreman is the explicit routing pin (spec §6.7): bare or
+		// foreman:-prefixed id of the foreman the job runs on; empty
+		// means the Matcher's capability pick.
+		Foreman      string `json:"foreman,omitempty"`
+		ResultSchema any    `json:"result_schema,omitempty"`
+		Tier         string `json:"tier,omitempty"`
+		TimeoutS     *int   `json:"timeout_s,omitempty"`
+		Priority     *int   `json:"priority,omitempty"`
+		ScheduleCron string `json:"schedule_cron,omitempty"`
+		TaskID       string `json:"task_id,omitempty"`
 	}
 	readResultArgs struct {
 		JobID string `json:"job_id"`
@@ -182,30 +186,60 @@ func createJobTool(cfg Config) mcp.ToolHandlerFor[createJobArgs, any] {
 		if in.Priority != nil {
 			spec.Priority = *in.Priority
 		}
+		// The explicit routing pin (spec §6.7, 2026-11-16 foreman-pin
+		// amendment): normalized to the full foreman:{id} form, it
+		// replaces the Matcher's pick - the planner chose the foreman,
+		// so no capability fallback applies.
+		if in.Foreman != "" {
+			spec.Foreman = registry.InboxID(in.Foreman)
+		}
 		if err := spec.Validate(); err != nil {
 			return nil, nil, err
 		}
 
-		// Creation-time requires validation (spec §6.7, 2026-11-15
-		// amendment): entries must be tag names - bare or name:value -
-		// never capability values; an entry naming no registered tag key
-		// can never match, and the job would park pending silently.
-		warnings, err := cfg.Store.ValidateRequires(ctx, spec.Requires)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		// Ad hoc dispatch via the Matcher (spec §6.7): no matching foreman
-		// leaves the job pending.
+		// Dispatch decision (spec §6.7): the pin wins over the Matcher.
+		// A pinned job also skips creation-time requires validation -
+		// requires stay informational on its spec, and their tag-name
+		// rules would reject a job whose routing never consults them.
 		state, foreman := "pending", ""
-		if cfg.Matcher != nil {
-			f, ok, err := cfg.Matcher.Match(ctx, spec.Requires)
+		var warnings []string
+		if spec.Foreman != "" {
+			pin, found, err := jobs.FindForeman(ctx, cfg.Store, spec.Foreman)
 			if err != nil {
 				return nil, nil, err
 			}
-			if ok {
-				foreman = f.ID
-				state = "dispatched"
+			if !found {
+				return nil, nil, fmt.Errorf("unknown foreman %q: not registered (list_foremen lists registered foremen)", in.Foreman)
+			}
+			if pin.Online {
+				foreman, state = pin.ID, "dispatched"
+			} else {
+				// Loud, non-fatal: the pin is honored, the job just
+				// waits - the pending picker dispatches it when the
+				// foreman returns (§6.7).
+				warnings = append(warnings, "pinned foreman "+spec.Foreman+" is offline; the job pends until it returns")
+			}
+		} else {
+			// Creation-time requires validation (spec §6.7, 2026-11-15
+			// amendment): entries must be tag names - bare or name:value -
+			// never capability values; an entry naming no registered tag key
+			// can never match, and the job would park pending silently.
+			var err error
+			warnings, err = cfg.Store.ValidateRequires(ctx, spec.Requires)
+			if err != nil {
+				return nil, nil, err
+			}
+			// Ad hoc dispatch via the Matcher (spec §6.7): no matching foreman
+			// leaves the job pending.
+			if cfg.Matcher != nil {
+				f, ok, err := cfg.Matcher.Match(ctx, spec.Requires)
+				if err != nil {
+					return nil, nil, err
+				}
+				if ok {
+					foreman = f.ID
+					state = "dispatched"
+				}
 			}
 		}
 		if err := cfg.Store.Create(ctx, spec); err != nil {

@@ -19,8 +19,12 @@ import (
 // as the MCP create_job tool (§9.4) so the UI drives the identical path -
 // spend breaker, capability match, create, dispatch, optional schedule.
 type createJobRequest struct {
-	Task         string          `json:"task"`
-	Requires     []string        `json:"requires,omitempty"`
+	Task     string   `json:"task"`
+	Requires []string `json:"requires,omitempty"`
+	// Foreman is the explicit routing pin (spec §6.7): bare or
+	// foreman:-prefixed id of the foreman the job runs on; empty means
+	// the Matcher's capability pick.
+	Foreman      string          `json:"foreman,omitempty"`
 	ResultSchema json.RawMessage `json:"result_schema,omitempty"`
 	Tier         string          `json:"tier,omitempty"`
 	TimeoutS     int             `json:"timeout_s,omitempty"`
@@ -73,29 +77,66 @@ func (a *App) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	if in.Priority != 0 {
 		spec.Priority = in.Priority
 	}
+	// The explicit routing pin (spec §6.7, 2026-11-16 foreman-pin
+	// amendment): normalized to the full foreman:{id} form, it
+	// replaces the Matcher's pick - the operator chose the foreman,
+	// so no capability fallback applies.
+	if in.Foreman != "" {
+		spec.Foreman = registry.InboxID(in.Foreman)
+	}
 	if err := spec.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
 
-	// Creation-time requires validation (spec §6.7, 2026-11-15 amendment):
-	// entries must be tag names - bare or name:value - never capability
-	// values; an entry naming no registered tag key can never match, and
-	// the job would park pending silently.
-	warnings, err := a.jobs.ValidateRequires(r.Context(), spec.Requires)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "unknown_requires", err.Error())
-		return
-	}
-
-	// Ad hoc dispatch via the Matcher (spec §6.7): no matching foreman
-	// leaves the job pending.
+	// Dispatch decision (spec §6.7): the pin wins over the Matcher. A
+	// pinned job also skips creation-time requires validation -
+	// requires stay informational on its spec, and their tag-name
+	// rules would 400 a job whose routing never consults them.
 	state, foreman := "pending", ""
-	if f, ok, err := a.matcher.Match(r.Context(), spec.Requires); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	} else if ok {
-		foreman, state = f.ID, "dispatched"
+	var warnings []string
+	if spec.Foreman != "" {
+		pin, found, err := jobs.FindForeman(r.Context(), a.jobs, spec.Foreman)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+		if !found {
+			// Same contract as message_foreman (§6.9): a pin naming
+			// no registered foreman fails loudly - it never opens an
+			// inbox nothing consumes and never parks pending.
+			writeError(w, http.StatusNotFound, "unknown_foreman",
+				fmt.Sprintf("foreman %q is not registered (GET /v1/foremen lists registered foremen)", in.Foreman))
+			return
+		}
+		if pin.Online {
+			foreman, state = pin.ID, "dispatched"
+		} else {
+			// Loud, non-fatal: the pin is honored, the job just
+			// waits - the pending picker dispatches it when the
+			// foreman returns (§6.7).
+			warnings = append(warnings, "pinned foreman "+spec.Foreman+" is offline; the job pends until it returns")
+		}
+	} else {
+		// Creation-time requires validation (spec §6.7, 2026-11-15 amendment):
+		// entries must be tag names - bare or name:value - never capability
+		// values; an entry naming no registered tag key can never match, and
+		// the job would park pending silently.
+		var err error
+		warnings, err = a.jobs.ValidateRequires(r.Context(), spec.Requires)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "unknown_requires", err.Error())
+			return
+		}
+
+		// Ad hoc dispatch via the Matcher (spec §6.7): no matching foreman
+		// leaves the job pending.
+		if f, ok, err := a.matcher.Match(r.Context(), spec.Requires); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		} else if ok {
+			foreman, state = f.ID, "dispatched"
+		}
 	}
 	if err := a.jobs.Create(r.Context(), spec); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
