@@ -244,7 +244,7 @@ func TestPendingAlertSkipsMatchableJob(t *testing.T) {
 	// A matching foreman comes online (latch keys, the incident's upsert).
 	// The quiet env runs no pending picker, so the job stays pending - the
 	// deliberate-hold shape.
-	_ = e.pair("server", map[string]string{"os:linux": "latch", "arch:amd64": "latch"})
+	_ = e.pair("server", map[string]string{"os": "linux", "arch": "amd64"})
 
 	e.clock.Advance(2 * time.Hour)
 	for i := 0; i < 3; i++ {
@@ -266,7 +266,7 @@ func TestPendingAlertNamesOfflineForeman(t *testing.T) {
 	jobID := e.createPendingJob([]string{"os:linux", "arch:amd64"})
 	// A foreman with exactly the required tags pairs, then goes dark (the
 	// disconnect path the SSE hub drives, spec §6.3).
-	_ = e.pair("server", map[string]string{"os:linux": "latch", "arch:amd64": "latch"})
+	_ = e.pair("server", map[string]string{"os": "linux", "arch": "amd64"})
 	lastSeen := e.markOffline("foreman:server")
 
 	e.clock.Advance(31 * time.Minute)

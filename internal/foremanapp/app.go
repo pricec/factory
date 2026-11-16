@@ -327,16 +327,16 @@ func (a *App) Brain() *BrainRunner { return a.brain }
 func (a *App) BrainInboxID() string { return a.brainInboxID }
 
 // Run runs the background loops: the remote inbox client, the local inbox
-// consumer, the brain queue drain, the parent forwarder, and the
-// capabilities refresh (startup push + 60s ticker). It blocks until ctx is
-// done. v1 fails fast: a definitive remote-loop error is logged and the
-// loop ends.
+// consumer, the brain queue drain, the parent forwarder, the capabilities
+// refresh (startup push + 60s ticker), and the settings pull (startup +
+// 60s). It blocks until ctx is done. v1 fails fast: a definitive
+// remote-loop error is logged and the loop ends.
 func (a *App) Run(ctx context.Context) error {
 	if err := a.pushCapabilities(ctx); err != nil {
 		log.Printf("foremanapp: initial capabilities push: %v", err)
 	}
 	var wg sync.WaitGroup
-	wg.Add(5)
+	wg.Add(6)
 	go func() {
 		defer wg.Done()
 		if err := a.client.Run(ctx); err != nil && ctx.Err() == nil {

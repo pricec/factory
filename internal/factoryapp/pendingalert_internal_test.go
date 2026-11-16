@@ -36,7 +36,7 @@ func TestDiagnoseNoMatch(t *testing.T) {
 			name:     "incident shape: online foreman advertises the wrong keys",
 			requires: []string{"os:linux", "arch:amd64"},
 			foremen: []alertForeman{
-				foreman("foreman:server", true, registry.Capabilities{"os": "linux", "arch": "amd64"}),
+				foreman("foreman:server", true, registry.Capabilities{"os": "macos", "arch": "arm64"}),
 			},
 			want: noMatchDiagnosis{
 				reason:  "no foreman advertises: arch:amd64, os:linux",
@@ -50,7 +50,7 @@ func TestDiagnoseNoMatch(t *testing.T) {
 			name:     "required tags live only on an offline foreman",
 			requires: []string{"os:linux", "arch:amd64"},
 			foremen: []alertForeman{
-				foreman("foreman:server", false, registry.Capabilities{"os:linux": "latch", "arch:amd64": "latch"}),
+				foreman("foreman:server", false, registry.Capabilities{"os": "linux", "arch": "amd64"}),
 			},
 			want: noMatchDiagnosis{
 				reason:  "only offline foremen have: arch:amd64, os:linux",
@@ -90,7 +90,7 @@ func TestDiagnoseNoMatch(t *testing.T) {
 			requires: []string{"gpu", "tools:docker"},
 			foremen: []alertForeman{
 				foreman("foreman:a", true, registry.Capabilities{"gpu": "a100"}),
-				foreman("foreman:b", true, registry.Capabilities{"tools:docker": "yes"}),
+				foreman("foreman:b", true, registry.Capabilities{"tools": "docker"}),
 			},
 			want: noMatchDiagnosis{
 				reason: "no single online foreman has all required tags",
@@ -103,7 +103,7 @@ func TestDiagnoseNoMatch(t *testing.T) {
 			name:     "online foreman satisfies the requires: transient, skip",
 			requires: []string{"os:linux"},
 			foremen: []alertForeman{
-				foreman("foreman:server", true, registry.Capabilities{"os:linux": "latch"}),
+				foreman("foreman:server", true, registry.Capabilities{"os": "linux"}),
 			},
 			want: noMatchDiagnosis{
 				total:  1,
@@ -116,7 +116,7 @@ func TestDiagnoseNoMatch(t *testing.T) {
 			requires: []string{"os:linux"},
 			foremen: []alertForeman{
 				foreman("foreman:dark", false, registry.Capabilities{"gpu": "a100"}),
-				foreman("foreman:server", true, registry.Capabilities{"os:linux": "latch"}),
+				foreman("foreman:server", true, registry.Capabilities{"os": "linux"}),
 			},
 			want: noMatchDiagnosis{
 				total:  2,

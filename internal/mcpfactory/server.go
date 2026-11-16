@@ -58,9 +58,8 @@ func Handler(cfg Config) (http.Handler, error) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "create_job",
 		Description: "Create and dispatch a job; schedule_cron also creates a schedule. " +
-			"requires entries are capability tag NAMES - accepted forms: os:linux, arch:amd64, " +
-			"tools:<tool>, or a bare tag name (os, arch, tools); NEVER bare values like linux " +
-			"or amd64 (rejected as unknown_requires). " +
+			"requires: tag NAMES like os:linux, arch:amd64, tools:<tool>, or bare os/arch/tools - " +
+			"never bare values like linux or amd64 (unknown_requires). " +
 			"tier: flash (cheapest, default), default (Flash max-thinking), hardest (strongest); " +
 			"pick the cheapest that works. model: provider/model overrides tier. " +
 			"Refused past the spend cap.",
