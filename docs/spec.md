@@ -362,7 +362,8 @@ payload and `GET /v1/jobs/{id}`.
 - `foremen` table: `{id PK, capabilities JSON, last_seen, online INT}` (#9).
 - `last_seen` is updated by the auth middleware on any authed request + SSE
   connect (#9); the capabilities refresh also bumps `last_seen` (#12).
-- Sweeper marks a foreman offline after 45s (#9).
+- Sweeper marks a foreman offline after 90s (#9; covers the 60s
+  capabilities push cadence plus jitter and one missed push).
 - SSE heartbeat comment `:hb` every 15s keeps the stream alive (#2); #9
   subscribes to the `Observer` interface from #2 (#2, #9).
 
@@ -991,7 +992,7 @@ outside the `result_schema` subset at validation time (#3).
 | Constant | Value | Pinned in |
 |---|---|---|
 | SSE heartbeat comment `:hb` | every 15s | #2 |
-| Foreman offline threshold | 45s since `last_seen` | #9 |
+| Foreman offline threshold | 90s since `last_seen` | #9 |
 | Jobs sweeper tick | 10s | #9 |
 | Retry picker tick | 10s | #10 |
 | Job timeout grace | `timeout_s + 60s` -> `timed_out` | #9 |
