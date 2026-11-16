@@ -594,3 +594,57 @@ func TestAuth(t *testing.T) {
 		})
 	}
 }
+
+// TestPostToFactoryStringifiedObjectPayload: LLM clients send an object
+// payload as a JSON string; it must reach the parent inbox as a
+// structured object, while genuine string payloads are unchanged.
+func TestPostToFactoryStringifiedObjectPayload(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	post := func(typ string, payload any) wire.MessageEnvelope {
+		t.Helper()
+		sc := structured(t, resultOf(t, e.callTool("post_to_factory", map[string]any{
+			"type": typ, "job_id": jobID, "payload": payload,
+		})))
+		if sc["ok"] != true {
+			t.Fatalf("post_to_factory: %v", sc)
+		}
+		envs, err := e.svc.Get(ctx, parentInbox, 1, 0)
+		if err != nil || len(envs) != 1 {
+			t.Fatalf("inbox.Get: %v (%d envs)", err, len(envs))
+		}
+		if err := e.svc.Ack(ctx, parentInbox, []string{envs[0].ID}); err != nil {
+			t.Fatalf("ack: %v", err)
+		}
+		return envs[0]
+	}
+
+	// Object payload as a JSON string round-trips as an object.
+	got := post("foreman.report", `{"text": "DEPLOY-18 CLOSED"}`)
+	var obj map[string]any
+	if err := json.Unmarshal(got.Payload, &obj); err != nil || obj["text"] != "DEPLOY-18 CLOSED" {
+		t.Fatalf("stringified object payload = %s (%v), want a JSON object", got.Payload, err)
+	}
+
+	// alert.raise via this path parses as the alert shape (not Malformed).
+	got = post("alert.raise", `{"priority":2,"title":"disk full","body":"/ at 99%"}`)
+	var al struct {
+		Priority int    `json:"priority"`
+		Title    string `json:"title"`
+	}
+	if err := json.Unmarshal(got.Payload, &al); err != nil || al.Title != "disk full" || al.Priority != 2 {
+		t.Fatalf("alert.raise payload = %s (%v), want a parseable alert object", got.Payload, err)
+	}
+
+	// A native object is unchanged.
+	got = post("job.event", map[string]any{"event": "accepted"})
+	if string(got.Payload) != `{"event":"accepted"}` {
+		t.Fatalf("object payload = %s", got.Payload)
+	}
+
+	// Plain string payloads keep working (back-compat).
+	got = post("foreman.report", "all done")
+	if string(got.Payload) != `"all done"` {
+		t.Fatalf("string payload = %s, want a JSON string", got.Payload)
+	}
+}

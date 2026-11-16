@@ -169,7 +169,7 @@ func createJobTool(cfg Config) mcp.ToolHandlerFor[createJobArgs, any] {
 		spec := wire.NewJobSpec(in.Task, "factory")
 		spec.Requires = in.Requires
 		if in.ResultSchema != nil {
-			b, err := json.Marshal(in.ResultSchema)
+			b, err := wire.MarshalPayload(in.ResultSchema)
 			if err != nil {
 				return nil, nil, fmt.Errorf("result_schema: %w", err)
 			}
@@ -337,7 +337,7 @@ func messageForemanTool(cfg Config) mcp.ToolHandlerFor[messageForemanArgs, any] 
 		if in.Payload == nil {
 			return nil, nil, fmt.Errorf("payload: required (send {} for an empty body)")
 		}
-		payloadJSON, err := json.Marshal(in.Payload)
+		payloadJSON, err := wire.MarshalPayload(in.Payload)
 		if err != nil {
 			return nil, nil, fmt.Errorf("payload: %w", err)
 		}
