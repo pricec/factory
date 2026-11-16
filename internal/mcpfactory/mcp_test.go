@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/pricec/factory/internal/auth"
@@ -17,6 +18,7 @@ import (
 	"github.com/pricec/factory/internal/jobs"
 	"github.com/pricec/factory/internal/mcpfactory"
 	"github.com/pricec/factory/internal/registry"
+	"github.com/pricec/factory/internal/tasks"
 	"github.com/pricec/factory/internal/wire"
 )
 
@@ -38,11 +40,17 @@ type env struct {
 	authStore *auth.Store
 	store     *jobs.Store
 	svc       *inbox.Service
+	tasks     *tasks.Store
 	matcher   *stubMatcher
 	base      string
 	planner   string
 	foreman   string
 	worker    string
+	// wokenTask, when set, rides every rpc as the session's ?task_id=.
+	wokenTask string
+
+	mu      sync.Mutex
+	changed []string // TaskChanged callbacks, in order
 }
 
 func newEnv(t *testing.T, budget budgets.Config) *env {
@@ -60,13 +68,24 @@ func newEnv(t *testing.T, budget budgets.Config) *env {
 	if err != nil {
 		t.Fatalf("inbox.Open: %v", err)
 	}
+	taskStore, err := tasks.New(context.Background(), svc.DB())
+	if err != nil {
+		t.Fatalf("tasks.New: %v", err)
+	}
 	matcher := &stubMatcher{foreman: registry.Foreman{ID: "alpha", Online: true}, ok: true}
+	e := &env{}
 	h, err := mcpfactory.Handler(mcpfactory.Config{
 		Auth:    authStore,
 		Store:   store,
 		Matcher: matcher,
 		Inbox:   svc,
 		Budget:  budget,
+		Tasks:   taskStore,
+		TaskChanged: func(_ context.Context, id string) {
+			e.mu.Lock()
+			e.changed = append(e.changed, id)
+			e.mu.Unlock()
+		},
 	})
 	if err != nil {
 		t.Fatalf("mcpfactory.Handler: %v", err)
@@ -97,10 +116,11 @@ func newEnv(t *testing.T, budget budgets.Config) *env {
 	if err != nil {
 		t.Fatalf("MintWorkerToken: %v", err)
 	}
-	return &env{
-		t: t, authStore: authStore, store: store, svc: svc, matcher: matcher,
+	*e = env{
+		t: t, authStore: authStore, store: store, svc: svc, tasks: taskStore, matcher: matcher,
 		base: srv.URL, planner: planner, foreman: foreman, worker: worker,
 	}
+	return e
 }
 
 // rpc posts one JSON-RPC request and returns status + decoded body.
@@ -114,7 +134,11 @@ func (e *env) rpc(bearer, method string, params any) (int, map[string]any) {
 	if err != nil {
 		e.t.Fatalf("marshal rpc: %v", err)
 	}
-	req, err := http.NewRequest("POST", e.base, bytes.NewReader(b))
+	target := e.base
+	if e.wokenTask != "" {
+		target += "?task_id=" + e.wokenTask
+	}
+	req, err := http.NewRequest("POST", target, bytes.NewReader(b))
 	if err != nil {
 		e.t.Fatalf("NewRequest: %v", err)
 	}
@@ -237,13 +261,14 @@ func TestToolsListAndBudget(t *testing.T) {
 	_, out = e.rpc(e.planner, "tools/list", nil)
 	res := resultOf(t, out)
 	tools, ok := res["tools"].([]any)
-	if !ok || len(tools) != 7 {
-		t.Fatalf("tools/list: want 7 tools, got %v", res["tools"])
+	if !ok || len(tools) != 11 {
+		t.Fatalf("tools/list: want 11 tools, got %v", res["tools"])
 	}
 	want := map[string]bool{
 		"list_foremen": false, "list_jobs": false, "create_job": false,
 		"read_result": false, "cancel_job": false, "message_foreman": false,
 		"notify_operator": false,
+		"list_tasks":      false, "get_task": false, "update_task": false, "set_priority_criteria": false,
 	}
 	var budget int
 	for _, tl := range tools {
@@ -274,8 +299,12 @@ func TestToolsListAndBudget(t *testing.T) {
 	// Spec §9.1 budget: factory surface < 2KB (2026-11-15 amendments -
 	// raised from 1536 for cancel_job; create_job documents the requires
 	// tag-name forms after capability values parked two jobs pending ~7h).
-	if budget >= 2048 {
-		t.Errorf("description budget = %d bytes, want < 2048", budget)
+	// Raised to 4KB by the inbox redesign (2026-11-16, S2): the contract's
+	// task tools (list_tasks, get_task, update_task,
+	// set_priority_criteria) plus task_id args, with headroom for S3's
+	// raise_alert.
+	if budget >= 4096 {
+		t.Errorf("description budget = %d bytes, want < 4096", budget)
 	}
 	t.Logf("description budget: %d bytes", budget)
 }

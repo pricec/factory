@@ -132,11 +132,17 @@ const (
 	brainFailedType   = "brain.failed"
 )
 
-// relayToPlanner copies one factory:main envelope verbatim (type, job id,
-// sender, payload) into the operator inbox. The store assigns a fresh id
-// and ts. Failures log; the source envelope is still acked, so a
-// persistent planner-inbox failure drops only the copy, with the log line
-// as the trace.
+// relayToPlanner copies one factory:main envelope (type, job id, sender,
+// payload) into the operator inbox, stamped with its task (spec §9.5.2
+// relay stamping): the job resolves to a task through task_jobs, following
+// ParentJobID for spawned children. A report that cannot be attributed
+// opens a NEW task titled from its payload, so it is never lost; the
+// planner loop wakes on it there. The relayed row stays internal (hidden
+// from the operator's default view). The store assigns a fresh id and ts.
+// Failures log; the source envelope is still acked, so a persistent
+// planner-inbox failure drops only the copy, with the log line as the
+// trace. If task resolution fails the copy is relayed unthreaded and the
+// planner loop attributes it (ensureTaskForWaker).
 func (a *App) relayToPlanner(ctx context.Context, env wire.MessageEnvelope) {
 	relay := wire.MessageEnvelope{
 		Type:    env.Type,
@@ -144,9 +150,21 @@ func (a *App) relayToPlanner(ctx context.Context, env wire.MessageEnvelope) {
 		From:    env.From,
 		Payload: env.Payload,
 	}
+	relay.ThreadID = a.jobThread(ctx, env.JobID)
+	if relay.ThreadID == "" {
+		t, err := a.openTaskFor(ctx, env)
+		if err != nil {
+			log.Printf("factoryapp: consumer: open task for unattributed %s from %s: %v", env.Type, env.From, err)
+		} else {
+			relay.ThreadID = t.ID
+			log.Printf("factoryapp: consumer: unattributed %s from %s (job %q) opened task %s", env.Type, env.From, env.JobID, t.ID)
+		}
+	}
 	if _, err := a.inbox.Post(ctx, auth.PlannerMainInbox, relay); err != nil {
 		log.Printf("factoryapp: consumer: relay %s from %s to planner: %v", env.Type, env.From, err)
+		return
 	}
+	a.publishTaskChanged(ctx, relay.ThreadID)
 }
 
 // notifyUnhandled tells the operator about a factory:main envelope no
