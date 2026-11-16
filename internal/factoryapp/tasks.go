@@ -37,6 +37,10 @@ const (
 type taskView struct {
 	tasks.Task
 	Preview string `json:"preview"`
+	// PreviewFrom says who wrote the preview message: "operator"
+	// (chat.message), "planner" (brain.reply) or "" when there is none.
+	// The phone UI uses it to flag tasks that are waiting on the operator.
+	PreviewFrom string `json:"preview_from"`
 }
 
 // taskTitle derives a fallback task title from free text: whitespace runs
@@ -203,29 +207,35 @@ func (a *App) reopenTask(ctx context.Context, id string) (tasks.Task, error) {
 
 // taskView builds the I3 Task JSON for one task.
 func (a *App) taskView(ctx context.Context, t tasks.Task) taskView {
-	return taskView{Task: t, Preview: a.taskPreview(ctx, t.ID)}
+	text, from := a.taskPreview(ctx, t.ID)
+	return taskView{Task: t, Preview: text, PreviewFrom: from}
 }
 
 // taskPreview returns the last operator-visible message of the task's
 // thread (chat.message or brain.reply), whitespace-collapsed and cut to
-// taskPreviewMax runes; "" when there is none.
-func (a *App) taskPreview(ctx context.Context, taskID string) string {
-	var payload string
+// taskPreviewMax runes, plus who wrote it ("operator" or "planner");
+// both "" when there is none.
+func (a *App) taskPreview(ctx context.Context, taskID string) (text, from string) {
+	var payload, typ string
 	err := a.inbox.DB().QueryRowContext(ctx,
-		`SELECT payload FROM messages WHERE thread_id = ? AND type IN (?, ?)
+		`SELECT payload, type FROM messages WHERE thread_id = ? AND type IN (?, ?)
 		 ORDER BY seq DESC LIMIT 1`,
-		taskID, tasks.TypeChatMessage, tasks.TypeBrainReply).Scan(&payload)
+		taskID, tasks.TypeChatMessage, tasks.TypeBrainReply).Scan(&payload, &typ)
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
 			log.Printf("factoryapp: tasks: preview %s: %v", taskID, err)
 		}
-		return ""
+		return "", ""
 	}
-	text := strings.Join(strings.FieldsFunc(payloadText(json.RawMessage(payload)), unicode.IsSpace), " ")
+	from = "planner"
+	if typ == tasks.TypeChatMessage {
+		from = "operator"
+	}
+	text = strings.Join(strings.FieldsFunc(payloadText(json.RawMessage(payload)), unicode.IsSpace), " ")
 	if r := []rune(text); len(r) > taskPreviewMax {
 		text = string(r[:taskPreviewMax])
 	}
-	return text
+	return text, from
 }
 
 // publishTaskChanged publishes a synthetic, non-persisted task.changed

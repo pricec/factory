@@ -3,8 +3,11 @@ package factoryapp
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/pricec/factory/internal/tasks"
 )
@@ -26,6 +29,57 @@ func (a *App) registerTaskRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/tasks", a.handleListTasks)
 	mux.HandleFunc("POST /v1/tasks", a.handleCreateTask)
 	mux.HandleFunc("GET /v1/tasks/{id}", a.handleGetTask)
+	mux.HandleFunc("POST /v1/tasks/{id}/close", a.handleCloseTask)
+}
+
+// operatorCloseReason is the default close_reason of an operator close.
+const operatorCloseReason = "operator"
+
+// handleCloseTask serves POST /v1/tasks/{id}/close {reason?} -> 200
+// {task}: the operator closes a task from the UI (the phone inbox's quick
+// action). reason defaults to "operator" (at most 200 runes). Closing a
+// closed task is a no-op 200 that keeps the original reason. Unknown id
+// -> 404 unknown_task. Publishes task.changed; it does not wake the
+// planner. Replying reopens the task as usual.
+func (a *App) handleCloseTask(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	var in struct {
+		Reason string `json:"reason"`
+	}
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&in); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON: "+err.Error())
+			return
+		}
+	}
+	reason := strings.TrimSpace(in.Reason)
+	if reason == "" {
+		reason = operatorCloseReason
+	}
+	if utf8.RuneCountInString(reason) > 200 {
+		writeError(w, http.StatusBadRequest, "bad_request", "reason: at most 200 characters")
+		return
+	}
+	id := r.PathValue("id")
+	t, err := a.tasks.GetTask(ctx, id)
+	if errors.Is(err, tasks.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "unknown_task", "unknown task "+id)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	if t.Status != tasks.StatusClosed {
+		closed := tasks.StatusClosed
+		t, err = a.tasks.UpdateTask(ctx, id, tasks.TaskUpdate{Status: &closed, CloseReason: &reason})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+		a.publishTaskChanged(ctx, id)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"task": a.taskView(ctx, t)})
 }
 
 // handleListTasks serves GET /v1/tasks?status=open|closed|all&q=&limit=

@@ -627,9 +627,11 @@ factory planner's list view carries summaries only (#7, #19).
 | `GET /v1/inboxes/{id}/recent` | recent envelopes for one inbox, acked included (UI; §4.1) |
 | `POST /v1/chat` | `{text, task_id?}` -> chat.message envelope in the operator inbox, filed under a task (new without `task_id`; 404 for an unknown one); wakes the LLM planner (§9.5, §9.5.2) |
 | `GET /v1/tasks`, `GET /v1/tasks/{id}`, `POST /v1/tasks` | task list, task + thread, and the "new task" alias of chat (§9.5.2) |
+| `POST /v1/tasks/{id}/close` | operator closes a task from the UI (§9.5.2) |
 | `GET /v1/alerts`, `POST /v1/alerts/{id}/ack`, `POST /v1/alerts/{id}/reply` | open alerts, ack, and reply-creates-a-task (§9.5.3) |
 | `GET /v1/inboxes/planner:main/stream` | permissive SSE stream of the operator inbox for the chat UI (§9.5) |
 | `GET /` | operator web UI (single page; §4.1) |
+| `GET /manifest.webmanifest`, `GET /apple-touch-icon.png`, `GET /icon-512.png` | home-screen (PWA) manifest and icons for the UI (§9.5.5) |
 | `POST /v1/pairing-tokens` | planner-credential auth (v1: the planner token doubles as the operator credential); issues a one-time pairing token, `200 {pairing_token, expires_at}` (#23) |
 
 Request/response shapes and status codes beyond those shown are not pinned.
@@ -1527,9 +1529,12 @@ Chat and task API (unauthenticated, like the rest of the UI surface,
   task" box).
 - Task JSON: `{id, title, status open|closed, priority int (0 = most
   urgent), created_at, updated_at, closed_at?, close_reason?, job_ids[],
-  last_activity_at, preview}`. `preview` is the newest operator-visible
-  message (`chat.message`/`brain.reply`) of the thread, whitespace
-  collapsed, at most 120 characters, and "" if there is none.
+  last_activity_at, preview, preview_from}`. `preview` is the newest
+  operator-visible message (`chat.message`/`brain.reply`) of the thread,
+  whitespace collapsed, at most 120 characters, and "" if there is none.
+  `preview_from` names its author: `operator` (`chat.message`), `planner`
+  (`brain.reply`), or "" if there is none. The phone UI uses it to flag
+  tasks that wait on the operator.
 - `GET /v1/tasks?status=open|closed|all&q=&limit=` -> `{tasks}`. `status`
   defaults to `all`, `limit` defaults to 200 (clamped at 1000), and a bad
   status or limit returns 400. Ranking: open first, then priority ASC,
@@ -1540,6 +1545,13 @@ Chat and task API (unauthenticated, like the rest of the UI surface,
   limited to the last `limit` rows (default 500, max 5000). Internal rows
   (every type except `chat.message` and `brain.reply`) are excluded
   unless `internal=1` (or `true`). An unknown id returns 404.
+- `POST /v1/tasks/{id}/close {reason?}` -> 200 `{task}`: the operator
+  closes a task from the UI. `reason` is trimmed, defaults to `operator`,
+  and is at most 200 characters (longer, or bad JSON, returns 400). The
+  body may be empty. Closing a closed task is a no-op 200 that keeps the
+  original reason. An unknown id returns 404 `unknown_task`. It publishes
+  task.changed and does NOT wake the planner. A later reply reopens the
+  task as usual.
 - `POST /v1/jobs` accepts `task_id` (the twin of `create_job`, §9.4). It
   is linked before dispatch, echoed in the 201 body, and an unknown task
   returns 404 `unknown_task`.
@@ -1700,6 +1712,34 @@ DECISION 2). Live updates: the `planner:main` SSE stream; any event
 (`message`, `task.changed`, `alert.changed`) debounces a refetch, with a 10s
 poll as fallback. If `/v1/tasks` or `/v1/alerts` 404s (slice not deployed),
 the page degrades to the legacy chat log or an "alerts not available" note.
+
+Phone layout (2026-11-16). The same page has a separate phone UI (`#phone`).
+It is chosen before first paint when the viewport is at most 760px wide, or
+on a touch device in landscape at most 520px tall. `localStorage`
+`factory.layout` = `phone`|`desktop` overrides this; the phone "More" screen
+and a desktop "phone layout" button set it. The desktop layout is unchanged.
+The phone UI uses the same endpoints, with hash routes so the browser back
+gesture works: `#/inbox`, `#/task/<id>`, `#/jobs`, `#/job/<id>`, `#/foremen`,
+`#/foreman/<id>`, `#/more` (usage and inboxes), and `#/ibx/<id>`. A bottom tab
+bar has Inbox, Jobs, Foremen and More.
+
+The Inbox shows, in order: open alerts (Ack and Reply buttons), "Needs you",
+then the other open tasks; closed tasks appear on request. "Needs you" means
+an open task whose `preview_from` is `planner` and whose `last_activity_at`
+is newer than when this device last opened it, or that was marked unread by
+hand. The read state is per device, in `localStorage`, and is not synced.
+The tab badge (and `navigator.setAppBadge` where supported) counts alerts
+plus needs-you tasks.
+
+Swiping a task left reveals Reply (a bottom-sheet composer; it posts
+`POST /v1/chat {text, task_id}` without leaving the list) and Close (`POST
+/v1/tasks/{id}/close`). Swiping right toggles read. The thread view has a
+composer pinned to the bottom that is kept above the iOS keyboard
+(`visualViewport`), and a menu with show internal, close, mark unread, copy
+id and the linked jobs. All controls are at least 44px and all inputs at
+least 16px. Safe-area insets are respected (`viewport-fit=cover`). The page
+links a manifest and an apple-touch-icon so it can be added to the home
+screen.
 
 #### 9.5.6 Live acceptance (inbox redesign S5)
 
