@@ -138,7 +138,7 @@ func postToFactoryTool(cfg Config) mcp.ToolHandlerFor[postToFactoryArgs, any] {
 			From:  cfg.ForemanInboxID,
 		}
 		if in.Payload != nil {
-			b, err := json.Marshal(in.Payload)
+			b, err := wire.MarshalPayload(in.Payload)
 			if err != nil {
 				return nil, nil, fmt.Errorf("payload: %w", err)
 			}
@@ -164,7 +164,7 @@ func spawnWorkerTool(cfg Config) mcp.ToolHandlerFor[spawnWorkerArgs, any] {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, in spawnWorkerArgs) (*mcp.CallToolResult, any, error) {
 		spec := wire.NewJobSpec(in.Task, cfg.ForemanInboxID)
 		if in.ResultSchema != nil {
-			b, err := json.Marshal(in.ResultSchema)
+			b, err := wire.MarshalPayload(in.ResultSchema)
 			if err != nil {
 				return nil, nil, fmt.Errorf("result_schema: %w", err)
 			}
@@ -175,7 +175,7 @@ func spawnWorkerTool(cfg Config) mcp.ToolHandlerFor[spawnWorkerArgs, any] {
 			spec.TimeoutS = *in.TimeoutS
 		}
 		if in.Budget != nil {
-			b, err := json.Marshal(in.Budget)
+			b, err := wire.MarshalPayload(in.Budget)
 			if err != nil {
 				return nil, nil, fmt.Errorf("budget: %w", err)
 			}
