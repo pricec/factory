@@ -191,6 +191,44 @@ func (s *Store) ApplyEvent(ctx context.Context, jobID, event string) error {
 	return nil
 }
 
+// RegisterSpawned makes a foreman-spawned job visible in the registry
+// (spec §6.2, 2026-11-15 spawn-visibility amendment): foreman-local spawns
+// (the §9.3 spawn_worker seam) mint their JobSpec on the foreman, so the
+// factory never created a row for them and their events and forwarded
+// results were ignored as unknown - the jobs existed only in the foreman's
+// local jobs/ store. The foreman's accepted job.event carries the spec;
+// this insert-if-absent path creates the row in state dispatched - the
+// state the factory itself would have set had it dispatched the job -
+// attributed to the spawning foreman. The subsequent started event drives
+// dispatched->running and the forwarded job.result applies
+// terminal-idempotently: the ordinary lifecycle from there. Insert-if-
+// absent, never an update: re-delivered accepted events (at-least-once
+// posting, §4) and jobs the factory created itself are no-ops, so
+// registration can neither duplicate nor clobber a row. It returns whether
+// it created the row.
+func (s *Store) RegisterSpawned(ctx context.Context, spec wire.JobSpec, foremanID string) (bool, error) {
+	if err := spec.Validate(); err != nil {
+		return false, fmt.Errorf("register spawned job: %w", err)
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		return false, fmt.Errorf("register spawned job %s: %w", spec.ID, err)
+	}
+	now := s.now()
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO jobs (id, spec, state, foreman_id, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
+		spec.ID, string(specJSON), StateDispatched, foremanID, now, now)
+	if err != nil {
+		return false, fmt.Errorf("register spawned job %s: %w", spec.ID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("register spawned job %s: %w", spec.ID, err)
+	}
+	return n > 0, nil
+}
+
 // ApplyResult applies a job.result (spec §6.2, §6.4): terminal-idempotent -
 // results only apply to running jobs; anything else is a logged no-op.
 // Usage is overwritten last-wins; per-attempt results are appended.

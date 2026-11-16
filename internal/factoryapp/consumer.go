@@ -79,11 +79,30 @@ func (a *App) handleEnvelope(ctx context.Context, env wire.MessageEnvelope, seen
 		}
 	case "job.event":
 		var p struct {
-			Event string `json:"event"`
+			Event string        `json:"event"`
+			Spec  *wire.JobSpec `json:"spec,omitempty"`
 		}
 		if err := json.Unmarshal(env.Payload, &p); err != nil {
 			log.Printf("factoryapp: consumer: event payload for %s: %v", env.JobID, err)
 			return
+		}
+		// Spawn visibility (spec §6.2, 2026-11-15 spawn-visibility
+		// amendment): an accepted event carrying the JobSpec registers a
+		// job the factory never created itself - a foreman-local spawn
+		// (the §9.3 spawn_worker seam), which otherwise existed only in
+		// the foreman's local store. Registration is insert-if-absent, so
+		// re-delivered accepted events and factory-created jobs are
+		// untouched no-ops: never a duplicate, never a clobber.
+		if p.Event == "accepted" && p.Spec != nil {
+			switch {
+			case env.JobID != "" && p.Spec.ID != env.JobID:
+				log.Printf("factoryapp: consumer: accepted event for %s carries spec id %s; registration skipped",
+					env.JobID, p.Spec.ID)
+			default:
+				if _, err := a.jobs.RegisterSpawned(ctx, *p.Spec, env.From); err != nil {
+					log.Printf("factoryapp: consumer: register spawned job %s: %v", env.JobID, err)
+				}
+			}
 		}
 		if err := a.jobs.ApplyEvent(ctx, env.JobID, p.Event); err != nil {
 			log.Printf("factoryapp: consumer: apply event %q for %s: %v", p.Event, env.JobID, err)

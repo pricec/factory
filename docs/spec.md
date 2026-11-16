@@ -83,7 +83,7 @@ response is the full envelope with server-assigned `id` and `ts` (#1).
 |---|---|---|---|
 | `job.request` | Factory dispatch: `create_job` (#19), schedule fire (#8), retry re-dispatch (#10) - derived from the routing and dispatch rules | Foreman routing -> `spawn_worker` (#4); the envelope carries the JobSpec (derived: #4 enqueues "the JobSpec", #13 rejects `job.request` on prompt size) | #4, #8, #10, #13, #19 |
 | `job.result` | Worker: via `report_result` (#17) or the harness fallback (#5) | Foreman routing -> forward to parent, byte-identical payload (§3.4); then the factory jobs events path: terminal status (#9), retry policy (#10), usage accounting (#13) | #1, #4, #5, #7, #9, #10, #17 |
-| `job.event` | Foreman: `{"job_id": ..., "event": "accepted" or "started"}` (#9) | Factory jobs events path (#9); foreman-side routing rule: drop (#4) | #4, #9 |
+| `job.event` | Foreman: `{"job_id": ..., "event": "accepted" or "started"}` (#9); `accepted` also carries the full JobSpec - `{"event": "accepted", "spec": {...}}` - so foreman-local spawns register in the job registry (2026-11-15 spawn-visibility amendment, §6.2) | Factory jobs events path (#9); foreman-side routing rule: drop (#4) | #4, #9 |
 | `job.question` | Worker: via `ask_parent` (#17), posted to the foreman's own inbox `foreman:{id}` (§3.2) | Foreman brain via routing, 60s SLA, default answer on timeout (#4) | #4, #11, #17 |
 | `job.answer` | Foreman brain: via `answer_worker` (#18) | Worker: `ask_parent` long-polls the job inbox (#17); `answer_worker` posts to the job inbox (#18) | #17, #18 |
 | `brain.wake` | Not pinned in any body | Routing -> brain (#4) | #4 |
@@ -336,6 +336,22 @@ payload and `GET /v1/jobs/{id}`.
 
 - Foreman posts envelope type `job.event` `{job_id, event: accepted|started}`;
   terminal status comes from `job.result`.
+- Spawn visibility (2026-11-15 spawn-visibility amendment): foreman-local
+  spawns (the §9.3 `spawn_worker` seam) mint their JobSpec on the foreman -
+  the factory never created a registry row for them, so their events and
+  forwarded `job.result` were ignored as unknown and the jobs were invisible
+  at the factory (they existed only in the foreman's local `jobs/` store).
+  Fix: the foreman's `accepted` job.event carries the full JobSpec, and the
+  factory registers insert-if-absently - an accepted event for an unknown
+  job id creates the row in state `dispatched`, attributed to the sending
+  foreman (the envelope `from`); the paired `started` event then drives
+  `dispatched -> running` and the forwarded `job.result` applies
+  terminal-idempotently, the ordinary lifecycle from there. The events post
+  before the harness starts, so the row always exists before any worker
+  report - the §8.5 loud spawn-failure path surfaces at the factory like any
+  worker report. Registration never modifies an existing row: re-delivered
+  accepted events (at-least-once, §4) and jobs the factory created itself
+  are no-ops, so registration can neither duplicate nor clobber.
 - Sweeper (10s tick, fake-clockable): `running` past `timeout_s + 60s` ->
   `timed_out`.
 - Offline foreman's jobs are left as-is unless past timeout + grace ->

@@ -56,13 +56,25 @@ func (a *App) SpawnWorker(ctx context.Context, spec wire.JobSpec) error {
 
 	hcfg := a.BuildHarnessConfig(spec, bearer)
 	log.Printf("foremanapp: spawning worker for %s (model %q)", spec.ID, hcfg.Model)
-	go a.runWorker(spec, hcfg)
 
+	// Registry visibility (spec §6.2, 2026-11-15 spawn-visibility
+	// amendment): foreman-local spawns mint their JobSpec here, so the
+	// factory never created a registry row for them - brain-spawned jobs
+	// existed only in this foreman's local jobs/ store and their results
+	// were ignored there as unknown. The accepted event therefore carries
+	// the full JobSpec (the factory registers insert-if-absently), and
+	// both events post BEFORE the harness goroutine starts: the row always
+	// exists (dispatched -> running) before any worker report can arrive,
+	// so the loud §8.5 failure path applies at the factory like any worker
+	// report instead of being dropped as unknown. The posts stay
+	// synchronous in the spawn call exactly as before - spawn never waits
+	// on the worker, and event failures are logged, never fatal.
 	for _, event := range []string{"accepted", "started"} {
-		if err := a.postJobEvent(ctx, spec.ID, event); err != nil {
+		if err := a.postJobEvent(ctx, spec, event); err != nil {
 			log.Printf("foremanapp: job.event %s for %s: %v", event, spec.ID, err)
 		}
 	}
+	go a.runWorker(spec, hcfg)
 	return nil
 }
 
@@ -131,15 +143,28 @@ func (a *App) postSpawnFailure(spec wire.JobSpec, cause error) {
 }
 
 // postJobEvent posts a job.event envelope {job_id, event} to the factory's
-// main inbox with the paired bearer (spec §6.2).
-func (a *App) postJobEvent(ctx context.Context, jobID, event string) error {
-	payload, err := json.Marshal(map[string]string{"event": event})
+// main inbox with the paired bearer (spec §6.2). The accepted event also
+// carries the full JobSpec (2026-11-15 spawn-visibility amendment): the
+// factory's insert-if-absent registration (jobs.RegisterSpawned) makes a
+// foreman-local spawn visible in the job registry. started carries no
+// spec: the row it transitions must already exist (created by the factory
+// at dispatch, or by the accepted event's registration).
+func (a *App) postJobEvent(ctx context.Context, spec wire.JobSpec, event string) error {
+	p := struct {
+		Event string        `json:"event"`
+		Spec  *wire.JobSpec `json:"spec,omitempty"`
+	}{Event: event}
+	if event == "accepted" {
+		s := spec
+		p.Spec = &s
+	}
+	payload, err := json.Marshal(p)
 	if err != nil {
 		return err
 	}
 	env := wire.MessageEnvelope{
 		Type:    "job.event",
-		JobID:   jobID,
+		JobID:   spec.ID,
 		From:    a.inboxID,
 		Payload: payload,
 	}
