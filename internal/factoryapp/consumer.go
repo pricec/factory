@@ -3,13 +3,16 @@ package factoryapp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/pricec/factory/internal/auth"
 	"github.com/pricec/factory/internal/jobs"
 	"github.com/pricec/factory/internal/registry"
+	"github.com/pricec/factory/internal/tasks"
 	"github.com/pricec/factory/internal/wire"
 )
 
@@ -136,8 +139,12 @@ const (
 
 // relayToPlanner copies one factory:main envelope (type, job id, sender,
 // payload) into the operator inbox, stamped with its task (spec §9.5.2
-// relay stamping): the job resolves to a task through task_jobs, following
-// ParentJobID for spawned children. A report that cannot be attributed
+// relay stamping). Resolution order: (a) the envelope job's task through
+// task_jobs, following ParentJobID for spawned children; (b) else the
+// payload's task_id, only when it names an existing OPEN task (a closed
+// task is treated as not found - never silently reopened by an automated
+// report); (c) else a NEW task. If (a) and (b) both resolve but differ,
+// the job's task wins and the conflict is logged. A report that cannot be attributed
 // opens a NEW task titled from its payload, so it is never lost; the
 // planner loop wakes on it there. The relayed row stays internal (hidden
 // from the operator's default view). The store assigns a fresh id and ts.
@@ -153,6 +160,10 @@ func (a *App) relayToPlanner(ctx context.Context, env wire.MessageEnvelope) {
 		Payload: env.Payload,
 	}
 	relay.ThreadID = a.jobThread(ctx, env.JobID)
+	hint := a.payloadTaskHint(ctx, env, relay.ThreadID)
+	if relay.ThreadID == "" {
+		relay.ThreadID = hint.taskID
+	}
 	if relay.ThreadID == "" {
 		t, err := a.openTaskFor(ctx, env)
 		if err != nil {
@@ -163,7 +174,7 @@ func (a *App) relayToPlanner(ctx context.Context, env wire.MessageEnvelope) {
 			// S5 glue: also a P2 alert linked to the new task.
 			a.raiseSystemAlertForTask(ctx, alertPriorityUnattributed,
 				"Unattributed "+env.Type+": "+t.Title,
-				fmt.Sprintf("%s from %s (job %q) is not linked to any task; opened task %s.", env.Type, env.From, env.JobID, t.ID),
+				fmt.Sprintf("%s from %s (job %q) is not linked to any task; opened task %s.%s", env.Type, env.From, env.JobID, t.ID, hint.note),
 				"factory:relay", t.ID)
 		}
 	}
@@ -203,4 +214,61 @@ func (a *App) notifyDispatched(ctx context.Context, job jobs.Job) error {
 		return fmt.Errorf("post to %s: %w", target, err)
 	}
 	return nil
+}
+
+// taskHint is the outcome of reading payload.task_id for relay routing.
+type taskHint struct {
+	taskID string // the payload task to thread into; "" when unusable or unneeded
+	note   string // extra alert-body text explaining an ignored task_id
+}
+
+// payloadTaskID reads payload.task_id from a foreman.report-style payload,
+// accepting the structured object and the legacy double-encoded JSON string
+// (the deploy-21 shape). It returns "" for anything else.
+func payloadTaskID(payload json.RawMessage) string {
+	var m map[string]any
+	if err := json.Unmarshal(payload, &m); err != nil {
+		var s string
+		if json.Unmarshal(payload, &s) != nil {
+			return ""
+		}
+		inner := strings.TrimSpace(s)
+		if !strings.HasPrefix(inner, "{") || json.Unmarshal([]byte(inner), &m) != nil {
+			return ""
+		}
+	}
+	id, _ := m["task_id"].(string)
+	return strings.TrimSpace(id)
+}
+
+// payloadTaskHint implements step (b) of the relay resolution order.
+// jobTask is step (a)'s result: when set it wins, and a differing payload
+// task_id is only logged. A payload task_id that is unknown, closed or
+// unreadable yields no taskID (fall through to a new task) and a note for
+// the unattributed alert.
+func (a *App) payloadTaskHint(ctx context.Context, env wire.MessageEnvelope, jobTask string) taskHint {
+	id := payloadTaskID(env.Payload)
+	if id == "" {
+		return taskHint{}
+	}
+	t, err := a.tasks.GetTask(ctx, id)
+	if err != nil || t.Status != tasks.StatusOpen {
+		reason := "does not exist"
+		switch {
+		case err != nil && !errors.Is(err, tasks.ErrNotFound):
+			reason = "could not be read"
+			log.Printf("factoryapp: consumer: %s payload task_id %q lookup: %v", env.Type, id, err)
+		case err == nil:
+			reason = "is closed (reports never reopen a task)"
+		}
+		log.Printf("factoryapp: consumer: %s from %s: payload task_id %q %s; ignored", env.Type, env.From, id, reason)
+		return taskHint{note: fmt.Sprintf(" Its payload named task %s, which %s.", id, reason)}
+	}
+	if jobTask != "" {
+		if jobTask != id {
+			log.Printf("factoryapp: consumer: %s from %s: job %q resolves to task %s but payload task_id is %s; keeping the job's task", env.Type, env.From, env.JobID, jobTask, id)
+		}
+		return taskHint{}
+	}
+	return taskHint{taskID: id}
 }

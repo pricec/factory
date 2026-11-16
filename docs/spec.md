@@ -1197,8 +1197,10 @@ Tools (exact):
 
 - `inbox_next(wait_seconds=0)` - oldest unacked envelope.
 - `inbox_ack(ids)`.
-- `post_to_factory(type, payload, job_id?, to?)` - envelope to the parent
-  inbox. 2026-11-16 report-routing amendment: `to` is optional and accepts only
+- `post_to_factory(type, payload, job_id?, to?, task_id?)` - envelope to the parent
+  inbox. `task_id` (optional) sets `payload.task_id` so a report sent outside a
+  job threads into that existing open task (§9.5.2 resolution order); a
+  non-object payload is wrapped as `{text, task_id}`. 2026-11-16 report-routing amendment: `to` is optional and accepts only
   `factory:main` (the default); any other value is a tool error
   `unroutable_address` that names the routable path and is never staged
   (`factory:planner` and `planner:main` get targeted hints). A `foreman.report`
@@ -1556,8 +1558,17 @@ through `task_jobs`. If the job is not linked, resolution walks the job
 spec's `ParentJobID` (spawn_child children, which reach the factory
 through `RegisterSpawned`, §6.2), and a child resolved this way is linked
 itself. The relayed row is posted with that `thread_id` and stays internal
-(hidden by default). A `foreman.report`/`brain.failed` that cannot be
-attributed OPENS A NEW TASK, titled from its payload (the first
+(hidden by default). Resolution order for a `foreman.report`/`brain.failed`
+(2026-11-16 report-task-routing amendment): (a) the envelope `job_id`'s task,
+as above; (b) else `payload.task_id` (also read from a legacy double-encoded
+JSON-string payload), but only when it names an existing OPEN task - a CLOSED
+task is treated as not found, never silently reopened by an automated report
+(the safer choice: a reopen would resurrect finished work unseen, whereas the
+fall-through is visible as a new task plus a P2 alert, whose body names the
+ignored `task_id`); (c) else the behaviour below. If (a) and (b) both resolve
+but disagree, the `job_id` task wins and the conflict is logged; the factory
+never switches silently. A report that matches neither (a) nor (b)
+OPENS A NEW TASK, titled from its payload (the first
 non-empty `text`/`title`/`summary`/`message`/`error` field - also of an
 object payload delivered as a JSON string, one level deep (2026-11-16
 deploy-18 follow-up: no raw-JSON titles) - else
