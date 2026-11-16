@@ -9,7 +9,13 @@ import (
 
 // Pinned JobSpec defaults (§5.1, §11).
 const (
-	DefaultTimeoutS        = 300
+	// DefaultTimeoutS is the hard wall-clock CEILING (timeout_s) for a job
+	// that sets none (4h): since the idle-timeout amendment timeout_s is a
+	// backstop, not the working limit - idle_timeout_s is.
+	DefaultTimeoutS = 14400
+	// DefaultIdleTimeoutS is how long a worker may produce no output
+	// (idle_timeout_s) before the harness kills it (15m).
+	DefaultIdleTimeoutS    = 900
 	DefaultPriority        = 5
 	MinPriority            = 1
 	MaxPriority            = 9
@@ -30,6 +36,23 @@ const (
 
 // Tiers is every allowed tier value (§5.1).
 var Tiers = []string{TierFlash, TierDefault, TierHardest}
+
+// tierCeilingS is the per-tier timeout_s ceiling applied by Normalize when
+// a spec leaves timeout_s unset (zero) and names a tier.
+var tierCeilingS = map[string]int{
+	TierFlash:   3600,
+	TierDefault: 7200,
+	TierHardest: 14400,
+}
+
+// TierCeilingS returns the default timeout_s ceiling for tier: flash 1h,
+// default 2h, hardest 4h. An empty or unknown tier gets DefaultTimeoutS.
+func TierCeilingS(tier string) int {
+	if n, ok := tierCeilingS[tier]; ok {
+		return n
+	}
+	return DefaultTimeoutS
+}
 
 // Budget bounds a job's prompt size, output size, and spend (§5.1).
 type Budget struct {
@@ -60,13 +83,19 @@ type JobSpec struct {
 	// forms via registry.InboxID); requires stay informational on a
 	// pinned job - the pin is the routing decision and is never
 	// capability-matched.
-	Foreman   string `json:"foreman,omitempty"`
-	Tier      string `json:"tier,omitempty"`
-	TimeoutS  int    `json:"timeout_s"`
-	Priority  int    `json:"priority"`
-	Budget    Budget `json:"budget"`
-	CreatedBy string `json:"created_by,omitempty"`
-	CreatedAt string `json:"created_at,omitempty"`
+	Foreman string `json:"foreman,omitempty"`
+	Tier    string `json:"tier,omitempty"`
+	// TimeoutS is the hard wall-clock ceiling in seconds; the job is killed
+	// (reason=ceiling) when it passes even if it is still producing output.
+	TimeoutS int `json:"timeout_s"`
+	// IdleTimeoutS kills the job (reason=idle) after this many seconds
+	// without any worker output; any output resets the timer. Zero means
+	// DefaultIdleTimeoutS; it never exceeds the ceiling in effect.
+	IdleTimeoutS int    `json:"idle_timeout_s,omitempty"`
+	Priority     int    `json:"priority"`
+	Budget       Budget `json:"budget"`
+	CreatedBy    string `json:"created_by,omitempty"`
+	CreatedAt    string `json:"created_at,omitempty"`
 	// ParentJobID is set on child jobs spawned by a worker via the
 	// worker-MCP spawn_child tool (§9.2, 2026-11-15 sub-spawning
 	// amendment): it names the parent job, whose per-job inbox receives a
@@ -96,7 +125,10 @@ func NewJobSpec(task, createdBy string) JobSpec {
 // schedule templates get those when the schedule fires (§6.8).
 func (s *JobSpec) Normalize() {
 	if s.TimeoutS == 0 {
-		s.TimeoutS = DefaultTimeoutS
+		s.TimeoutS = TierCeilingS(s.Tier)
+	}
+	if s.IdleTimeoutS == 0 {
+		s.IdleTimeoutS = DefaultIdleTimeoutS
 	}
 	if s.Priority == 0 {
 		s.Priority = DefaultPriority
@@ -137,6 +169,9 @@ func (s *JobSpec) validate(requireID bool) error {
 	}
 	if s.TimeoutS <= 0 {
 		return fmt.Errorf("timeout_s: must be > 0, got %d", s.TimeoutS)
+	}
+	if s.IdleTimeoutS < 0 {
+		return fmt.Errorf("idle_timeout_s: must be >= 0, got %d", s.IdleTimeoutS)
 	}
 	if s.Priority < MinPriority || s.Priority > MaxPriority {
 		return fmt.Errorf("priority: must be %d-%d, got %d", MinPriority, MaxPriority, s.Priority)

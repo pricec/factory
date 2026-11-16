@@ -88,10 +88,21 @@ type Config struct {
 	PostUsage UsagePostFunc
 	// PostRetryBackoff is the delay between post attempts; zero means 1s.
 	PostRetryBackoff time.Duration
-	// Timeout overrides the spec's timeout_s. A test seam for sub-second
-	// timeouts; zero means timeout_s applies (§8.6).
+	// Timeout overrides the spec's timeout_s (the wall-clock ceiling). A
+	// test seam for sub-second timeouts; zero means timeout_s applies.
 	Timeout time.Duration
+	// IdleTimeout overrides the spec's idle_timeout_s; same seam role.
+	IdleTimeout time.Duration
+	// LoopLimit is how many identical back-to-back tool calls trip the
+	// loop guard; zero means DefaultLoopLimit, negative disables it.
+	LoopLimit int
+	// TermGrace is how long a budget kill waits after SIGTERM before
+	// SIGKILL; zero means 5s.
+	TermGrace time.Duration
 }
+
+// DefaultLoopLimit is the loop guard's default threshold.
+const DefaultLoopLimit = 8
 
 // defaults validates the required fields and fills the optional seams.
 func (c *Config) defaults() error {
@@ -168,7 +179,14 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	stdout, stderr := newSyncBuffer(), newSyncBuffer()
-	runErr, timedOut, harnessErr := execChild(ctx, cfg, jobTimeout(cfg, spec), jobDir, buildPrompt(spec, runnerFor(cfg.Model)), stdout, stderr)
+	lim := limits{
+		ceiling: jobTimeout(cfg, spec), idle: jobIdleTimeout(cfg, spec),
+		maxCostUSD: spec.Budget.MaxCostUSD, loopLimit: cfg.LoopLimit,
+	}
+	if lim.loopLimit == 0 {
+		lim.loopLimit = DefaultLoopLimit
+	}
+	runErr, kill, harnessErr := execChild(ctx, cfg, lim, jobDir, buildPrompt(spec, runnerFor(cfg.Model)), stdout, stderr)
 	if harnessErr != nil {
 		return harnessErr
 	}
@@ -180,7 +198,13 @@ func Run(ctx context.Context, cfg Config) error {
 		// back to raw stdout when unparseable.
 		parsed := claudecli.ParseOutput(out)
 		out = parsed.Text
-		recordUsage(ctx, cfg, spec, claudecli.UsageWithStderr(parsed.Usage, errOut))
+		usage := claudecli.UsageWithStderr(parsed.Usage, errOut)
+		if usage.IsZero() && kill.reason != "" && kill.costUSD > 0 {
+			// Killed before the CLI printed its result object: record the
+			// live estimate so the spend is not lost.
+			usage = claudecli.Usage{CostUSD: kill.costUSD, Model: cfg.Model}
+		}
+		recordUsage(ctx, cfg, spec, usage)
 	}
 
 	if _, err := os.Stat(filepath.Join(jobDir, flagFileName)); err == nil {
@@ -189,8 +213,8 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	var res wire.JobResult
-	if timedOut {
-		res = timeoutResult(spec, out)
+	if kill.reason != "" {
+		res = killResult(spec, out, kill, lim)
 	} else {
 		res = fallbackResult(spec, out, errOut, runErr, claude)
 	}
@@ -248,6 +272,15 @@ func jobTimeout(cfg Config, spec wire.JobSpec) time.Duration {
 		return cfg.Timeout
 	}
 	return time.Duration(spec.TimeoutS) * time.Second
+}
+
+// jobIdleTimeout resolves the idle limit: cfg.IdleTimeout when set,
+// otherwise the spec's idle_timeout_s (default 900s).
+func jobIdleTimeout(cfg Config, spec wire.JobSpec) time.Duration {
+	if cfg.IdleTimeout > 0 {
+		return cfg.IdleTimeout
+	}
+	return time.Duration(spec.IdleTimeoutS) * time.Second
 }
 
 // isClaudeModel reports whether the pinned model routes to the Claude
@@ -346,7 +379,7 @@ func childCommand(cfg Config, jobDir, prompt string) (string, []string) {
 // (§8.6). It returns the child's wait error and whether the timeout
 // fired. A non-nil third return aborts the run without posting (parent
 // context canceled).
-func execChild(ctx context.Context, cfg Config, timeout time.Duration, jobDir, prompt string, stdout, stderr *syncBuffer) (runErr error, timedOut bool, harnessErr error) {
+func execChild(ctx context.Context, cfg Config, lim limits, jobDir, prompt string, stdout, stderr *syncBuffer) (runErr error, kill killInfo, harnessErr error) {
 	env := cfg.Env
 	if env == nil {
 		env = os.Environ()
@@ -357,31 +390,155 @@ func execChild(ctx context.Context, cfg Config, timeout time.Duration, jobDir, p
 	// The generated config references the token via {env:WORKER_TOKEN}
 	// (never at rest); guarantee it is present in the child environment.
 	cmd.Env = withEnvValue(env, envWorkerToken, cfg.Token)
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
+
+	// Any byte on stdout or stderr is a heartbeat. The claude runner's
+	// stdout is also parsed live (stream-json) for spend and tool loops;
+	// other runners expose no usage data, so only idle + ceiling apply.
+	hb := newHeartbeat()
+	var stream *claudecli.Stream
+	if isClaudeModel(cfg.Model) {
+		stream = claudecli.NewStream()
+	}
+	cmd.Stdout = &beatWriter{w: stdout, hb: hb, stream: stream}
+	cmd.Stderr = &beatWriter{w: stderr, hb: hb}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {
-		return err, false, nil
+		return err, killInfo{}, nil
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 
-	tctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	select {
-	case err := <-done:
-		return err, false, nil
-	case <-tctx.Done():
+	killGroup := func(sig syscall.Signal) {
 		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = syscall.Kill(-cmd.Process.Pid, sig)
 		}
-		err := <-done
-		if errors.Is(tctx.Err(), context.DeadlineExceeded) {
-			return err, true, nil
-		}
-		return err, false, tctx.Err()
 	}
+	finish := func(k killInfo) (error, killInfo, error) {
+		if stream != nil {
+			k.costUSD, _ = stream.Cost()
+		}
+		if k.reason == wire.ReasonBudget {
+			// Clean stop: let the CLI flush its result object first.
+			killGroup(syscall.SIGTERM)
+			grace := cfg.TermGrace
+			if grace <= 0 {
+				grace = 5 * time.Second
+			}
+			select {
+			case err := <-done:
+				return err, k, nil
+			case <-time.After(grace):
+			}
+		}
+		killGroup(syscall.SIGKILL)
+		return <-done, k, nil
+	}
+
+	started := time.Now()
+	poll := pollInterval(lim)
+	tick := time.NewTicker(poll)
+	defer tick.Stop()
+	for {
+		select {
+		case err := <-done:
+			return err, killInfo{}, nil
+		case <-ctx.Done():
+			killGroup(syscall.SIGKILL)
+			err := <-done
+			return err, killInfo{}, ctx.Err()
+		case <-tick.C:
+		}
+		now := time.Now()
+		switch {
+		case now.Sub(started) >= lim.ceiling:
+			return finish(killInfo{reason: wire.ReasonCeiling})
+		case now.Sub(hb.last(started)) >= lim.idle:
+			return finish(killInfo{reason: wire.ReasonIdle})
+		}
+		if stream == nil {
+			continue
+		}
+		if cost, ok := stream.Cost(); ok && lim.maxCostUSD > 0 && cost >= lim.maxCostUSD {
+			return finish(killInfo{reason: wire.ReasonBudget})
+		}
+		if n, tool := stream.Repeats(); lim.loopLimit > 0 && n >= lim.loopLimit {
+			return finish(killInfo{reason: wire.ReasonLoop, tool: tool, repeats: n})
+		}
+	}
+}
+
+// limits are the run's enforced bounds.
+type limits struct {
+	ceiling    time.Duration // hard wall clock (timeout_s)
+	idle       time.Duration // max silence (idle_timeout_s)
+	maxCostUSD float64       // live spend cap; 0 disables
+	loopLimit  int           // identical tool calls in a row; <=0 disables
+}
+
+// killInfo records why the harness terminated the child ("" = it did not).
+type killInfo struct {
+	reason  string
+	costUSD float64
+	tool    string
+	repeats int
+}
+
+// pollInterval is how often limits are checked: fine enough for the
+// shortest configured limit, capped at 1s in production.
+func pollInterval(l limits) time.Duration {
+	d := time.Second
+	for _, v := range []time.Duration{l.idle / 10, l.ceiling / 10} {
+		if v > 0 && v < d {
+			d = v
+		}
+	}
+	if d < time.Millisecond {
+		d = time.Millisecond
+	}
+	return d
+}
+
+// heartbeat is the time of the child's last output.
+type heartbeat struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func newHeartbeat() *heartbeat { return &heartbeat{} }
+
+func (h *heartbeat) beat() {
+	h.mu.Lock()
+	h.t = time.Now()
+	h.mu.Unlock()
+}
+
+// last returns the last beat, or since when the child never wrote.
+func (h *heartbeat) last(since time.Time) time.Time {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.t.After(since) {
+		return h.t
+	}
+	return since
+}
+
+// beatWriter forwards child output to its buffer, counting every write as
+// a heartbeat and feeding the live stream parser when present.
+type beatWriter struct {
+	w      *syncBuffer
+	hb     *heartbeat
+	stream *claudecli.Stream
+}
+
+func (b *beatWriter) Write(p []byte) (int, error) {
+	if len(p) > 0 {
+		b.hb.beat()
+		if b.stream != nil {
+			b.stream.Feed(p)
+		}
+	}
+	return b.w.Write(p)
 }
 
 // fallbackResult maps the child's exit to a JobResult (§8.5): done when the
@@ -403,18 +560,36 @@ func fallbackResult(spec wire.JobSpec, stdout, stderr string, runErr error, clau
 	return res
 }
 
-// timeoutResult is the JobResult posted when the timeout killed the process
-// group (§8.6).
-func timeoutResult(spec wire.JobSpec, stdout string) wire.JobResult {
-	return wire.JobResult{
-		JobID:   spec.ID,
-		Status:  wire.StatusFailed,
-		Summary: summaryFrom(stdout),
-		Error: &wire.JobError{
-			Kind:    wire.KindTimeout,
-			Message: fmt.Sprintf("job exceeded timeout_s=%d; process group killed", spec.TimeoutS),
-		},
+// killResult is the JobResult posted when the harness killed the child
+// (§8.6): idle and ceiling are kind=timeout, budget and loop kind=other;
+// error.reason carries which limit fired.
+func killResult(spec wire.JobSpec, stdout string, k killInfo, lim limits) wire.JobResult {
+	e := &wire.JobError{Kind: wire.KindTimeout, Reason: k.reason}
+	summary := summaryFrom(stdout)
+	switch k.reason {
+	case wire.ReasonIdle:
+		e.Message = fmt.Sprintf("no output for idle_timeout_s=%d; process group killed", int(lim.idle/time.Second))
+	case wire.ReasonCeiling:
+		e.Message = fmt.Sprintf("job exceeded timeout_s=%d ceiling; process group killed", int(lim.ceiling/time.Second))
+	case wire.ReasonBudget:
+		e.Kind = wire.KindOther
+		e.Message = fmt.Sprintf("spend cap reached: ~$%.2f >= max_cost_usd=$%.2f; job terminated, partial output kept", k.costUSD, lim.maxCostUSD)
+		summary = truncRunes(fmt.Sprintf("Stopped at spend cap ($%.2f of $%.2f). Partial: %s", k.costUSD, lim.maxCostUSD, summary), wire.MaxSummaryChars)
+	case wire.ReasonLoop:
+		e.Kind = wire.KindOther
+		e.Message = fmt.Sprintf("loop guard: tool %q called with identical input %d times in a row; process group killed", k.tool, k.repeats)
 	}
+	return wire.JobResult{
+		JobID: spec.ID, Status: wire.StatusFailed, Summary: summary, Error: e,
+		Usage: &wire.Usage{CostUSD: k.costUSD},
+	}
+}
+
+func truncRunes(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n])
+	}
+	return s
 }
 
 // summaryFrom returns the first 240 chars of stdout, or "(no output)" when

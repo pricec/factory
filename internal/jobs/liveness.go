@@ -6,6 +6,7 @@ import (
 
 	"github.com/pricec/factory/internal/notify"
 	"github.com/pricec/factory/internal/registry"
+	"github.com/pricec/factory/internal/wire"
 )
 
 // Liveness implements notify.Observer (spec §6.3): activity and connects
@@ -106,7 +107,10 @@ func NewSweeper(store *Store) *Sweeper {
 
 // Pump runs one sweep pass:
 //  1. running jobs past timeout_s + 60s grace -> timed_out (terminal hook
-//     fires);
+//     fires). timeout_s is the hard CEILING (default 4h): the worker
+//     harness enforces idle_timeout_s and the spend cap itself and always
+//     posts its result by the ceiling, so the sweeper's deadline never
+//     precedes a job the harness still considers alive;
 //  2. foremen online with last_seen 90s or more old -> offline (the 90s
 //     threshold covers the 60s capabilities push cadence; spec §6.3).
 func (s *Sweeper) Pump(ctx context.Context) error {
@@ -134,13 +138,17 @@ func (s *Sweeper) Pump(ctx context.Context) error {
 		if err := unmarshalJSON([]byte(specJSON), &spec); err != nil {
 			continue // unreachable: specs are validated on Create
 		}
+		ceiling := spec.TimeoutS
+		if ceiling <= 0 {
+			ceiling = wire.DefaultTimeoutS
+		}
 		started, err := time.Parse(time.RFC3339, updatedAt)
 		if err != nil {
 			continue
 		}
 		candidates = append(candidates, candidate{
 			id:       id,
-			deadline: started.Add(time.Duration(spec.TimeoutS)*time.Second + timeoutGrace),
+			deadline: started.Add(time.Duration(ceiling)*time.Second + timeoutGrace),
 		})
 	}
 	if err := rows.Err(); err != nil {

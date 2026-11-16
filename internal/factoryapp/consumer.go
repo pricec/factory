@@ -80,7 +80,13 @@ func (a *App) handleEnvelope(ctx context.Context, env wire.MessageEnvelope, seen
 		// Arm the retry only when the job actually failed and the result
 		// carried an error kind (spec §6.4).
 		if job.State == jobs.StateFailed && res.Error != nil {
-			if err := a.jobs.MarkFailedForRetry(ctx, job.ID, string(res.Error.Kind)); err != nil {
+			retryKind := string(res.Error.Kind)
+			if r := res.Error.Reason; r == wire.ReasonBudget || r == wire.ReasonLoop {
+				// Re-running would just spend/loop again: unknown kind =
+				// zero retries = dead-letter immediately (§6.4).
+				retryKind = r
+			}
+			if err := a.jobs.MarkFailedForRetry(ctx, job.ID, retryKind); err != nil {
 				log.Printf("factoryapp: consumer: retry scheduling for %s: %v", job.ID, err)
 			}
 		}

@@ -567,3 +567,30 @@ func TestEnvelopeThreadIDBackwardCompatible(t *testing.T) {
 		t.Errorf("thread_id missing: %s", b)
 	}
 }
+
+func TestNormalizeTimeoutDefaults(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		tier     string
+		timeout  int
+		wantCeil int
+	}{
+		{"unset no tier", "", 0, 14400},
+		{"flash", TierFlash, 0, 3600},
+		{"default", TierDefault, 0, 7200},
+		{"hardest", TierHardest, 0, 14400},
+		{"explicit wins", TierFlash, 90, 90},
+	} {
+		s := JobSpec{Tier: tc.tier, TimeoutS: tc.timeout}
+		s.Normalize()
+		if s.TimeoutS != tc.wantCeil || s.IdleTimeoutS != 900 {
+			t.Errorf("%s: timeout_s=%d idle=%d, want %d/900", tc.name, s.TimeoutS, s.IdleTimeoutS, tc.wantCeil)
+		}
+	}
+	s := JobSpec{IdleTimeoutS: 60}
+	s.Normalize()
+	if s.IdleTimeoutS != 60 {
+		t.Errorf("explicit idle_timeout_s overridden: %d", s.IdleTimeoutS)
+	}
+}

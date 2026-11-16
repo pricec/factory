@@ -588,3 +588,53 @@ func TestAPIFiltersAndErrors(t *testing.T) {
 		t.Errorf("foremen: %d", rec.Code)
 	}
 }
+
+// The sweeper's deadline follows the ceiling (timeout_s), never the idle
+// timeout: a job past idle_timeout_s but inside the ceiling is still alive
+// from the harness's point of view and must not be marked timed_out.
+func TestSweeperUsesCeilingNotIdle(t *testing.T) {
+	s := openStore(t)
+	now := clock()
+	s.Now = func() time.Time { return *now }
+	ctx := context.Background()
+
+	spec := newSpec(t, func(sp *wire.JobSpec) { sp.TimeoutS = 0; sp.IdleTimeoutS = 900 })
+	spec.Normalize()
+	if spec.TimeoutS != wire.DefaultTimeoutS {
+		t.Fatalf("ceiling = %d, want default %d", spec.TimeoutS, wire.DefaultTimeoutS)
+	}
+	driveTo(t, s, spec, StateRunning)
+	sw := NewSweeper(s)
+
+	*now = now.Add(2 * time.Hour) // far past idle (15m), inside 4h ceiling
+	if err := sw.Pump(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if st := state(t, s, spec.ID); st != StateRunning {
+		t.Fatalf("state = %s, want running inside ceiling", st)
+	}
+	*now = now.Add(2*time.Hour + 61*time.Second)
+	if err := sw.Pump(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if st := state(t, s, spec.ID); st != StateTimedOut {
+		t.Fatalf("state = %s, want timed_out past ceiling+grace", st)
+	}
+}
+
+func TestApplyResultBudgetKillMarksOverBudget(t *testing.T) {
+	s := openStore(t)
+	spec := newSpec(t, nil)
+	driveTo(t, s, spec, StateRunning)
+	mustApplyResult(t, s, wire.JobResult{
+		JobID: spec.ID, Status: wire.StatusFailed, Summary: "Stopped at spend cap",
+		Error: &wire.JobError{Kind: wire.KindOther, Reason: wire.ReasonBudget, Message: "spend cap reached"},
+	})
+	j, _, err := s.Get(context.Background(), spec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !j.OverBudget || j.State != StateFailed {
+		t.Errorf("job = state %s over_budget %v, want failed + over_budget", j.State, j.OverBudget)
+	}
+}
