@@ -49,6 +49,52 @@ if ! id factory-foreman >/dev/null 2>&1; then
 	useradd --system --home /var/lib/factory-foreman --shell /usr/sbin/nologin factory-foreman
 fi
 
+# Worker CLIs (spec §8.4, §7.1): spawned workers run opencode (the pinned
+# GLM tiers) or the Claude Code CLI (claude-* worker models, e.g.
+# FACTORY_WORKER_HARDEST_MODEL=claude-opus-4-6), so a foreman machine needs
+# both. systemd runs the unit with the DEFAULT service PATH below - the
+# service user's ~/.local/bin and ~/.opencode/bin are NOT on it (the
+# 2026-11-15 user-unit PATH gotcha) - so each CLI is installed as the
+# service user (its self-updater keeps working) and symlinked into
+# /usr/local/bin. Idempotent: a service-visible install is detected and
+# kept. Every step verifies with command -v against the service PATH - the
+# same lookup the harness's exec performs at run time - and a failed or
+# unverifiable install aborts the onboarding loudly before the unit file is
+# written (re-run: idempotent).
+SERVICE_USER=factory-foreman
+SERVICE_HOME=/var/lib/factory-foreman
+SERVICE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+mkdir -p "$SERVICE_HOME"
+chown "$SERVICE_USER" "$SERVICE_HOME"
+if ! command -v su >/dev/null 2>&1; then
+	echo "error: su not found; cannot install the worker CLIs as $SERVICE_USER" >&2
+	exit 1
+fi
+install_worker_cli() {
+	local cli="$1" rel="$2" url="$3"
+	if PATH="$SERVICE_PATH" command -v "$cli" >/dev/null 2>&1; then
+		echo "$cli already on the service PATH: $(PATH="$SERVICE_PATH" command -v "$cli")"
+		return 0
+	fi
+	echo "installing $cli (as $SERVICE_USER) from $url ..."
+	if ! su -s /bin/bash -c "export HOME='$SERVICE_HOME'; curl -fsSL '$url' | bash" "$SERVICE_USER"; then
+		echo "error: $cli installation failed; without it this foreman's" >&2
+		echo "error: workers cannot run every routed model (spec §8.4)." >&2
+		echo "error: fix the failure above and re-run this script (idempotent)." >&2
+		exit 1
+	fi
+	ln -sfn "$SERVICE_HOME/$rel" "/usr/local/bin/$cli"
+	if ! PATH="$SERVICE_PATH" command -v "$cli" >/dev/null 2>&1; then
+		echo "error: $cli was installed but is not visible on the service" >&2
+		echo "error: PATH; refusing to onboard a foreman whose workers" >&2
+		echo "error: cannot exec it (spec §8.4)." >&2
+		exit 1
+	fi
+	echo "$cli installed: $(PATH="$SERVICE_PATH" command -v "$cli")"
+}
+install_worker_cli opencode .opencode/bin/opencode https://opencode.ai/install
+install_worker_cli claude .local/bin/claude https://claude.ai/install.sh
+
 cat >/etc/systemd/system/factory-foreman.service <<'EOF'
 [Unit]
 Description=factory foreman agent
@@ -82,8 +128,9 @@ echo "foreman onboarded as '$FOREMAN_ID'."
 systemctl --no-pager --lines=5 status factory-foreman || true
 echo "note: the embedded pairing token expires 15 minutes after it was"
 echo "issued; if pairing failed, re-fetch the install script for a fresh one."
-if ! command -v opencode >/dev/null 2>&1; then
-	echo "hint: opencode is not in PATH; workers need it to run jobs."
-	echo "hint: install it (e.g. via your package manager or the opencode"
-	echo "hint: docs) on this machine."
-fi
+echo "note: worker CLIs are visible on the service PATH (spec §8.4):"
+echo "note:   opencode: $(PATH="$SERVICE_PATH" command -v opencode || echo MISSING)"
+echo "note:   claude:   $(PATH="$SERVICE_PATH" command -v claude || echo MISSING)"
+echo "note: claude auth is the service user's (login once as $SERVICE_USER"
+echo "note: or set ANTHROPIC_API_KEY in the unit's environment); an"
+echo "note: unauthenticated claude run fails the job loudly (spec §8.4)."

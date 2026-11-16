@@ -2,8 +2,8 @@
 
 Distributed agent factory: a `factory` controller (web UI + orchestration)
 directs `foreman` agents on worker machines; each foreman spawns one-shot
-`worker` processes that run an opencode agent for a single job and report the
-result.
+`worker` processes that run an agent for a single job - opencode, or the
+Claude Code CLI for claude-* models (spec §8.4) - and report the result.
 
 ## Verify
 

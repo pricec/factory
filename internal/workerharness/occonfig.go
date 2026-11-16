@@ -67,8 +67,9 @@ func newOpenCODEConfig(cfg Config) openCODEConfig {
 	}
 }
 
-// writeConfig writes the generated config at path with 0600 perms (§8.4).
-func writeConfig(path string, c openCODEConfig) error {
+// writeConfig writes a generated config (opencode or claude shape, §8.4)
+// at path with 0600 perms.
+func writeConfig(path string, c any) error {
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err

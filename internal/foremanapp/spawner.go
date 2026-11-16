@@ -55,7 +55,7 @@ func (a *App) SpawnWorker(ctx context.Context, spec wire.JobSpec) error {
 	}
 
 	hcfg := a.BuildHarnessConfig(spec, bearer)
-	log.Printf("foremanapp: spawning worker for %s (model %q)", spec.ID, hcfg.Model)
+	log.Printf("foremanapp: spawning worker for %s (model %q, runner %s)", spec.ID, hcfg.Model, workerharness.RunnerFor(hcfg.Model))
 
 	// Child-spawn state (spec §9.2, 2026-11-15 sub-spawning amendment):
 	// recorded before the events and the harness goroutine, so the
@@ -182,7 +182,11 @@ func (a *App) postJobEvent(ctx context.Context, spec wire.JobSpec, event string)
 // localBaseURL - workers are local in-process children), the per-job token,
 // DataDir as the per-job root, and the model from the job's tier (spec
 // §6.5): flash (and no-tier jobs - the cost-biased default) run GLM 5.3
-// Flash, `tier: "default"` runs GLM 5.2, `tier: "hardest"` runs GLM 5.3.
+// Flash, `tier: "default"` runs GLM 5.3 Flash at max reasoning effort,
+// `tier: "hardest"` runs GLM 5.3. The model string also routes the
+// runner (§8.4): a claude-* override (e.g.
+// FACTORY_WORKER_HARDEST_MODEL=claude-opus-4-6) runs that tier via the
+// Claude Code CLI; the pinned GLM defaults are unchanged.
 func (a *App) defaultHarnessConfig(spec wire.JobSpec, bearer string) workerharness.Config {
 	base := localBaseURL(a.cfg.Addr)
 	model := a.cfg.WorkerFlashModel
