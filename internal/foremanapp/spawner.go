@@ -62,6 +62,7 @@ func (a *App) SpawnWorker(ctx context.Context, spec wire.JobSpec) error {
 	// consumer's copy of the child's terminal job.result into the parent's
 	// per-job inbox can never race the spawn.
 	a.recordSpawnState(spec)
+	a.markSpawned(spec.ID)
 
 	// Registry visibility (spec §6.2, 2026-11-15 spawn-visibility
 	// amendment): foreman-local spawns mint their JobSpec here, so the
