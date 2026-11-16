@@ -57,6 +57,12 @@ func (a *App) SpawnWorker(ctx context.Context, spec wire.JobSpec) error {
 	hcfg := a.BuildHarnessConfig(spec, bearer)
 	log.Printf("foremanapp: spawning worker for %s (model %q)", spec.ID, hcfg.Model)
 
+	// Child-spawn state (spec §9.2, 2026-11-15 sub-spawning amendment):
+	// recorded before the events and the harness goroutine, so the
+	// consumer's copy of the child's terminal job.result into the parent's
+	// per-job inbox can never race the spawn.
+	a.recordSpawnState(spec)
+
 	// Registry visibility (spec §6.2, 2026-11-15 spawn-visibility
 	// amendment): foreman-local spawns mint their JobSpec here, so the
 	// factory never created a registry row for them - brain-spawned jobs

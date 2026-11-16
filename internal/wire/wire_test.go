@@ -219,6 +219,11 @@ func TestSpecValidate(t *testing.T) {
 		{"reject schema outside subset", func(s *JobSpec) {
 			s.ResultSchema = raw(`{"type":"string","enum":["a"]}`)
 		}, true},
+		{"ok parent_job_id (worker sub-spawning)", func(s *JobSpec) {
+			s.ParentJobID = NewJobID()
+		}, false},
+		{"reject unprefixed parent_job_id", func(s *JobSpec) { s.ParentJobID = "abc" }, true},
+		{"reject self parent_job_id", func(s *JobSpec) { s.ParentJobID = s.ID }, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

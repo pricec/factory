@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,6 +33,33 @@ type env struct {
 	worker  string // worker bearer
 	foreman string // foreman bearer (no job scope)
 	workDir string
+	spawner *fakeSpawner               // spawn_child enqueues (spec §9.2)
+	parents map[string]wire.JobSpec    // ParentSpec stub backing store
+	childs  map[string]map[string]bool // ChildJobs stub: parent -> child ids
+}
+
+// fakeSpawner records spawn_child's enqueues (the harness seam, spec
+// §9.2); an injected err simulates a spawn failure.
+type fakeSpawner struct {
+	mu    sync.Mutex
+	specs []wire.JobSpec
+	err   error
+}
+
+func (f *fakeSpawner) Spawn(_ context.Context, spec wire.JobSpec) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	f.specs = append(f.specs, spec)
+	return nil
+}
+
+func (f *fakeSpawner) recorded() []wire.JobSpec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]wire.JobSpec(nil), f.specs...)
 }
 
 func newEnv(t *testing.T) *env {
@@ -46,11 +74,26 @@ func newEnv(t *testing.T) *env {
 		t.Fatalf("inbox.Open: %v", err)
 	}
 	workDir := filepath.Join(dir, "work")
+	spawner := &fakeSpawner{}
+	parents := map[string]wire.JobSpec{}
+	childs := map[string]map[string]bool{}
 	h, err := mcpworker.Handler(mcpworker.Config{
 		Auth:           authStore,
 		Inbox:          svc,
 		ForemanInboxID: foremanInbox,
 		WorkDir:        workDir,
+		Spawn:          spawner.Spawn,
+		ParentSpec: func(jobID string) (wire.JobSpec, bool, error) {
+			spec, ok := parents[jobID]
+			return spec, ok, nil
+		},
+		ChildJobs: func(parent string) []string {
+			var out []string
+			for id := range childs[parent] {
+				out = append(out, id)
+			}
+			return out
+		},
 	})
 	if err != nil {
 		t.Fatalf("mcpworker.Handler: %v", err)
@@ -75,7 +118,24 @@ func newEnv(t *testing.T) *env {
 	return &env{
 		t: t, svc: svc, auth: authStore, handler: h, base: srv.URL,
 		worker: worker, foreman: foreman, workDir: workDir,
+		spawner: spawner, parents: parents, childs: childs,
 	}
+}
+
+// setJob registers a persisted spec for one job (the ParentSpec stub
+// backing store - the real one reads the spawner's job.json).
+func (e *env) setJob(spec wire.JobSpec) {
+	e.parents[spec.ID] = spec
+}
+
+// addChild records a child id under its parent (the ChildJobs stub).
+func (e *env) addChild(parent, child string) {
+	set := e.childs[parent]
+	if set == nil {
+		set = map[string]bool{}
+		e.childs[parent] = set
+	}
+	set[child] = true
 }
 
 // rpc posts one JSON-RPC request and returns status + decoded body.
@@ -111,9 +171,13 @@ func (e *env) rpc(bearer, method string, params any) (int, map[string]any) {
 }
 
 func (e *env) callTool(args map[string]any) map[string]any {
+	return e.call("report_result", args)
+}
+
+func (e *env) call(name string, args map[string]any) map[string]any {
 	e.t.Helper()
 	status, out := e.rpc(e.worker, "tools/call", map[string]any{
-		"name":      "report_result",
+		"name":      name,
 		"arguments": args,
 	})
 	if status != 200 {
@@ -174,8 +238,12 @@ func TestInitializeToolsListAndBudget(t *testing.T) {
 	_, out = e.rpc(e.worker, "tools/list", nil)
 	res := resultOf(t, out)
 	tools, ok := res["tools"].([]any)
-	if !ok || len(tools) != 2 {
-		t.Fatalf("tools/list: want 2 tools, got %v", res["tools"])
+	if !ok || len(tools) != 4 {
+		t.Fatalf("tools/list: want 4 tools, got %v", res["tools"])
+	}
+	want := map[string]bool{
+		"report_result": true, "ask_parent": true,
+		"spawn_child": true, "collect_children": true,
 	}
 	names := map[string]bool{}
 	var budget int
@@ -183,6 +251,10 @@ func TestInitializeToolsListAndBudget(t *testing.T) {
 		tm := tl.(map[string]any)
 		name := tm["name"].(string)
 		names[name] = true
+		if !want[name] {
+			t.Errorf("unexpected tool %q", name)
+		}
+		delete(want, name)
 		desc, _ := tm["description"].(string)
 		budget += len(name) + len(desc)
 		for _, key := range []string{"inputSchema", "outputSchema"} {
@@ -195,8 +267,8 @@ func TestInitializeToolsListAndBudget(t *testing.T) {
 			}
 		}
 	}
-	if !names["report_result"] || !names["ask_parent"] {
-		t.Fatalf("tool names = %v, want report_result + ask_parent", names)
+	if len(want) != 0 {
+		t.Errorf("missing tools: %v", want)
 	}
 	if budget >= 1024 {
 		t.Errorf("description budget = %d bytes, want < 1024", budget)

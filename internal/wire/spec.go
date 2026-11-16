@@ -58,6 +58,14 @@ type JobSpec struct {
 	Budget       Budget          `json:"budget"`
 	CreatedBy    string          `json:"created_by,omitempty"`
 	CreatedAt    string          `json:"created_at,omitempty"`
+	// ParentJobID is set on child jobs spawned by a worker via the
+	// worker-MCP spawn_child tool (§9.2, 2026-11-15 sub-spawning
+	// amendment): it names the parent job, whose per-job inbox receives a
+	// copy of the child's terminal job.result. Empty for
+	// factory-dispatched and brain-spawned jobs; spawn_child is the only
+	// writer, and it refuses to spawn from a job that is itself a child
+	// (max 1 level, §9.2).
+	ParentJobID string `json:"parent_job_id,omitempty"`
 }
 
 // NewJobSpec returns a JobSpec for task with a fresh id, created_at set to
@@ -127,6 +135,14 @@ func (s *JobSpec) validate(requireID bool) error {
 	for _, r := range s.Requires {
 		if r == "" {
 			return fmt.Errorf("requires: entries must be non-empty")
+		}
+	}
+	if s.ParentJobID != "" {
+		if !isJobID(s.ParentJobID) {
+			return fmt.Errorf("parent_job_id: must be a %s-prefixed id, got %q", JobIDPrefix, s.ParentJobID)
+		}
+		if s.ParentJobID == s.ID {
+			return fmt.Errorf("parent_job_id: must differ from the job's own id")
 		}
 	}
 	switch s.Tier {
