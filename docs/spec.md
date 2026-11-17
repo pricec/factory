@@ -249,6 +249,7 @@ a different, fixed curve.)
   "payload": {},
   "result_schema": {},
   "requires": ["gpu"],
+  "secrets": ["github-push"],
   "foreman": "foreman:server",
   "tier": "flash",
   "timeout_s": 300,
@@ -273,6 +274,17 @@ Matcher's capability pick. Absent on ordinary matcher-dispatched jobs;
 when present it is the full `foreman:{id}` form at rest (the create
 paths normalize both forms, §7.3). `requires` stay informational on a
 pinned job.
+
+`secrets` (2026-11-17 job-secrets amendment, §13.2) lists credentials-store
+secret NAMES the job needs as env vars in its worker child; absent/empty
+when none. Names only - a value never enters a JobSpec, `job.json`, a
+prompt, a log line or an envelope. Each name must match the §13 name rule
+(`wire` validation) and, at creation, must EXIST in the store: the create
+paths (MCP `create_job` `secrets: [names]`, UI `POST /v1/jobs` `secrets`)
+reject unknown names loudly, listing them (`unknown_secrets`: MCP tool error
+/ `400`), and create nothing - fail at create, never at dispatch (the
+`requires` lesson, §6.7). Schedule templates carry names the same way; a
+name deleted before a later firing fails that job at the handout (§13.2).
 
 `parent_job_id` (2026-11-15 sub-spawning amendment, §9.2) appears only on
 child jobs spawned by a worker's `spawn_child` tool and is absent otherwise
@@ -614,9 +626,10 @@ factory planner's list view carries summaries only (#7, #19).
 | Method & path | Notes |
 |---|---|
 | `GET /v1/jobs?state=&foreman=` | filter by state and foreman (#9) |
-| `POST /v1/jobs` | UI twin of the MCP `create_job` tool (§9.4): body `{task, requires[], result_schema, tier, timeout_s, priority, schedule_cron, foreman?, task_id?}`; runs the same spend breaker + capability match (no match -> `pending`); `201 + {job_id, state, foreman}`. `requires` entries are tag names, validated at creation against the union of registered foremen tag keys (§6.7, 2026-11-15 amendment): unknown tag names -> `400 unknown_requires`; a loud `warnings` array rides the 201 when nothing could be validated (no foremen registered). `foreman` (2026-11-16 foreman-pin amendment, §6.7) pins the job to that foreman (bare or `foreman:{id}` form): the pin wins over the Matcher, requires validation is skipped (requires stay informational), an unknown foreman is `404 unknown_foreman` (the `POST /v1/foremen/{id}/messages` contract), and an offline pin leaves the job `pending` with a `warnings` entry until it returns |
+| `POST /v1/jobs` | UI twin of the MCP `create_job` tool (§9.4): body `{task, requires[], secrets[]?, result_schema, tier, timeout_s, priority, schedule_cron, foreman?, task_id?}`; runs the same spend breaker + capability match (no match -> `pending`); `201 + {job_id, state, foreman}`. `requires` entries are tag names, validated at creation against the union of registered foremen tag keys (§6.7, 2026-11-15 amendment): unknown tag names -> `400 unknown_requires`; a loud `warnings` array rides the 201 when nothing could be validated (no foremen registered). `foreman` (2026-11-16 foreman-pin amendment, §6.7) pins the job to that foreman (bare or `foreman:{id}` form): the pin wins over the Matcher, requires validation is skipped (requires stay informational), an unknown foreman is `404 unknown_foreman` (the `POST /v1/foremen/{id}/messages` contract), and an offline pin leaves the job `pending` with a `warnings` entry until it returns |
 | `POST /v1/foremen/{id}/messages` | UI twin of the MCP `message_foreman` tool (§9.4): body `{type, payload, job_id?}` posted from the planner identity; `201` + envelope. `{id}` accepts the bare foreman id or the full `foreman:{id}` form - both normalize to the same inbox (§7.3), never a double-prefixed one. `payload` is required (any JSON value; `{}` for an empty body); a null/missing payload is `400`. An id matching no registered foreman is `404 unknown_foreman` - posting never opens an inbox no foreman consumes (2026-11-14 amendment) |
-| `GET /v1/jobs/{id}` | (#9) the job record; plus `task_id` when the job is directly linked to a task (§9.5.2; 2026-11-16 deploy-18 follow-up - omitted when unlinked, a read never writes lineage links) |
+| `GET /v1/jobs/{id}/secrets` | Job secrets handout (2026-11-17 amendment, §13.2) - the ONLY surface that returns secret values: `200 {"secrets":[{"name","env_var","value"}]}`. Auth: the bearer must be a paired foreman credential (`401` missing/unknown, `403` planner/worker/other), the job row's `foreman_id` must equal that foreman (`403` otherwise - an unknown job is indistinguishable), the job must be `dispatched` or `running` (`409 job_not_live`), and only names in the spec's `secrets` are returned. A name since deleted from the store -> `404 unknown_secrets` (names only). Each successful handout writes `secret_grants` rows first (§13.2); a failed audit write hands out nothing (`500`). `Cache-Control: no-store` |
+| `GET /v1/jobs/{id}` | (#9) the job record; plus `granted_secrets` (names only, §13.2; omitted when none); plus `task_id` when the job is directly linked to a task (§9.5.2; 2026-11-16 deploy-18 follow-up - omitted when unlinked, a read never writes lineage links) |
 | `POST /v1/jobs/{id}/cancel` | Cancel/supersede a job (2026-11-15 amendment, §6.1): optional body `{reason?, terminal_state?}` with `terminal_state` = `cancelled` (default) \| `superseded`; an empty body is a plain cancel. Every non-terminal state moves to that terminal state; every terminal job is rejected `409 already_terminal`; unknown job `404`; malformed body `400`. `200` + the refreshed job record. UI twin of the MCP `cancel_job` tool (§9.4) |
 | `GET /v1/foremen` | returns `id, online, capabilities` (#9) |
 | `POST /v1/merge-requests` | Queue a merge (2026-11-17 amendment, §6.11): body `{branch, head, repo?, note?}`; `201` + the request in state `queued`, `requested_by` `operator`. `400 bad_request` on invalid input; `409 duplicate_request` when the same repo+branch already has a queued or merging request |
@@ -1206,7 +1219,7 @@ orphaned, live, and local job ids.
   section (#17, #15).
 - Tool descriptions stay tiny (per-turn token cost for every LLM caller,
   #6); byte budgets asserted by test: worker surface < 1.5KB total (#17; 2026-11-17 typed report_result input schema, was 1KB);
-  foreman surface < 1.5KB (#18; 2KB since the 2026-11-16 `raise_alert` tool); factory surface < 4.5KB (2026-11-17 merge
+  foreman surface < 1.5KB (#18; 2KB since the 2026-11-16 `raise_alert` tool); factory surface < 5KB (2026-11-17 job secrets; was 4.5KB, merge
   queue: raised from 4KB for `request_merge`, §6.11 - 4093 B were in use;
   earlier: < 4KB since the 2026-11-16
   inbox redesign: raised from 2KB for the task tools of §9.5.2 and
@@ -2019,7 +2032,7 @@ outside the `result_schema` subset at validation time (#3).
 | Bearer token | 32B random, stored SHA-256 only | #11 |
 | Long-poll window | `wait_seconds` 0-60 | #1 |
 | Inbox fetch limit | default 50, max 500 | #1 |
-| MCP description budgets | worker < 1.5KB (2026-11-17 typed report_result schema; was 1KB); foreman < 2KB (2026-11-16 raise_alert; was 1.5KB); factory < 4.5KB (2026-11-17 merge queue; was 4KB, 2KB before 2026-11-16) | #17, #18, #19 |
+| MCP description budgets | worker < 1.5KB (2026-11-17 typed report_result schema; was 1KB); foreman < 2KB (2026-11-16 raise_alert; was 1.5KB); factory < 5KB (2026-11-17 job secrets; was 4.5KB after merge queue; 4KB, 2KB before 2026-11-16) | #17, #18, #19 |
 | JobSpec defaults | `timeout_s` 14400 (ceiling); `idle_timeout_s` 900; `priority` 5 (1-9, 9 highest); `budget` `{max_prompt_bytes 32768, max_output_tokens 8192, max_cost_usd 20.0}` | #3 |
 | Long-pending alert | `pending` with no matching online foreman for > 30 min -> one `notify.pending` in `planner:main` (dedupe per job per pending episode); check tick 1 min | 2026-11-15 amendment |
 | Merge queue | one `merging` at a time; tick 5s + kicks; merge job tier `hardest`, `timeout_s` 7200, `idle_timeout_s` 1800, priority 3, pinned `foreman:server` (`FACTORY_MERGE_FOREMAN`), never retried; needs_attention alert P1 source `factory:merge_queue` | 2026-11-17 amendment, §6.11 |
@@ -2181,8 +2194,7 @@ cannot read).
 
 The factory keeps operator-managed named secrets: generic values with an
 env-var mapping, not tied to any provider. This amendment covers storage
-and management only; handing a value to a job is a follow-up amendment
-(piece 2) with its own job-scoped endpoint.
+and management; handing a value to a job is §13.2.
 
 **Storage posture.** Plaintext at rest - NO encryption - in one file,
 `secrets.json`, in the factory data dir, mode `0600` (enforced on create,
@@ -2211,12 +2223,56 @@ POST /v1/secrets/gh-token   {"value":"ghp_...","env_var":"GH_TOKEN"}
 
 **No value echo.** No response on this surface ever contains a secret's
 value - not the upsert response, not the list, not any error. There is
-deliberately NO endpoint that returns a value. Values are never logged;
+deliberately NO endpoint on this surface that returns a value; the only
+value-returning route is the job-scoped handout (§13.2). Values are never logged;
 errors and logs carry names only. The operator UI Credentials section is
 write-only for values (the input clears on submit).
 
-**Follow-up.** Job handout (exposing a secret to a job as its mapped env
-var) is a separate amendment (piece 2).
+### 13.2 Job handout (2026-11-17 amendment, piece 2)
+
+Named secrets reach a job as environment variables of its worker child
+process, and nowhere else.
+
+1. **Declare.** The job spec's `secrets` lists names (§5.1), validated
+   against the store at creation.
+2. **Fetch.** `GET /v1/jobs/{id}/secrets` (§6.9) with the foreman's paired
+   bearer returns `{secrets:[{name, env_var, value}]}`. Host-trust: no new
+   bearer; the existing paired-foreman credential plus the job row's
+   `foreman_id` binding is the gate, and a foreman can only ever read the
+   secrets named by a job assigned to it.
+3. **Inject.** The foreman (spawner) fetches after the `accepted`/`started`
+   events and before the child starts, with a bounded retry (3 attempts, 1 s
+   apart; 5xx and connection errors retry, 4xx are definitive). Any failure
+   posts a failed `job.result` (`spawn failure for {id}: could not fetch
+   secrets [names] from the factory: ...`) through the ordinary failure path
+   (§8.5, retry policy §6.4): a job promised credentials never runs without
+   them. On success the values travel in `workerharness.Config.SecretEnv`
+   and are merged into the **runner child's environment only** (opencode or
+   claude), as `env_var=value` (default `SECRET_<NAME>`, §13).
+4. **Audit.** Each successful handout writes one row per name to
+   `jobs.db` table `secret_grants (job_id, name, granted_at)` BEFORE the
+   response is sent. `GET /v1/jobs/{id}` carries `granted_secrets` (names).
+   Values are never stored in the audit.
+
+**Hard invariants.** A secret value is never in: `job.json` or any spec
+(names only), generated runner config, prompts, any log line, any posted
+envelope, any error message (errors carry job id, names, HTTP status), the
+job detail/list responses, or the §13 list/upsert responses. The harness
+additionally scrubs exact occurrences of the injected values from the
+child's stdout/stderr (replaced by `[REDACTED]`) before they can reach a
+fallback result or a log line.
+
+**Security posture (best effort).** Values live in foreman process memory
+(`SecretEnv`) for the run and the reference is dropped when the run ends.
+Go strings are immutable and are NOT zeroed; the runtime may retain copies
+until garbage-collected or the process exits, and the child process holds
+the value in its own environment (visible to the same user via
+`/proc/<pid>/environ`). Redaction catches only verbatim echoes, not encoded
+or split values. A job that reports through `report_result` posts agent-
+authored text the harness does not scrub: an agent given a credential can
+disclose it. The plaintext 0600 store, the unencrypted handout (use a
+loopback or otherwise trusted link between foreman and factory) and the
+host-trust control plane remain the trust boundary (§13).
 
 ---
 

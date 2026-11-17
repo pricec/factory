@@ -48,8 +48,12 @@ type stack struct {
 	foremanSrv     *httptest.Server
 	fakeOpencode   string
 	foremanDataDir string
-	ctx            context.Context
-	cancel         func()
+	factoryDataDir string
+	// onBuild, when set, runs inside the BuildHarnessConfig seam (the
+	// spawner calls it before the secrets fetch): a deterministic hook.
+	onBuild func(spec wire.JobSpec)
+	ctx     context.Context
+	cancel  func()
 
 	// workerBearers records the per-job worker token the spawner minted
 	// (captured via the BuildHarnessConfig override seam), for the
@@ -73,8 +77,9 @@ func boot(t *testing.T) *stack {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &stack{t: t, ctx: ctx, cancel: cancel, workerBearers: map[string]string{}}
 
+	s.factoryDataDir = t.TempDir()
 	fac, err := factoryapp.New(factoryapp.Config{
-		DataDir:      t.TempDir(),
+		DataDir:      s.factoryDataDir,
 		Addr:         "127.0.0.1:0",
 		AdvertiseURL: "http://factory.test",
 		Budget:       budgets.DefaultConfig(),
@@ -133,7 +138,11 @@ func boot(t *testing.T) *stack {
 	fore.BuildHarnessConfig = func(spec wire.JobSpec, bearer string) workerharness.Config {
 		s.mu.Lock()
 		s.workerBearers[spec.ID] = bearer
+		hook := s.onBuild
 		s.mu.Unlock()
+		if hook != nil {
+			hook(spec)
+		}
 		c := orig(spec, bearer)
 		c.OpenCODEBin = s.fakeOpencode
 		c.ResultURL = s.foremanSrv.URL + "/v1/inboxes/" + foremanInbox + "/messages"

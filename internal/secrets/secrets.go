@@ -126,8 +126,34 @@ func (s *Store) Put(name, value, envVar string) (Meta, error) {
 	return Meta{Name: name, EnvVar: e.EnvVar, UpdatedAt: e.UpdatedAt}, nil
 }
 
-// Get returns the value and metadata. Internal use only (piece 2); no
-// HTTP route calls it.
+// Missing returns the names (sorted, de-duplicated) that are not in the
+// store. Names only; used for creation-time validation (spec §13.2).
+func (s *Store) Missing(names []string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seen := map[string]bool{}
+	var out []string
+	for _, n := range names {
+		if _, ok := s.m[n]; !ok && !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// CheckNames validates a job's secrets list at creation: every name must
+// exist. The error names the unknown secrets (never any value).
+func (s *Store) CheckNames(names []string) error {
+	if missing := s.Missing(names); len(missing) > 0 {
+		return fmt.Errorf("unknown_secrets: %s not in the credentials store (GET /v1/secrets lists names)", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+// Get returns the value and metadata. Used only by the job handout
+// endpoint (spec §13.2); no other route calls it.
 func (s *Store) Get(name string) (string, Meta, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

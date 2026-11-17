@@ -556,6 +556,7 @@
         <textarea id="job-task" placeholder="what should the worker do?"></textarea>
         <div class="row">
           <div><label>requires (comma-separated tag names)</label><input id="job-requires" placeholder="os:linux, arch:amd64, tools:git"></div>
+          <div><label>secrets (comma-separated credential names)</label><input id="job-secrets" placeholder="github-push"></div>
           <div><label>tier</label><select id="job-tier"><option value="">flash — GLM 5.3 Flash (cheapest, default)</option><option value="default">default — GLM 5.3 Flash, max thinking (same low price)</option><option value="hardest">hardest — GLM 5.3 (full model)</option></select></div>
           <div><label>timeout_s</label><input id="job-timeout" type="number" min="1" placeholder="300"></div>
           <div><label>priority 1-9</label><input id="job-priority" type="number" min="1" max="9" placeholder="5"></div>
@@ -1386,6 +1387,7 @@ $("createjob").onsubmit = async (ev) => {
   note.textContent = "";
   const body = { task: $("job-task").value.trim() };
   if ($("job-requires").value.trim()) body.requires = $("job-requires").value.split(",").map(s => s.trim()).filter(Boolean);
+  if ($("job-secrets").value.trim()) body.secrets = $("job-secrets").value.split(",").map(s => s.trim()).filter(Boolean);
   if ($("job-tier").value) body.tier = $("job-tier").value;
   if ($("job-timeout").value) body.timeout_s = parseInt($("job-timeout").value, 10);
   if ($("job-priority").value) body.priority = parseInt($("job-priority").value, 10);
