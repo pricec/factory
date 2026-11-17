@@ -686,7 +686,7 @@ uses the UI or `POST /v1/merge-requests` (§6.9).
 
 - **Resource** (`jobs.db`): `merge_requests(id 'mr_<ulid>' PK, repo
   (gh OWNER/REPO, default pricec/factory), branch, head, note,
-  requested_by (operator | planner), job_id ('' until merging), state,
+  requested_by (operator | planner | auditor, §6.12), job_id ('' until merging), state,
   result ('' until terminal), created_at, updated_at)`, plus the one-row
   `merge_queue(paused, updated_at)` pause flag. JSON:
   `{id, repo, branch, head, note, requested_by, job_id?, state, result?,
@@ -743,6 +743,108 @@ uses the UI or `POST /v1/merge-requests` (§6.9).
   expires) through the §9.5.3 alerts surface, with source
   `factory:merge_queue`. The title names the request and branch; the body
   carries repo/branch/head, the job id and `result`.
+
+### 6.12 Factory auditor (2026-11-17 amendment)
+
+A daily, factory-owned self-audit (`internal/auditor`, wired in
+`internal/factoryapp/auditor.go`) reviews how the factory ran and either
+files **proposals** for the operator or applies **auto-fixes** inside
+guardrails enforced in code.
+
+- **Schedule.** The factory owns exactly one §6.8 schedule whose template
+  has `created_by` `factory:auditor` and payload `{"kind":"factory_audit"}`.
+  It is (re)created at factory start from config: cron
+  `FACTORY_AUDIT_CRON` (default `0 6 * * *`) in `FACTORY_AUDIT_TZ` (default:
+  the host zone; stored as `CRON_TZ=<zone> <cron>`); `FACTORY_AUDIT_ENABLED=0`
+  removes it. The audit job is LOW priority (JobSpec priority 1, never above
+  3), tier `flash`, pinned to `FACTORY_AUDIT_FOREMAN` (default
+  `foreman:server`), and filed under no task, so it is never P0 and the
+  usage throttle (§6.10) may hold it like any job.
+- **Fire-time snapshot.** `Scheduler.Prepare` lets the factory fill a fired
+  job before admission: the audit job's payload carries the deterministic
+  findings computed from jobs.db / inbox.db (jobs with state, failures,
+  retries, timeouts, held + `held_reason`, `over_budget`; usage tokens and
+  `cost_usd` per job and per kind×tier; merge-queue outcomes; foremen
+  online state and build ids) over 24h with a 7-day trend, plus
+  `repo_dir`/`worktree_root` for the job's scan.
+- **No git in the factory service.** The factory service runs no git and
+  holds no repo credential: git happens only in jobs and CI. The audit job
+  itself runs the read-only worktree scan on its foreman (`git worktree
+  list --porcelain` of `FACTORY_AUDIT_REPO_DIR`; for each worktree under
+  `FACTORY_AUDIT_WORKTREE_ROOT`: head, branch, merged = head is an ancestor
+  of the existing `origin/master` ref, no fetch; clean = empty `git status
+  --porcelain`; last commit time). The flash sweep checks the findings,
+  inspects the host read-only, and returns `{findings: [...], worktrees:
+  [...], worktree_scan_error}` (result_schema pinned). The factory treats
+  the scan as untrusted input (`auditor.ValidateWorktrees`: clean absolute
+  paths strictly under the root, hex heads, no prunable targets) and
+  derives the `worktree:*` findings from it; with no scan, no worktree
+  finding is filed and no cleanup is admitted.
+- **Findings.** Each has a fingerprint (`<kind>:<key>`; sweep-only ones
+  `sweep:<slug>`), evidence (job ids, token/cost numbers), likely cause,
+  proposed fix, benefit, effort and a metric (higher = worse). The sweep may
+  only sharpen the prose of a detector finding; evidence, metric and the
+  auto-fix plan stay code-derived. Known issues (report_result `error`
+  field; merge conflicts with master) are reported, never auto-fixed.
+- **Processing** happens on the audit job's terminal transition (`done`;
+  `timed_out`/`dead` fall back to the detector findings). Dedup: fingerprints
+  live in `audit_findings` (jobs.db). A finding whose task is open is not
+  re-filed; one whose task was closed (operator, planner or reaper) is
+  re-filed only when its metric is >= 2x the metric it was filed at.
+- **Proposal** = a task titled `[proposal] ...`, `needs_operator=true`,
+  task priority `>= 1` (default 3; never 0), with a `brain.reply` note from
+  `factory:auditor` holding the body (`brain.reply` never wakes the
+  planner). The operator's reply wakes the planner, which dispatches the
+  fix through the normal branch -> CI -> merge queue -> deploy flow.
+- **Auto-fix** only when ALL hold, each enforced in `internal/auditor`
+  (any failure files a proposal and says which):
+  - kind is `pr` (one branch, plan <= 150 lines; the real diff is checked
+    by CI, below), `cleanup_worktrees` (worktrees the job's scan reported
+    merged into master AND clean, under the worktree root; the cleanup job
+    re-checks both and uses `git worktree remove` / `git branch -d`, never
+    `--force` / `-D`) or `cancel_dead_held` (held > 6h since the hold,
+    task closed, not `created_by ui`: planner-created jobs under operator
+    tasks qualify, jobs the operator created directly never do);
+  - no path in, and no plan text naming, a denylisted area: spend caps and
+    budgets, the usage throttle, secrets, auth/permissions, the
+    merge/deploy/rollback procedure (and Makefile/CI/go.mod), normative
+    contracts (spec, AGENTS.md), or the auditor itself (its package,
+    wiring, CLI and the scheduler) - `auditor.Denylist`;
+  - at most 5 auto-fixes per run (`HardMaxAutoFixes`; config may only
+    lower it);
+  - the run's budget meter admits it: the audit job plus its fix jobs,
+    finished jobs at their `cost_usd`, unfinished at max(cost, their
+    `max_cost_usd` reservation, `FACTORY_AUDIT_FIX_RESERVE_USD`, default
+    $1.50), may not exceed `FACTORY_AUDIT_BUDGET_USD` (default $10); once
+    the meter reaches the budget no new work starts.
+  Fix jobs are `created_by` `factory:auditor`, priority 1, tier `default`
+  (`flash` for cleanups), pinned like the audit job, created through the
+  same admission path as every job (held by the throttle when it holds).
+  Each auto-fix opens an informational `[auto-fix] ...` task
+  (`needs_operator=false`) saying what changes, the job, and how to revert.
+- **PR fixes: the diff guardrail is a required CI check.** The fix job
+  pushes its assigned branch `auto/audit-<run>-<n>` and reports `{branch,
+  head}`; the factory (no git) creates the §6.11 merge request
+  (`requested_by` `auditor`) and the merge job opens the PR. The
+  `audit-guardrail` check (`.github/workflows/audit-guardrail.yml`) runs
+  on `pull_request_target`, so GitHub uses MASTER's copy of the workflow,
+  checks out master, builds `cmd/auditcheck` from master and feeds it `git
+  diff --numstat -z -M origin/master...<PR head>`; it fails unless the diff
+  is non-empty, text only, <= 150 changed lines and touches no denylisted
+  path (`.github/`, `Makefile` and `cmd/auditcheck/` are denylisted). A fix
+  branch therefore cannot weaken its own check. Non-`auto/audit-*` PRs pass
+  it trivially, so it is a required status check on master. The merge
+  procedure merges only on all-green checks; a red check (or any other
+  merge failure) puts the request in `needs_attention`, and the factory
+  turns that auto-fix task into a `[proposal]` with `needs_operator=true`
+  and the reason. A fix job that is not `done` or reports another branch
+  becomes a proposal at once.
+- **Dry run.** `factory audit -data <dir> -dry-run [-json] [-worktrees
+  FILE]` opens the databases read-only and prints the findings and the
+  decisions a run would take (dedup, proposal vs auto-fix and why), filing
+  and fixing nothing. It runs no git either: the worktree scan is skipped
+  unless a scan in the audit job's result format is passed with
+  `-worktrees`.
 
 ## 7. Pairing & scoped auth
 

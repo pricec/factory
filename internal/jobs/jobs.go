@@ -159,6 +159,11 @@ func addColumnIfMissing(db *sql.DB, table, column, decl string) error {
 	return err
 }
 
+// DB exposes the underlying database for read-mostly collaborators that
+// keep their own tables in jobs.db (the auditor's snapshot and
+// fingerprints, spec §6.12).
+func (s *Store) DB() *sql.DB { return s.db }
+
 // Close closes the underlying database.
 func (s *Store) Close() error { return s.db.Close() }
 
