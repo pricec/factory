@@ -290,3 +290,29 @@ func TestCancelAPI(t *testing.T) {
 		}
 	})
 }
+
+// TestCancelHookOnlyForLiveJobs: the onCancelled hook (worker kill) fires for
+// dispatched and running jobs, never for pending ones, once per cancel.
+func TestCancelHookOnlyForLiveJobs(t *testing.T) {
+	for _, tc := range []struct {
+		from string
+		want int
+	}{{StatePending, 0}, {StateDispatched, 1}, {StateRunning, 1}, {StateFailed, 0}} {
+		t.Run(tc.from, func(t *testing.T) {
+			s := openStore(t)
+			spec := newSpec(t, nil)
+			driveTo(t, s, spec, tc.from)
+			var got []Job
+			s.SetOnCancelled(func(j Job) { got = append(got, j) })
+			if _, err := s.Cancel(context.Background(), spec.ID, StateSuperseded, "dup"); err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != tc.want {
+				t.Fatalf("hook fired %d times, want %d", len(got), tc.want)
+			}
+			if tc.want == 1 && (got[0].State != StateSuperseded || got[0].ForemanID == "") {
+				t.Errorf("hook job = %+v, want superseded with foreman", got[0])
+			}
+		})
+	}
+}

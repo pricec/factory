@@ -80,6 +80,9 @@ type Store struct {
 	// (spec §6.1; #11 registers InvalidateJob, #10 registers retry
 	// scheduling via it).
 	onTerminal func(jobID, finalState string)
+	// onCancelled, if set, fires after Cancel moves a dispatched or running
+	// job to cancelled/superseded (the worker may still be alive).
+	onCancelled func(job Job)
 	// admission, if set, is the dispatch gate consulted by every create
 	// path (S3 token throttle; see Admit).
 	admission Admission
@@ -169,6 +172,10 @@ func (s *Store) Close() error { return s.db.Close() }
 
 // SetOnTerminal installs the terminal-transition hook (spec §6.1).
 func (s *Store) SetOnTerminal(fn func(jobID, finalState string)) { s.onTerminal = fn }
+
+// SetOnCancelled installs the hook fired when a dispatched or running job
+// is cancelled or superseded, so its worker can be stopped.
+func (s *Store) SetOnCancelled(fn func(job Job)) { s.onCancelled = fn }
 
 func (s *Store) now() string { return s.Now().UTC().Format(time.RFC3339) }
 

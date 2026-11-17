@@ -21,6 +21,10 @@ type MessageEnvelope struct {
 	ThreadID string          `json:"thread_id,omitempty"`
 }
 
+// TypeJobCancel is the factory -> foreman envelope telling a foreman to stop
+// the worker of a job that was cancelled or superseded (spec §3.2).
+const TypeJobCancel = "job.cancel"
+
 // JobScoped reports whether msgType is job-scoped - prefixed "job." - and so
 // requires a job_id (§3.1, §3.2).
 func JobScoped(msgType string) bool {

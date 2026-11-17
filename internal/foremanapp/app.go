@@ -140,6 +140,10 @@ type App struct {
 	// harness posts job.usage after the agent child exits, which can be
 	// after report_result.
 	live map[string]bool
+	// cancels holds the stop channel of each live worker; cancelled is every
+	// job id a job.cancel was seen for (both guarded by spawnedMu; cancel.go).
+	cancels   map[string]chan struct{}
+	cancelled map[string]bool
 	// procRoot is the process table the orphan probe reads (spec §8.7).
 	procRoot string
 
@@ -206,6 +210,8 @@ func New(cfg Config) (*App, error) {
 		childrenOf:  map[string]map[string]bool{},
 		spawned:     map[string]bool{},
 		live:        map[string]bool{},
+		cancels:     map[string]chan struct{}{},
+		cancelled:   map[string]bool{},
 		procRoot:    cfg.ProcRoot,
 		build:       cfg.Build,
 		gate:        &intakeGate{},
@@ -497,7 +503,17 @@ func (a *App) handleBatch(ctx context.Context, envs []wire.MessageEnvelope, ack 
 		// dispatch stays unacked in its inbox (redelivered on resume or
 		// after the restart); admitted ones count as live work until
 		// their spawn has registered the worker.
+		if env.Type == wire.TypeJobCancel {
+			a.cancelWorker(env.JobID)
+			ids = append(ids, env.ID)
+			continue
+		}
 		if env.Type == "job.request" {
+			if a.jobCancelled(env.JobID) {
+				log.Printf("foremanapp: job.request %s for cancelled job %s dropped", env.ID, env.JobID)
+				ids = append(ids, env.ID)
+				continue
+			}
 			if !a.gate.beginDispatch() {
 				log.Printf("foremanapp: job.request %s deferred: draining for auto-update (not acked; redelivered)", env.ID)
 				continue

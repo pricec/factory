@@ -85,6 +85,7 @@ response is the full envelope with server-assigned `id` and `ts` (#1).
 | `job.request` | Factory dispatch: `create_job` (#19), schedule fire (#8), retry re-dispatch (#10) - derived from the routing and dispatch rules | Foreman routing -> `spawn_worker` (#4); the envelope carries the JobSpec (derived: #4 enqueues "the JobSpec", #13 rejects `job.request` on prompt size) | #4, #8, #10, #13, #19 |
 | `job.result` | Worker: via `report_result` (#17) or the harness fallback (#5) | Foreman routing -> forward to parent, byte-identical payload (§3.4); then the factory jobs events path: terminal status (#9), retry policy (#10), usage accounting (#13) | #1, #4, #5, #7, #9, #10, #17 |
 | `job.event` | Foreman: `{"job_id": ..., "event": "accepted" or "started"}` (#9); `accepted` also carries the full JobSpec - `{"event": "accepted", "spec": {...}}` - so foreman-local spawns register in the job registry (2026-11-15 spawn-visibility amendment, §6.2) | Factory jobs events path (#9); foreman-side routing rule: drop (#4) | #4, #9 |
+| `job.cancel` | Factory: `{job_id, state}` posted to the owning foreman's inbox `foreman:{id}` when a `dispatched`/`running` job is cancelled or superseded (`cancel_job`, `POST /v1/jobs/{id}/cancel`; 2026-11-17 amendment). The inbox is durable, so an offline foreman receives it on reconnect | Foreman consume loop (handled before the routing table, never the brain): SIGTERM to the worker's process group, SIGKILL after a 10s grace; no result is posted. A `job.request` for a cancelled job id that arrives or is redelivered afterwards is dropped. The factory already ignores any late `job.result` for a terminal job (§6.4) | 2026-11-17 supersede-kills-worker amendment |
 | `job.question` | Worker: via `ask_parent` (#17), posted to the foreman's own inbox `foreman:{id}` (§3.2) | Foreman brain via routing, 60s SLA, default answer on timeout (#4) | #4, #11, #17 |
 | `job.answer` | Foreman brain: via `answer_worker` (#18) | Worker: `ask_parent` long-polls the job inbox (#17); `answer_worker` posts to the job inbox (#18) | #17, #18 |
 | `brain.wake` | Not pinned in any body | Routing -> brain (#4) | #4 |
@@ -576,6 +577,16 @@ factory planner's list view carries summaries only (#7, #19).
   deletes the stub (#8, #12).
 - No matching foreman: the job stays `pending`, log once (visible via
   `/v1/jobs`) (#8).
+- Factory-repo pin guard (2026-11-17 amendment): work on the factory's own
+  repo (`pricec/factory` and its worktrees) must run on `foreman:server`.
+  The task is free text, so the Matcher cannot route it; instead MCP
+  `create_job` rejects an UNPINNED job whose task contains a factory-repo
+  marker (`pricec/factory`, `/home/price/work/factory`,
+  `/home/price/temp/factory`, case-insensitive) with
+  `factory_repo_needs_pin`, telling the caller to pin `foreman:server`. Any
+  explicit pin passes; a pin to another foreman adds a `warnings` entry.
+  Marker list and target are `mcpfactory.Config.FactoryRepoMarkers` /
+  `FactoryForeman`.
 - Explicit foreman pin (2026-11-16 amendment): a JobSpec's `foreman`
   field (§5.1) routes the job explicitly - the pin WINS over the
   Matcher, and a pinned job is never capability-matched. The create
@@ -1570,7 +1581,11 @@ Tools (exact):
   wins over the Matcher, requires validation is skipped (requires stay
   informational), an unknown foreman is a tool error (`unknown
   foreman`), and an offline pin leaves the job pending with a
-  `warnings` entry until the foreman returns.
+  `warnings` entry until the foreman returns. Factory-repo work MUST be
+  pinned to `foreman:server` (§6.7, 2026-11-17 amendment): an unpinned job
+  that mentions `pricec/factory` or its worktree paths is rejected with
+  `factory_repo_needs_pin`. `cancel_job` of a dispatched/running job also
+  posts `job.cancel` to the owning foreman, which kills the worker (§3.2).
 - `read_result(job_id)` - full result payload; the ONLY path by which full
   payloads enter LLM context (#19; #7 point 3).
 - `cancel_job(job_id, reason?, supersede?)` - terminal-cancels a

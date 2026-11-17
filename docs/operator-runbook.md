@@ -214,3 +214,17 @@ scan in the audit job's result format).
 Raising the hard caps (5 auto-fixes, 150 lines) or editing the denylist is
 a code change in `internal/auditor`, which auto-fixes can never touch.
 
+## Factory-repo work and cancelling jobs
+
+- Work on the factory repo (`pricec/factory`, `/home/price/work/factory*`)
+  runs on `foreman:server` only. Planner `create_job` calls must pin
+  `foreman: "foreman:server"`; an unpinned job that mentions the repo or its
+  worktree paths is rejected with `factory_repo_needs_pin`. Do not pin it to
+  another foreman (a warning is returned). 2026-11-17: an unpinned job went
+  to `foreman:chatfrontend`, and its re-file went to `foreman:agentcloud`.
+- Cancelling or superseding a `dispatched`/`running` job posts a `job.cancel`
+  to its foreman, which SIGTERMs the worker's process group and SIGKILLs it
+  after 10s; no result is posted. Check `journalctl` for
+  `job.cancel <id>: stopping worker`. An offline foreman gets the cancel on
+  reconnect (durable inbox). If a worker still lingers, `kill -TERM -<pgid>`
+  by hand is the fallback.
