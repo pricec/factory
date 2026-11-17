@@ -10,7 +10,6 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/pricec/factory/internal/auth"
-	"github.com/pricec/factory/internal/budgets"
 	"github.com/pricec/factory/internal/inbox"
 	"github.com/pricec/factory/internal/jobs"
 	"github.com/pricec/factory/internal/registry"
@@ -32,9 +31,6 @@ type Config struct {
 	// Inbox is the factory's own inbox service, used as a library: message_
 	// foreman posts to foreman:{id} inboxes on the factory.
 	Inbox *inbox.Service
-	// Budget carries the daily spend cap and FACTORY_SPEND_OVERRIDE for the
-	// create_job breaker (spec §6.5).
-	Budget budgets.Config
 	// Secrets is the credentials store; create_job rejects secret names
 	// absent from it (spec §13.2). Nil rejects any non-empty secrets.
 	Secrets *secrets.Store
@@ -87,7 +83,7 @@ func Handler(cfg Config) (http.Handler, error) {
 			"foreman: optional explicit pin (bare or foreman:-prefixed id) - wins over requires " +
 			"matching; unknown foreman errors; offline pin pends until it returns. " +
 			"tier: flash (cheapest, default), default (Flash max-thinking), hardest (strongest); " +
-			"pick the cheapest that works. Refused past the spend cap. " +
+			"pick the cheapest that works. " +
 			"When subscription usage is high the job may come back state=held with held_reason: " +
 			"it is queued and dispatches automatically (task priority 0 is never held); cancel_job works on it.",
 	}, createJobTool(cfg))

@@ -18,7 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pricec/factory/internal/budgets"
 	"github.com/pricec/factory/internal/factoryapp"
 	"github.com/pricec/factory/internal/foremanapp"
 	"github.com/pricec/factory/internal/wire"
@@ -82,7 +81,6 @@ func boot(t *testing.T) *stack {
 		DataDir:      s.factoryDataDir,
 		Addr:         "127.0.0.1:0",
 		AdvertiseURL: "http://factory.test",
-		Budget:       budgets.DefaultConfig(),
 		// The e2e foreman is the integration foreman merge jobs pin to
 		// (spec §6.11).
 		MergeForeman: foremanID,

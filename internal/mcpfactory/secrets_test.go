@@ -4,8 +4,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-
-	"github.com/pricec/factory/internal/budgets"
 )
 
 const mcpSecretValue = "MCP-SECRET-VALUE-4be1"
@@ -14,7 +12,7 @@ const mcpSecretValue = "MCP-SECRET-VALUE-4be1"
 // (unknown names fail loudly, listing them, and create nothing); known
 // names land in the spec as names only.
 func TestCreateJobSecrets(t *testing.T) {
-	e := newEnv(t, budgets.DefaultConfig())
+	e := newEnv(t)
 	if _, err := e.secrets.Put("github-push", mcpSecretValue, "GITHUB_TOKEN"); err != nil {
 		t.Fatal(err)
 	}

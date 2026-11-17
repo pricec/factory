@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/pricec/factory/internal/auth"
-	"github.com/pricec/factory/internal/budgets"
 	"github.com/pricec/factory/internal/factoryapp"
 	"github.com/pricec/factory/internal/jobs"
 	"github.com/pricec/factory/internal/wire"
@@ -57,7 +56,6 @@ func newEnv(t *testing.T, opts ...func(*factoryapp.Config)) *testEnv {
 		DataDir:      t.TempDir(),
 		Addr:         "127.0.0.1:0",
 		AdvertiseURL: testAdvertiseURL,
-		Budget:       budgets.DefaultConfig(),
 		Now:          clock.Now,
 	}
 	for _, opt := range opts {

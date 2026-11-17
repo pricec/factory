@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/pricec/factory/internal/auth"
-	"github.com/pricec/factory/internal/budgets"
 	"github.com/pricec/factory/internal/mcpfactory"
 	"github.com/pricec/factory/internal/tasks"
 	"github.com/pricec/factory/internal/wire"
@@ -34,7 +33,7 @@ func (e *env) changedIDs() []string {
 // task_id, else the woken task (?task_id= on the session URL), else a new
 // task titled from the text; unknown tasks are tool errors.
 func TestNotifyOperatorTask(t *testing.T) {
-	e := newEnv(t, budgets.DefaultConfig())
+	e := newEnv(t)
 	ctx := context.Background()
 	woken := e.mkTask("woken")
 	other := e.mkTask("other")
@@ -89,7 +88,7 @@ func TestNotifyOperatorTask(t *testing.T) {
 
 // TestWokenTaskHeaderDirect: the header itself also binds the session.
 func TestWokenTaskHeaderDirect(t *testing.T) {
-	e := newEnv(t, budgets.DefaultConfig())
+	e := newEnv(t)
 	tk := e.mkTask("hdr")
 	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"notify_operator","arguments":{"text":"hi"}}}`
 	req, _ := http.NewRequest("POST", e.base, strings.NewReader(body))
@@ -114,7 +113,7 @@ func TestWokenTaskHeaderDirect(t *testing.T) {
 // TestCreateJobTask: create_job links the job to task_id / the woken task
 // (before dispatch) and reports it; unknown tasks refuse the create.
 func TestCreateJobTask(t *testing.T) {
-	e := newEnv(t, budgets.DefaultConfig())
+	e := newEnv(t)
 	ctx := context.Background()
 	woken := e.mkTask("woken")
 	other := e.mkTask("other")
@@ -150,7 +149,7 @@ func TestCreateJobTask(t *testing.T) {
 // TestTaskTools covers list_tasks, get_task, update_task and
 // set_priority_criteria.
 func TestTaskTools(t *testing.T) {
-	e := newEnv(t, budgets.DefaultConfig())
+	e := newEnv(t)
 	ctx := context.Background()
 	a := e.mkTask("alpha deploy")
 	b := e.mkTask("bravo audit")
@@ -283,7 +282,7 @@ func TestTaskTools(t *testing.T) {
 // TestNoTaskStore: without Config.Tasks the task tools are absent and
 // notify_operator posts unthreaded (pre-task behaviour).
 func TestNoTaskStore(t *testing.T) {
-	e := newEnv(t, budgets.DefaultConfig())
+	e := newEnv(t)
 	h, err := mcpfactory.Handler(mcpfactory.Config{Auth: e.authStore, Store: e.store, Inbox: e.svc})
 	if err != nil {
 		t.Fatal(err)

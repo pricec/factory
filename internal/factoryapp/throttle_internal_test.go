@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pricec/factory/internal/budgets"
 	"github.com/pricec/factory/internal/jobs"
 	"github.com/pricec/factory/internal/usagewin"
 	"github.com/pricec/factory/internal/wire"
@@ -32,7 +31,7 @@ func newGateApp(t *testing.T, dir string, clk *gateClock, opts ...func(*Config))
 	t.Helper()
 	cfg := Config{
 		DataDir: dir, Addr: "127.0.0.1:0", AdvertiseURL: "http://factory.test",
-		Budget: budgets.DefaultConfig(), Now: clk.Now,
+		Now: clk.Now,
 	}
 	for _, o := range opts {
 		o(&cfg)

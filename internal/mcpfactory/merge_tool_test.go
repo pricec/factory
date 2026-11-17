@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pricec/factory/internal/budgets"
 	"github.com/pricec/factory/internal/jobs"
 )
 
@@ -15,7 +14,7 @@ import (
 // branch are tool errors that create nothing; the description routes
 // "merge and deploy" asks here instead of prose jobs.
 func TestRequestMerge(t *testing.T) {
-	e := newEnv(t, budgets.DefaultConfig())
+	e := newEnv(t)
 	ctx := context.Background()
 	head := "0123456789abcdef0123456789abcdef01234567"
 

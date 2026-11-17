@@ -24,13 +24,13 @@ func main() {
 	advertise := flag.String("advertise", "", "advertised base URL (default http://<hostname>:<port>)")
 	downloads := flag.String("downloads", "./downloads", "directory holding the foreman binaries served by GET /download (see `make release`)")
 	flag.Parse()
+	budgets.WarnDeprecatedEnv()
 
 	app, err := factoryapp.New(factoryapp.Config{
 		DataDir:      *dataDir,
 		Addr:         *addr,
 		AdvertiseURL: *advertise,
 		DownloadsDir: *downloads,
-		Budget:       budgets.LoadConfig(),
 		Usage:        factoryapp.LoadUsageConfig(),
 		Throttle:     factoryapp.LoadThrottleConfig(),
 	})
