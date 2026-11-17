@@ -292,3 +292,81 @@ func TestUIRenameHooks(t *testing.T) {
 		}
 	}
 }
+
+// TestUIPhoneAssets: the home-screen assets are served with the right
+// content types and the manifest is valid JSON pointing at them.
+func TestUIPhoneAssets(t *testing.T) {
+	e := newEnv(t)
+	tests := []struct {
+		path, ct, prefix string
+	}{
+		{"/manifest.webmanifest", "application/manifest+json", "{"},
+		{"/apple-touch-icon.png", "image/png", "\x89PNG"},
+		{"/icon-512.png", "image/png", "\x89PNG"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.path, func(t *testing.T) {
+			resp, err := http.Get(e.ts.URL + tc.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			b, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != tc.ct || !strings.HasPrefix(string(b), tc.prefix) {
+				t.Fatalf("status %d, content-type %q, %d bytes", resp.StatusCode, resp.Header.Get("Content-Type"), len(b))
+			}
+			if tc.ct != "application/manifest+json" {
+				return
+			}
+			var m struct {
+				Display string `json:"display"`
+				Icons   []struct {
+					Src string `json:"src"`
+				} `json:"icons"`
+			}
+			if err := json.Unmarshal(b, &m); err != nil || m.Display != "standalone" || len(m.Icons) != 2 {
+				t.Fatalf("manifest = %s (%v)", b, err)
+			}
+		})
+	}
+}
+
+// TestUIPhoneShell pins the phone layout's iOS essentials and hooks: the
+// page must keep these for the phone UI to work (string pins; the layout is
+// exercised in a browser by hand).
+func TestUIPhoneShell(t *testing.T) {
+	e := newEnv(t)
+	resp, err := http.Get(e.ts.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	body := string(b)
+	for _, want := range []string{
+		"viewport-fit=cover", `rel="manifest"`, `rel="apple-touch-icon"`, "apple-mobile-web-app-capable",
+		"env(safe-area-inset-bottom", "visualViewport", "--kb",
+		`id="phone"`, `id="p-tabs"`, `id="p-composer"`, `id="p-sheet"`, `id="p-fab"`,
+		"html.phone", "factory.layout", "(max-width: 760px)",
+		"preview_from", `/close"`, "needsYou", "touchstart",
+		`#/inbox`, `"task"`, "history.pushState",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("UI page missing %q", want)
+		}
+	}
+	// "Needs you" and the Inbox badge come from the server flag only
+	// (spec §9.5.2), not from the old preview_from heuristic.
+	for _, want := range []string{
+		`const needsYou = (t) => t.status === "open" && !!t.needs_operator;`,
+		"P.alerts.length + P.tasks.filter(needsYou).length",
+		`t.status === "open" && t.needs_operator ? ' <span class="badge flagged"`, // desktop marker
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("UI page missing %q", want)
+		}
+	}
+	if strings.Contains(body, `data-act="all-read"`) {
+		t.Error(`"Mark all read" must not clear the server-side needs_operator section`)
+	}
+}

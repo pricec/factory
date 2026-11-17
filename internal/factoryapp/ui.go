@@ -19,6 +19,52 @@ import (
 //go:embed ui.html
 var uiHTML []byte
 
+// uiManifest is the web app manifest (GET /manifest.webmanifest): it lets
+// the operator add the UI to a phone home screen as a standalone app.
+const uiManifest = `{
+  "name": "factory",
+  "short_name": "factory",
+  "start_url": "/#/inbox",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0d1117",
+  "theme_color": "#0d1117",
+  "icons": [
+    {"src": "/apple-touch-icon.png", "sizes": "180x180", "type": "image/png"},
+    {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+  ]
+}
+`
+
+//go:embed uiassets/apple-touch-icon.png
+var uiAppleIcon []byte
+
+//go:embed uiassets/icon-512.png
+var uiIcon512 []byte
+
+// handleUIAsset serves the static home-screen assets of the operator UI:
+// the manifest and the two PNG icons. Unauthenticated like GET /.
+func (a *App) handleUIAsset(w http.ResponseWriter, r *http.Request) {
+	var ct string
+	var body []byte
+	switch r.URL.Path {
+	case "/manifest.webmanifest":
+		ct, body = "application/manifest+json", []byte(uiManifest)
+	case "/apple-touch-icon.png":
+		ct, body = "image/png", uiAppleIcon
+	case "/icon-512.png":
+		ct, body = "image/png", uiIcon512
+	default:
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	if _, err := w.Write(body); err != nil {
+		log.Printf("factoryapp: ui asset: %v", err)
+	}
+}
+
 // handleUI serves the operator UI shell at GET /: one static page.
 func (a *App) handleUI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

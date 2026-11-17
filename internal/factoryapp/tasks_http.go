@@ -4,13 +4,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/pricec/factory/internal/auth"
 	"github.com/pricec/factory/internal/tasks"
+	"github.com/pricec/factory/internal/wire"
 )
 
 // Task HTTP constants (spec §9.5.2, I3).
@@ -31,6 +35,7 @@ func (a *App) registerTaskRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/tasks", a.handleCreateTask)
 	mux.HandleFunc("GET /v1/tasks/{id}", a.handleGetTask)
 	mux.HandleFunc("PATCH /v1/tasks/{id}", a.handleRenameTask)
+	mux.HandleFunc("POST /v1/tasks/{id}/close", a.handleCloseTask)
 }
 
 // taskTitleLimit bounds an operator rename, in characters (runes). It
@@ -81,6 +86,68 @@ func (a *App) handleRenameTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.publishTaskChanged(ctx, t.ID)
+	writeJSON(w, http.StatusOK, map[string]any{"task": a.taskView(ctx, t)})
+}
+
+// operatorCloseReason is the default close_reason of an operator close.
+const operatorCloseReason = "operator"
+
+// handleCloseTask serves POST /v1/tasks/{id}/close {reason?} -> 200
+// {task}: the operator closes a task from the UI (the phone inbox's quick
+// action). reason defaults to "operator" (at most 200 runes). The close
+// clears needs_operator and posts task.closed_by_operator {reason} into
+// the task, which wakes the planner so it can cancel the task's jobs; the
+// wake does not reopen the task. Closing a closed task is a no-op 200 that
+// keeps the original reason and posts nothing. Unknown id -> 404
+// unknown_task. Publishes task.changed. Replying reopens the task as usual.
+func (a *App) handleCloseTask(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	var in struct {
+		Reason string `json:"reason"`
+	}
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&in); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON: "+err.Error())
+			return
+		}
+	}
+	reason := strings.TrimSpace(in.Reason)
+	if reason == "" {
+		reason = operatorCloseReason
+	}
+	if utf8.RuneCountInString(reason) > 200 {
+		writeError(w, http.StatusBadRequest, "bad_request", "reason: at most 200 characters")
+		return
+	}
+	id := r.PathValue("id")
+	t, err := a.tasks.GetTask(ctx, id)
+	if errors.Is(err, tasks.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "unknown_task", "unknown task "+id)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	if t.Status != tasks.StatusClosed {
+		closed := tasks.StatusClosed
+		t, err = a.tasks.UpdateTask(ctx, id, tasks.TaskUpdate{Status: &closed, CloseReason: &reason})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+		// Wake the planner on the task (same path as operator chat). The
+		// close itself already happened; a failed post only logs.
+		data, _ := json.Marshal(map[string]any{"reason": reason, "text": "The operator closed this task: " + reason})
+		if _, err := a.postToTask(ctx, id, wire.MessageEnvelope{
+			Type:    taskClosedByOperatorType,
+			From:    auth.HumanOperatorIdentity,
+			Payload: data,
+		}); err != nil {
+			log.Printf("factoryapp: tasks: notify planner of close %s: %v", id, err)
+			a.publishTaskChanged(ctx, id)
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"task": a.taskView(ctx, t)})
 }
 

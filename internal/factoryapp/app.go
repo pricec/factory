@@ -357,6 +357,9 @@ func buildMux(a *App, mcpH http.Handler) http.Handler {
 	// endpoints below are registered before the authed inbox subtree so the
 	// more specific patterns take precedence.
 	mux.HandleFunc("GET /{$}", a.handleUI)
+	mux.HandleFunc("GET /manifest.webmanifest", a.handleUIAsset)
+	mux.HandleFunc("GET /apple-touch-icon.png", a.handleUIAsset)
+	mux.HandleFunc("GET /icon-512.png", a.handleUIAsset)
 	mux.HandleFunc("GET /v1/inboxes", a.handleInboxSummaries)
 	mux.HandleFunc("GET /v1/inboxes/{id}/recent", a.handleInboxRecent)
 	// Conversational surface (spec §9.5): the UI's send path into the

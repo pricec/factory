@@ -627,9 +627,11 @@ factory planner's list view carries summaries only (#7, #19).
 | `GET /v1/inboxes/{id}/recent` | recent envelopes for one inbox, acked included (UI; §4.1) |
 | `POST /v1/chat` | `{text, task_id?}` -> chat.message envelope in the operator inbox, filed under a task (new without `task_id`; 404 for an unknown one); wakes the LLM planner (§9.5, §9.5.2) |
 | `GET /v1/tasks`, `GET /v1/tasks/{id}`, `POST /v1/tasks`, `PATCH /v1/tasks/{id}` | task list, task + thread, the "new task" alias of chat, and operator rename `{title}` (§9.5.2) |
+| `POST /v1/tasks/{id}/close` | operator closes a task from the UI; clears `needs_operator` and wakes the planner with `task.closed_by_operator` (§9.5.2) |
 | `GET /v1/alerts`, `POST /v1/alerts/{id}/ack`, `POST /v1/alerts/{id}/reply` | open alerts, ack, and reply-creates-a-task (§9.5.3) |
 | `GET /v1/inboxes/planner:main/stream` | permissive SSE stream of the operator inbox for the chat UI (§9.5) |
 | `GET /` | operator web UI (single page; §4.1) |
+| `GET /manifest.webmanifest`, `GET /apple-touch-icon.png`, `GET /icon-512.png` | home-screen (PWA) manifest and icons for the UI (§9.5.5) |
 | `POST /v1/pairing-tokens` | planner-credential auth (v1: the planner token doubles as the operator credential); issues a one-time pairing token, `200 {pairing_token, expires_at}` (#23) |
 
 Request/response shapes and status codes beyond those shown are not pinned.
@@ -1344,8 +1346,10 @@ Tools (exact):
   all (default open), q?, limit?=50)` -> `{tasks}`; `get_task(task_id)` ->
   `{task, messages}` (the last 40 thread messages with an `internal` flag,
   each payload 2KB-capped and rendered as a string); `update_task(task_id,
-  title?, priority?, status?=open|closed, reason?)` -> `{task}` (closing
-  defaults `reason` to `planner`; a reopen ignores it);
+  title?, priority?, status?=open|closed, reason?, needs_operator?)` ->
+  `{task}` (closing defaults `reason` to `planner`; a reopen ignores it;
+  `needs_operator` true|false sets or clears the task's "waiting on the
+  operator" flag, §9.5.2; a planner close never wakes the planner);
   `set_priority_criteria(text)` -> `{ok}`.
 
 Input schemas (2026-11-14 amendment): every tool on this surface
@@ -1481,8 +1485,11 @@ every start; existing files migrate in place.
   Ordering is `seq`.
 - `tasks(id 'task_<ulid>' PK, title, status open|closed, priority INT
   default 2 (0 = most urgent), created_at, updated_at, closed_at NULL,
-  close_reason)`. Closing stamps `closed_at` once; reopening clears
-  `closed_at` and `close_reason`.
+  close_reason, needs_operator INT NOT NULL default 0)`. Closing stamps
+  `closed_at` once and clears `needs_operator` (unless the same update sets
+  it); reopening clears `closed_at` and `close_reason`. `needs_operator`
+  was added after the first release: an existing `tasks` table gets it by
+  an idempotent `ALTER TABLE ... ADD COLUMN` at start (2026-11-17).
 - `task_jobs(task_id, job_id, PK(task_id, job_id))`, indexed by job_id.
 - `alerts(id 'alert_<ulid>' PK, priority INT, title, body, source,
   created_at, expires_at NULL = never, state open|acked|replied|expired,
@@ -1545,14 +1552,26 @@ Chat and task API (unauthenticated, like the rest of the UI surface,
   last-write-wins.
 - Task JSON: `{id, title, status open|closed, priority int (0 = most
   urgent), created_at, updated_at, closed_at?, close_reason?, job_ids[],
-  last_activity_at, preview, awaiting, awaiting_since?}`. `preview` is the newest operator-visible
+  last_activity_at, preview, preview_from, awaiting, awaiting_since?,
+  needs_operator}`. `preview` is the newest operator-visible
   message (`chat.message`/`brain.reply`) of the thread, whitespace
   collapsed, at most 120 characters, and "" if there is none.
+  `preview_from` names its author: `operator` (`chat.message`), `planner`
+  (`brain.reply`), or "" if there is none (display only).
   `awaiting` is `operator` iff the task is open AND its newest
   operator-visible message is a `brain.reply` (internal rows never count);
   otherwise (closed, no visible message, or the operator spoke last) it is
   `factory`. `awaiting_since` is the ts of that unanswered `brain.reply`
   (only when `awaiting` is `operator`).
+- `needs_operator` (bool, 2026-11-17) is the planner's explicit flag that
+  the task is blocked on an operator decision, approval or answer. It
+  lives on the server, so every device agrees. The planner sets or clears
+  it with `update_task(needs_operator=true|false)` (§9.4). It clears
+  automatically when the operator posts on the task (a `chat.message`
+  through `POST /v1/chat {task_id}`: the thread composer or the phone
+  quick reply)
+  and when the task is closed (operator close, planner close or reaper).
+  The UI's "Needs you" list and Inbox badge use only this flag (§9.5.5).
 - `GET /v1/tasks?status=open|closed|all&q=&limit=` -> `{tasks}`. `status`
   defaults to `all`, `limit` defaults to 200 (clamped at 1000), and a bad
   status or limit returns 400. Ranking: open first, then priority ASC,
@@ -1565,6 +1584,21 @@ Chat and task API (unauthenticated, like the rest of the UI surface,
   limited to the last `limit` rows (default 500, max 5000). Internal rows
   (every type except `chat.message` and `brain.reply`) are excluded
   unless `internal=1` (or `true`). An unknown id returns 404.
+- `POST /v1/tasks/{id}/close {reason?}` -> 200 `{task}`: the operator
+  closes a task from the UI. `reason` is trimmed, defaults to `operator`,
+  and is at most 200 characters (longer, or bad JSON, returns 400). The
+  body may be empty. Closing a closed task is a no-op 200 that keeps the
+  original reason and posts nothing. An unknown id returns 404
+  `unknown_task`. A real close clears `needs_operator`, publishes
+  task.changed, and posts an internal `task.closed_by_operator` envelope
+  `{reason, text}` (from `human:operator`) into the task on
+  `planner:main`. That envelope WAKES the planner on the task, the same
+  way operator chat does (2026-11-17, operator decision; no confirm
+  dialog), so the planner can cancel the task's running, pending and held
+  jobs with `cancel_job`. The wake does not reopen the task. Planner
+  closes (`update_task(status=closed)`) and reaper closes post nothing and
+  wake nothing, so there is no close/wake loop. A later reply reopens the
+  task as usual.
 - `POST /v1/jobs` accepts `task_id` (the twin of `create_job`, §9.4). It
   is linked before dispatch, echoed in the 201 body, and an unknown task
   returns 404 `unknown_task`.
@@ -1602,9 +1636,13 @@ hidden. `notify.job` envelopes also carry the job id in `job_id`.
 Per-task wakes (operator DECISION 1):
 
 - The planner loop maps every waking envelope (`chat.message`,
-  `foreman.report`, `brain.failed`) to a task. A thread that names an
-  existing task is used as is, and is reopened if closed: a report on a
-  closed task reopens it, and the planner may close it again. An envelope
+  `foreman.report`, `brain.failed`, `task.closed_by_operator`) to a task.
+  A thread that names an existing task is used as is, and is reopened if
+  closed: a report on a closed task reopens it, and the planner may close
+  it again. The exception is `task.closed_by_operator`, which never
+  reopens; its wake reason tells the planner to cancel the task's
+  non-terminal jobs and not to reopen it. Under the S5 usage pause it is a
+  non-chat wake (deferred until the resume). An envelope
   with no thread, or with a thread naming no task (a legacy client, or a
   relay whose task lookup failed), is attributed through its job, else
   given a new task, and the stored row is re-threaded. If even that fails,
@@ -1748,6 +1786,39 @@ through `task.changed`. Keyboard: title (role=button, tabindex 0) and
 pencil button are tab stops; focus returns to the title after save/cancel.
 Not exercised by an automated browser test: no JS runtime or browser exists
 in CI; `TestUIRenameHooks` only pins the markup and key handling.
+
+Phone layout (2026-11-16). The same page has a separate phone UI (`#phone`).
+It is chosen before first paint when the viewport is at most 760px wide, or
+on a touch device in landscape at most 520px tall. `localStorage`
+`factory.layout` = `phone`|`desktop` overrides this; the phone "More" screen
+and a desktop "phone layout" button set it. The desktop layout is unchanged.
+The phone UI uses the same endpoints, with hash routes so the browser back
+gesture works: `#/inbox`, `#/task/<id>`, `#/jobs`, `#/job/<id>`, `#/foremen`,
+`#/foreman/<id>`, `#/more` (usage and inboxes), and `#/ibx/<id>`. A bottom tab
+bar has Inbox, Jobs, Foremen and More.
+
+The Inbox shows, in order: open alerts (Ack and Reply buttons), "Needs you",
+then the other open tasks; closed tasks appear on request. "Needs you" is
+exactly the open tasks with `needs_operator` set (§9.5.2; 2026-11-17, this
+replaces the earlier `preview_from` + per-device heuristic), and such rows
+carry a "needs you" badge. The tab badge (and `navigator.setAppBadge` where
+supported) counts open alerts plus needs-you tasks. Read/unread is a
+per-device visual only (bold title and dot; `localStorage`, not synced): a
+task is unread when the planner spoke last and this device has not opened
+it since, or when it was marked unread by hand. It never affects "Needs
+you" or the badge. The desktop task list shows the same small "needs you"
+badge inline before the title of a flagged open task; the desktop layout is
+otherwise unchanged.
+
+Swiping a task left reveals Reply (a bottom-sheet composer; it posts
+`POST /v1/chat {text, task_id}` without leaving the list) and Close (`POST
+/v1/tasks/{id}/close`). Swiping right toggles read. The thread view has a
+composer pinned to the bottom that is kept above the iOS keyboard
+(`visualViewport`), and a menu with show internal, close, mark unread, copy
+id and the linked jobs. All controls are at least 44px and all inputs at
+least 16px. Safe-area insets are respected (`viewport-fit=cover`). The page
+links a manifest and an apple-touch-icon so it can be added to the home
+screen.
 
 #### 9.5.6 Live acceptance (inbox redesign S5)
 

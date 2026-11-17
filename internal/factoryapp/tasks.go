@@ -42,6 +42,10 @@ type taskView struct {
 	// (set only when Awaiting == "operator").
 	Awaiting      string `json:"awaiting"`
 	AwaitingSince string `json:"awaiting_since,omitempty"`
+	// PreviewFrom says who wrote the preview message: "operator"
+	// (chat.message), "planner" (brain.reply) or "" when there is none.
+	// Display only (the phone UI's "You:"/"Planner:" prefix).
+	PreviewFrom string `json:"preview_from"`
 }
 
 // taskTitle derives a fallback task title from free text: whitespace runs
@@ -164,7 +168,9 @@ func (a *App) ensureTaskForWaker(ctx context.Context, env wire.MessageEnvelope) 
 		t, err := a.tasks.GetTask(ctx, env.ThreadID)
 		switch {
 		case err == nil:
-			if t.Status == tasks.StatusClosed {
+			// An operator close wakes the planner on the closed task; it
+			// must not undo the close.
+			if t.Status == tasks.StatusClosed && env.Type != taskClosedByOperatorType {
 				if _, err := a.reopenTask(ctx, t.ID); err != nil {
 					log.Printf("factoryapp: tasks: reopen %s: %v", t.ID, err)
 				}
@@ -209,11 +215,23 @@ func (a *App) reopenTask(ctx context.Context, id string) (tasks.Task, error) {
 // taskView builds the I3 Task JSON for one task.
 func (a *App) taskView(ctx context.Context, t tasks.Task) taskView {
 	preview, typ, ts := a.taskLastVisible(ctx, t.ID)
-	v := taskView{Task: t, Preview: preview, Awaiting: tasks.Awaiting(t.Status, typ)}
+	v := taskView{Task: t, Preview: preview, PreviewFrom: previewFrom(typ), Awaiting: tasks.Awaiting(t.Status, typ)}
 	if v.Awaiting == tasks.AwaitingOperator {
 		v.AwaitingSince = ts
 	}
 	return v
+}
+
+// previewFrom maps the newest visible message type to preview_from:
+// "operator" (chat.message), "planner" (brain.reply) or "".
+func previewFrom(typ string) string {
+	switch typ {
+	case tasks.TypeChatMessage:
+		return "operator"
+	case tasks.TypeBrainReply:
+		return "planner"
+	}
+	return ""
 }
 
 // taskLastVisible returns the newest operator-visible message of the
@@ -273,6 +291,13 @@ func (a *App) postToTask(ctx context.Context, taskID string, env wire.MessageEnv
 	posted, err := a.inbox.Post(ctx, auth.PlannerMainInbox, env)
 	if err != nil {
 		return posted, fmt.Errorf("post to task %s: %w", taskID, err)
+	}
+	// The operator answered: the planner's needs_operator flag is spent
+	// (spec §9.5.2).
+	if env.Type == tasks.TypeChatMessage {
+		if err := a.tasks.ClearNeedsOperator(ctx, taskID); err != nil {
+			log.Printf("factoryapp: tasks: clear needs_operator on %s: %v", taskID, err)
+		}
 	}
 	a.publishTaskChanged(ctx, taskID)
 	return posted, nil

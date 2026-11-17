@@ -178,13 +178,29 @@ func TestTaskTools(t *testing.T) {
 	}
 	_ = structured(t, resultOf(t, e.callTool("update_task", map[string]any{"task_id": c.ID, "status": "closed", "reason": "done"})))
 
+	// needs_operator: set, kept by an unrelated update, cleared.
+	for _, step := range []struct {
+		args map[string]any
+		want bool
+	}{
+		{map[string]any{"task_id": a.ID, "needs_operator": true}, true},
+		{map[string]any{"task_id": a.ID, "title": "alpha deploy"}, true},
+		{map[string]any{"task_id": a.ID, "needs_operator": false}, false},
+	} {
+		sc := structured(t, resultOf(t, e.callTool("update_task", step.args)))
+		if got := sc["task"].(map[string]any)["needs_operator"]; got != step.want {
+			t.Errorf("update_task %v: needs_operator = %v, want %v", step.args, got, step.want)
+		}
+	}
+
 	for name, args := range map[string]map[string]any{
-		"missing id":    {"title": "x"},
-		"unknown id":    {"task_id": "task_nope", "title": "x"},
-		"empty title":   {"task_id": a.ID, "title": "  "},
-		"negative prio": {"task_id": a.ID, "priority": -1},
-		"bad status":    {"task_id": a.ID, "status": "archived"},
-		"unknown arg":   {"task_id": a.ID, "colour": "red"},
+		"missing id":     {"title": "x"},
+		"unknown id":     {"task_id": "task_nope", "title": "x"},
+		"empty title":    {"task_id": a.ID, "title": "  "},
+		"negative prio":  {"task_id": a.ID, "priority": -1},
+		"bad status":     {"task_id": a.ID, "status": "archived"},
+		"unknown arg":    {"task_id": a.ID, "colour": "red"},
+		"needs not bool": {"task_id": a.ID, "needs_operator": "yes"},
 	} {
 		out := e.callTool("update_task", args)
 		if res, _ := out["result"].(map[string]any); res != nil && res["isError"] != true {
@@ -258,9 +274,9 @@ func TestTaskTools(t *testing.T) {
 		t.Errorf("criteria = %q", got)
 	}
 
-	// Every update_task success fired TaskChanged.
-	if n := len(e.changedIDs()); n != 5 {
-		t.Errorf("TaskChanged calls = %d, want 5", n)
+	// Every update_task success (5 + 3 needs_operator steps) fired TaskChanged.
+	if n := len(e.changedIDs()); n != 8 {
+		t.Errorf("TaskChanged calls = %d, want 8", n)
 	}
 }
 

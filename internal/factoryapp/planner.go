@@ -77,11 +77,11 @@ func (a *App) plannerLoop(ctx context.Context) {
 }
 
 // wakesPlanner reports whether an operator-inbox envelope type wakes the
-// planner (spec §9.5): operator chat, and reports from foremen that need
-// the operator's attention.
+// planner (spec §9.5): operator chat, an operator close, and reports from
+// foremen that need the operator's attention.
 func wakesPlanner(typ string) bool {
 	switch typ {
-	case "chat.message", foremanReportType, brainFailedType:
+	case "chat.message", foremanReportType, brainFailedType, taskClosedByOperatorType:
 		return true
 	}
 	return false
@@ -139,6 +139,11 @@ func (a *App) runTaskWake(ctx context.Context, taskID string, wakers []wire.Mess
 	}
 	reason := "planner: foreman reports arrived on this task; tell the operator what they need and act on them"
 	for _, env := range wakers {
+		if env.Type == taskClosedByOperatorType {
+			reason = closedByOperatorReason
+		}
+	}
+	for _, env := range wakers {
 		if env.Type == "chat.message" {
 			reason = "planner: new chat from the operator on this task needs a reply"
 			break
@@ -152,6 +157,12 @@ func (a *App) runTaskWake(ctx context.Context, taskID string, wakers []wire.Mess
 		Triggers: wakers,
 	})
 }
+
+// closedByOperatorReason is the wake reason of an operator close (spec
+// §9.5.2): stop the task's work, do not reopen it.
+const closedByOperatorReason = "planner: the operator closed this task (see the task.closed_by_operator message for the reason). " +
+	"Cancel its running, pending and held jobs with cancel_job (leave terminal ones alone), " +
+	"do not reopen the task, and do not message the operator unless a job could not be cancelled"
 
 // plannerFailed is the dispatcher's failure path: the brain.reply error
 // note, posted INTO the task, so the operator is never left waiting on a

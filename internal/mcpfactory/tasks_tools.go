@@ -46,6 +46,9 @@ type (
 		Priority *int    `json:"priority,omitempty"`
 		Status   string  `json:"status,omitempty"`
 		Reason   string  `json:"reason,omitempty"`
+		// NeedsOperator sets (true) or clears (false) the task's
+		// needs_operator flag; omitted leaves it alone.
+		NeedsOperator *bool `json:"needs_operator,omitempty"`
 	}
 	setPriorityCriteriaArgs struct {
 		Text string `json:"text"`
@@ -67,8 +70,9 @@ func addTaskTools(srv *mcp.Server, cfg Config) {
 		Description: "One task plus its thread (last 40 messages).",
 	}, getTaskTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "update_task",
-		Description: "Retitle, reprioritise (0 = most urgent), or set status open|closed (+reason) on a task.",
+		Name: "update_task",
+		Description: "Retitle, reprioritise (0 = most urgent), set status open|closed (+reason), or set needs_operator " +
+			"(true while blocked on an operator decision/approval; operator reply/close clears it).",
 	}, updateTaskTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "set_priority_criteria",
@@ -244,6 +248,7 @@ func updateTaskTool(cfg Config) mcp.ToolHandlerFor[updateTaskArgs, any] {
 			}
 			u.CloseReason = &reason
 		}
+		u.NeedsOperator = in.NeedsOperator
 		t, err := cfg.Tasks.UpdateTask(ctx, in.TaskID, u)
 		if errors.Is(err, tasks.ErrNotFound) {
 			return nil, nil, fmt.Errorf("unknown task %q (see list_tasks)", in.TaskID)

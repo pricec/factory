@@ -2,8 +2,27 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d1117">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="factory">
+<meta name="format-detection" content="telephone=no">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="/icon-512.png">
 <title>factory</title>
+<script>
+// Phone layout switch (runs before first paint): html.phone selects the
+// dedicated phone UI (#phone). Auto below 760px wide or on a touch phone in
+// landscape; localStorage factory.layout = "phone" | "desktop" overrides.
+(function () {
+  var f = ""; try { f = localStorage.getItem("factory.layout") || ""; } catch (e) {}
+  var m = window.matchMedia && matchMedia("(max-width: 760px), (pointer: coarse) and (max-height: 520px)").matches;
+  if (f === "phone" || (f !== "desktop" && m)) document.documentElement.classList.add("phone");
+})();
+</script>
 <style>
   :root {
     --bg: #0d1117; --panel: #161b22; --border: #30363d;
@@ -103,6 +122,8 @@
   .task { cursor: pointer; } .task:hover { border-color: var(--accent); }
   .task.selected { outline: 1px solid var(--accent); } .task.closed { opacity: .6; }
   .atitle, .ttitle { font-weight: 600; word-break: break-word; }
+  .badge.needs, .badge.flagged { color: var(--warn); border-color: var(--warn); }
+  .task .badge.flagged { margin-left: 6px; font-size: 10px; padding: 0 6px; }
   .abody, .tprev { color: var(--dim); font-size: 12px; margin-top: 3px; word-break: break-word; }
   .ameta, .tmeta { color: var(--dim); font: 10.5px var(--mono); margin-top: 3px; }
   .aactions { margin-top: 5px; display: flex; gap: 6px; }
@@ -226,6 +247,196 @@
   #usagepanel .usec tr.uheldrow:hover { background: var(--bg); }
   #usagepanel .ualert { padding: 2px 0; color: var(--text); }
   #usagepanel .ualert .ucrit { color: var(--bad); }
+
+  /* ---------- phone UI (html.phone; desktop never matches these) ---------- */
+  #phone { display: none; }
+  html.phone { --sat: env(safe-area-inset-top, 0px); --sab: env(safe-area-inset-bottom, 0px);
+    --sal: env(safe-area-inset-left, 0px); --sar: env(safe-area-inset-right, 0px);
+    --tabh: 56px; --kb: 0px; --composer-h: 62px; -webkit-text-size-adjust: 100%; }
+  html.phone body { font-size: 16px; -webkit-tap-highlight-color: transparent; }
+  html.phone body > header, html.phone #usagepanel, html.phone body > main { display: none !important; }
+  html.phone #phone { display: block; overflow-x: clip; min-height: 100vh; }
+  #phone button { font-family: inherit; cursor: pointer; }
+  #phone .p-sys { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+  #p-top { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 2px;
+    min-height: calc(52px + var(--sat)); padding: var(--sat) calc(6px + var(--sar)) 0 calc(6px + var(--sal));
+    background: rgba(13,17,23,.94); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--border); }
+  #p-top h1 { flex: 1; min-width: 0; margin: 0 6px; font: 700 20px/1.2 -apple-system, "Segoe UI", sans-serif;
+    overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-word; }
+  html.p-thread #p-top h1, html.p-detail #p-top h1 { font-size: 16px; font-weight: 600; }
+  #p-topacts { display: flex; align-items: center; gap: 2px; flex: none; }
+  .p-icon { min-width: 44px; height: 44px; display: inline-flex; align-items: center; justify-content: center;
+    background: none; border: 0; color: var(--accent); border-radius: 12px; padding: 0 8px; font-size: 16px; }
+  .p-icon:active, .p-item:active, .p-chip:active, #p-tabs button:active { background: #1c2128; }
+  .p-icon svg { width: 24px; height: 24px; }
+  #p-back { display: none; }
+  html.p-thread #p-back, html.p-detail #p-back { display: inline-flex; }
+  .p-uchip { display: inline-flex; align-items: center; gap: 6px; height: 44px; padding: 0 10px; background: none;
+    border: 0; color: var(--dim); font: 13px var(--mono); }
+  .p-uchip i { width: 10px; height: 10px; border-radius: 50%; background: var(--dim); }
+  .p-uchip i.GREEN { background: var(--ok); } .p-uchip i.YELLOW, .p-uchip i.ORANGE { background: var(--warn); }
+  .p-uchip i.RED { background: var(--bad); }
+  #p-searchbar { display: none; position: sticky; top: calc(52px + var(--sat)); z-index: 19; background: var(--bg);
+    padding: 8px calc(12px + var(--sar)) 4px calc(12px + var(--sal)); }
+  html.p-search #p-searchbar { display: block; }
+  #p-searchbar input, #phone textarea, #phone input, #phone select { font-size: 16px; }
+  #p-searchbar input { width: 100%; height: 44px; padding: 0 14px; border-radius: 12px; border: 1px solid var(--border);
+    background: var(--panel); color: var(--text); -webkit-appearance: none; appearance: none; }
+  #p-body { padding: 4px calc(12px + var(--sar)) calc(var(--tabh) + var(--sab) + 92px) calc(12px + var(--sal)); }
+  html.p-thread #p-body { padding-bottom: calc(var(--composer-h) + var(--sab) + var(--kb) + 16px); }
+  .p-chips { display: flex; gap: 8px; overflow-x: auto; padding: 8px 0 2px; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+  .p-chips::-webkit-scrollbar { display: none; }
+  .p-chip { flex: none; min-height: 44px; padding: 0 16px; border-radius: 22px; border: 1px solid var(--border);
+    background: var(--panel); color: var(--dim); font-size: 15px; }
+  .p-chip.on { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  .p-sec { display: flex; align-items: center; justify-content: space-between; min-height: 44px; margin: 12px 4px 2px;
+    font: 600 13px -apple-system, sans-serif; color: var(--dim); text-transform: uppercase; letter-spacing: .04em; }
+  .p-sec .n { margin-left: 6px; color: var(--text); }
+  .p-sec button { min-height: 44px; padding: 0 4px; background: none; border: 0; color: var(--accent);
+    font-size: 15px; text-transform: none; letter-spacing: 0; }
+  .p-list { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
+  .p-row { position: relative; overflow: hidden; border-bottom: 1px solid var(--border); }
+  .p-row:last-child { border-bottom: 0; }
+  .p-acts { position: absolute; inset: 0; display: flex; }
+  .p-acts span { flex: 1; }
+  .p-acts button { width: 84px; border: 0; color: #fff; font-size: 15px; font-weight: 600; }
+  .p-acts .pa-read { background: #238636; } .p-acts .pa-reply { background: #1f6feb; } .p-acts .pa-close { background: #6e7681; }
+  .p-item { position: relative; display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; column-gap: 8px;
+    min-height: 64px; padding: 12px 14px 12px 10px; background: var(--panel); color: var(--text);
+    touch-action: pan-y; transition: transform .22s ease; }
+  .p-item[data-go] { cursor: pointer; }
+  .p-item.dragging { transition: none; }
+  .p-dot { width: 9px; height: 9px; margin-top: 7px; border-radius: 50%; background: var(--accent); visibility: hidden; }
+  .p-item.unread .p-dot { visibility: visible; }
+  .p-title { font-size: 16px; line-height: 1.3; font-weight: 500; word-break: break-word;
+    overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .p-item.unread .p-title { font-weight: 700; }
+  .p-item.closed .p-title, .p-item.closed .p-prev { opacity: .6; }
+  .p-time { color: var(--dim); font-size: 13px; white-space: nowrap; padding-top: 2px; }
+  .p-item.unread .p-time { color: var(--accent); font-weight: 600; }
+  .p-prev { grid-column: 2 / 4; margin-top: 3px; color: var(--dim); font-size: 15px; line-height: 1.35; word-break: break-word;
+    overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .p-prev .who { color: var(--text); opacity: .8; }
+  .p-meta { grid-column: 2 / 4; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 5px;
+    color: var(--dim); font: 12px var(--mono); }
+  .p-inline-acts { grid-column: 2 / 4; display: flex; gap: 8px; margin-top: 10px; }
+  .p-afoot { grid-column: 2 / 4; display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+  .p-afoot .p-meta { flex: 1; min-width: 0; margin: 0; }
+  .p-afoot button { flex: none; min-width: 64px; min-height: 44px; padding: 0 14px; border-radius: 12px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 15px; font-weight: 600; }
+  .p-afoot button.pri { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  .p-inline-acts button, .p-btn { flex: 1; min-height: 44px; border-radius: 12px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text); font-size: 16px; font-weight: 600; }
+  .p-inline-acts button.pri, .p-btn.pri { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  .p-empty { color: var(--dim); text-align: center; padding: 18px 12px; font-size: 15px; }
+  .p-zero { margin: 12px 0 0; padding: 14px; border-radius: 14px; border: 1px solid #2b5a2b; background: #12261a;
+    color: var(--ok); font-size: 15px; text-align: center; }
+  .p-hint { color: var(--dim); font-size: 13px; text-align: center; margin: 16px 8px 0; }
+  .p-card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 14px; margin-top: 12px; }
+  .p-card h3 { margin: 0 0 8px; font: 600 13px -apple-system, sans-serif; color: var(--dim); text-transform: uppercase; letter-spacing: .04em; }
+  .p-kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 12px; font-size: 15px; }
+  .p-kv dt { color: var(--dim); } .p-kv dd { margin: 0; word-break: break-word; font-family: var(--mono); font-size: 14px; }
+  #phone pre { white-space: pre-wrap; word-break: break-word; font-size: 12.5px; max-height: 60vh; }
+  #phone details { border-top: 1px solid var(--border); padding: 4px 0; }
+  #phone details:first-of-type { border-top: 0; }
+  #phone summary { min-height: 44px; display: flex; align-items: center; gap: 6px; font: 13px var(--mono); color: var(--dim); cursor: pointer; }
+  #phone summary b { color: var(--accent); font-weight: 600; }
+  .st { display: inline-block; padding: 2px 9px; border-radius: 10px; font: 600 12px var(--mono); border: 1px solid var(--border); color: var(--dim); }
+  .st.running, .st.dispatched { color: var(--accent); border-color: var(--accent); }
+  .st.pending { color: var(--warn); border-color: var(--warn); }
+  .st.done, .st.online { color: var(--ok); border-color: var(--ok); }
+  .st.failed, .st.timed_out, .st.dead, .st.offline { color: var(--bad); border-color: var(--bad); }
+  /* thread */
+  .p-thead { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 2px; color: var(--dim); font: 12px var(--mono); }
+  .p-log { display: flex; flex-direction: column; gap: 10px; padding-top: 4px; }
+  #phone .bubble { max-width: 88%; font: 16px/1.45 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    overflow-wrap: anywhere; border-radius: 18px; padding: 10px 14px; }
+  #phone .bubble.human { border-bottom-right-radius: 6px; }
+  #phone .bubble.brain { border-bottom-left-radius: 6px; }
+  #phone .bubble.notify { font: 13px/1.4 var(--mono); border-radius: 12px; }
+  #phone .bubble .md pre { white-space: pre; overflow-x: auto; max-width: 100%; }
+  #phone .bubble .md code { font-size: 14px; }
+  #phone .bubble .who { font-size: 11px; }
+  #phone .typing { font-size: 13px; padding: 4px 6px; }
+  #p-composer { display: none; position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; gap: 8px; align-items: flex-end;
+    padding: 8px calc(10px + var(--sar)) calc(8px + var(--sab)) calc(10px + var(--sal));
+    background: rgba(22,27,34,.97); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+    border-top: 1px solid var(--border); transform: translateY(calc(-1 * var(--kb))); }
+  html.p-thread #p-composer { display: flex; }
+  html.kb-open #p-composer { padding-bottom: 8px; }
+  #p-input { flex: 1; min-height: 44px; max-height: 40vh; padding: 11px 16px; border-radius: 22px; resize: none;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text); line-height: 1.35; font-family: inherit; }
+  #p-input:focus { outline: none; border-color: var(--accent); }
+  #p-send { flex: none; width: 44px; height: 44px; border-radius: 22px; border: 0; background: #1f6feb; color: #fff;
+    display: inline-flex; align-items: center; justify-content: center; }
+  #p-send:disabled { opacity: .5; }
+  #p-send svg { width: 22px; height: 22px; }
+  /* tab bar + fab */
+  #p-tabs { position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; display: flex;
+    padding: 0 var(--sar) var(--sab) var(--sal); background: rgba(22,27,34,.96);
+    -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); border-top: 1px solid var(--border); }
+  #p-tabs button { position: relative; flex: 1; height: var(--tabh); display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 2px; background: none; border: 0; color: var(--dim); font-size: 11px; font-weight: 600; }
+  #p-tabs button svg { width: 25px; height: 25px; }
+  #p-tabs button.active { color: var(--accent); }
+  #p-tabs .cnt { position: absolute; top: 5px; left: calc(50% + 5px); min-width: 19px; height: 19px; padding: 0 5px;
+    border-radius: 10px; background: var(--bad); color: #fff; font: 700 12px/19px -apple-system, sans-serif; }
+  html.p-thread #p-tabs, html.p-thread #p-fab, html.kb-open #p-fab, html.kb-open #p-tabs { display: none; }
+  #p-fab { position: fixed; right: calc(16px + var(--sar)); bottom: calc(var(--tabh) + var(--sab) + 16px); z-index: 25;
+    display: none; align-items: center; justify-content: center; width: 58px; height: 58px; padding: 0; border: 0;
+    border-radius: 29px; background: #1f6feb; color: #fff; box-shadow: 0 8px 24px rgba(0,0,0,.55); }
+  #p-fab.on { display: inline-flex; }
+  #p-fab svg { width: 28px; height: 28px; }
+  #p-fab-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  /* bottom sheet + toast */
+  #p-sheet-bg { display: none; position: fixed; inset: 0; z-index: 40; background: rgba(0,0,0,.55); }
+  #p-sheet { display: none; position: fixed; left: 0; right: 0; bottom: 0; z-index: 41;
+    max-height: calc(100% - var(--sat) - var(--kb) - 12px); overflow-y: auto; overscroll-behavior: contain;
+    padding: 6px calc(16px + var(--sar)) calc(16px + var(--sab)) calc(16px + var(--sal));
+    background: var(--panel); border-top: 1px solid var(--border); border-radius: 18px 18px 0 0;
+    transform: translateY(calc(-1 * var(--kb))); box-shadow: 0 -10px 30px rgba(0,0,0,.5); }
+  html.kb-open #p-sheet { padding-bottom: 12px; }
+  html.p-sheet #p-sheet-bg, html.p-sheet #p-sheet { display: block; }
+  .p-sheet-h { display: flex; align-items: center; justify-content: space-between; min-height: 48px; font-size: 17px; }
+  .p-sheet-ctx { padding: 4px 0 10px; display: grid; grid-template-columns: minmax(0, 1fr); }
+  .p-sheet-ctx .p-prev { grid-column: 1; -webkit-line-clamp: 4; }
+  #p-sheet textarea { width: 100%; min-height: 96px; max-height: 40vh; padding: 12px 14px; border-radius: 14px; resize: none;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text); font-family: inherit; line-height: 1.4; }
+  #p-sheet textarea:focus { outline: none; border-color: var(--accent); }
+  .p-sheet-btns { display: flex; gap: 10px; margin-top: 10px; }
+  .p-menu { display: flex; flex-direction: column; gap: 8px; padding-bottom: 6px; }
+  .p-menu .p-btn { text-align: left; padding: 0 16px; font-weight: 500; }
+  .p-sheet-err { color: var(--bad); font-size: 14px; margin-top: 8px; }
+  #p-sheet form.panel { background: none; border: 0; padding: 0; margin: 0; }
+  #p-sheet form.panel .row { flex-direction: column; gap: 0; }
+  #p-sheet form.panel input, #p-sheet form.panel select { min-height: 44px; font-size: 16px; }
+  #p-sheet form.panel select { -webkit-appearance: none; appearance: none; padding-right: 36px; color: var(--text);
+    background: var(--bg) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238b949e' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E") no-repeat right 10px center / 18px; }
+  #p-sheet form.panel textarea { min-height: 96px; font-size: 16px; }
+  #p-sheet form.panel button[type=submit] { width: 100%; min-height: 48px; font-size: 17px; border-radius: 12px; }
+  #p-toast { position: fixed; left: 50%; z-index: 50; bottom: calc(var(--tabh) + var(--sab) + 84px + var(--kb));
+    transform: translateX(-50%) translateY(20px); opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s;
+    max-width: calc(100% - 32px); padding: 10px 18px; border-radius: 22px; background: #2d333b; color: var(--text);
+    font-size: 15px; box-shadow: 0 6px 18px rgba(0,0,0,.5); }
+  #p-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  #p-toast.bad { background: #5a1e1e; }
+  html.p-thread #p-toast { bottom: calc(var(--composer-h) + var(--sab) + var(--kb) + 16px); }
+  #p-usage .uwins { display: flex; flex-direction: column; gap: 12px; }
+  #p-usage .urow { display: flex; align-items: center; gap: 8px; font: 13px var(--mono); }
+  #p-usage .meter { flex: 1; height: 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 5px; overflow: hidden; }
+  #p-usage .meter > i { display: block; height: 100%; background: var(--dim); }
+  #p-usage .meter > i.GREEN { background: var(--ok); }
+  #p-usage .meter > i.YELLOW, #p-usage .meter > i.ORANGE { background: var(--warn); }
+  #p-usage .meter > i.RED { background: var(--bad); }
+  #p-usage .udetail { color: var(--dim); font: 12px var(--mono); margin-top: 4px; }
+  #p-usage .badge.GREEN { color: var(--ok); border-color: var(--ok); }
+  #p-usage .badge.YELLOW, #p-usage .badge.ORANGE { color: var(--warn); border-color: var(--warn); }
+  #p-usage .badge.RED { color: var(--bad); border-color: var(--bad); }
+  #p-usage .uwin.stale { opacity: .55; }
+  #p-usage .upause { margin: 0 0 12px; padding: 10px 12px; border: 2px solid var(--bad); border-radius: 8px;
+    background: rgba(248,81,73,.16); font: bold 14px var(--mono); }
+  #p-usage .upause .upreason { display: block; margin-top: 4px; font-size: 12px; font-weight: normal; color: var(--dim); }
 </style>
 </head>
 <body>
@@ -236,6 +447,7 @@
     <button id="tab-foremen">Foremen</button>
     <button id="tab-jobs">Jobs</button>
     <button id="tab-inboxes">Inboxes</button>
+    <button id="to-phone" style="display:none">phone layout</button>
   </nav>
 </header>
 <section id="usagepanel" aria-label="Factory usage">
@@ -338,6 +550,29 @@
     <div id="detail" style="display:none"></div>
   </div>
 </main>
+<div id="phone">
+  <div id="p-top">
+    <button class="p-icon" id="p-back" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></button>
+    <h1 id="p-title">Inbox</h1>
+    <span id="p-topacts"></span>
+  </div>
+  <div id="p-searchbar"><input id="p-q" type="search" placeholder="Search title, id or date" autocomplete="off" enterkeyhint="search" aria-label="Search tasks"></div>
+  <div id="p-body"></div>
+  <form id="p-composer">
+    <textarea id="p-input" rows="1" placeholder="Reply…" aria-label="Reply"></textarea>
+    <button type="submit" id="p-send" aria-label="Send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
+  </form>
+  <button id="p-fab" aria-label="New task"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span id="p-fab-label">New task</span></button>
+  <nav id="p-tabs">
+    <button data-tab="inbox"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/></svg><span>Inbox</span><b class="cnt" id="p-cnt" style="display:none"></b></button>
+    <button data-tab="jobs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v16"/></svg><span>Jobs</span></button>
+    <button data-tab="foremen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><path d="M6 7h.01M6 17h.01"/></svg><span>Foremen</span></button>
+    <button data-tab="more"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg><span>More</span></button>
+  </nav>
+  <div id="p-sheet-bg"></div>
+  <div id="p-sheet" role="dialog" aria-modal="true"></div>
+  <div id="p-toast" role="status" aria-live="polite"></div>
+</div>
 <script>
 "use strict";
 let selectedForeman = null, selectedInbox = null, selectedJob = null;
@@ -345,6 +580,16 @@ let tab = "chat";
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+// relIn formats a future timestamp: "in 59m" ("now" once passed).
+function relIn(ts) {
+  if (!ts) return "-";
+  const s = (Date.parse(ts) - Date.now()) / 1000;
+  if (s <= 0) return "now";
+  if (s < 3600) return "in " + Math.max(1, Math.floor(s / 60)) + "m";
+  if (s < 86400) return "in " + Math.floor(s / 3600) + "h";
+  return "in " + Math.floor(s / 86400) + "d";
+}
 
 function rel(ts) {
   if (!ts) return "-";
@@ -537,7 +782,7 @@ function renderAlerts() {
     '<div class="ahead">' + prioBadge(a.priority) + ' <span class="atitle">' + esc(a.title) + "</span></div>" +
     (a.body ? '<div class="abody">' + esc(a.body) + "</div>" : "") +
     '<div class="ameta">' + esc(a.source || "") + " · " + esc(rel(a.created_at)) +
-    (a.expires_at ? " · expires " + esc(rel(a.expires_at).replace(" ago", "")) : "") + "</div>" +
+    (a.expires_at ? " · expires " + esc(relIn(a.expires_at)) : "") + "</div>" +
     '<div class="aactions"><button class="ack" data-id="' + esc(a.id) + '">ack</button> ' +
     '<button class="replytoggle" data-id="' + esc(a.id) + '">reply</button></div>' +
     '<form class="areply" data-id="' + esc(a.id) + '" style="display:none">' +
@@ -674,7 +919,8 @@ function renderTasks() {
   box.innerHTML = st.tasks.map(t =>
     '<div class="task' + (t.id === st.selected ? " selected" : "") + (t.status === "closed" ? " closed" : "") + '" data-id="' + esc(t.id) + '">' +
     '<div class="thead">' + prioBadge(t.priority) + ' <span class="ttitle">' + esc(t.title) + "</span>" +
-    (t.awaiting === "operator" ? '<span class="needs" title="waiting on you">● needs input</span>' : "") + "</div>" +
+    (t.awaiting === "operator" ? '<span class="needs" title="waiting on you">● needs input</span>' : "") +
+    (t.status === "open" && t.needs_operator ? ' <span class="badge flagged" title="the planner flagged this as waiting on you (needs_operator)">needs you</span>' : "") + "</div>" +
     (t.preview ? '<div class="tprev">' + esc(t.preview) + "</div>" : "") +
     '<div class="tmeta">' + esc(t.status) + " · " + esc(rel(t.last_activity_at || t.updated_at)) + " · " + esc(t.id) + "</div></div>").join("");
   for (const el of box.querySelectorAll(".task")) el.onclick = () => {
@@ -938,7 +1184,10 @@ async function loadChat() {
 let refreshTimer = null;
 function scheduleRefresh() {
   if (refreshTimer) return;
-  refreshTimer = setTimeout(() => { refreshTimer = null; if (tab === "chat") loadChat(); }, 300);
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null;
+    if (isPhone()) pLoad(); else if (tab === "chat") loadChat();
+  }, 300);
 }
 function connectStream() {
   if (typeof EventSource === "undefined") return;
@@ -1110,7 +1359,7 @@ $("createjob").onsubmit = async (ev) => {
     note.textContent = text;
     $("job-task").value = "";
     $("job-foreman").value = "";
-    await loadJobs();
+    if (isPhone()) { pCloseSheet(); pToast(text); pLoad(); } else await loadJobs();
   } catch (e) { note.style.color = "var(--bad)"; note.textContent = e.message; }
 };
 
@@ -1167,6 +1416,7 @@ function renderUsage() {
     : stale && usageData ? "stale data" : "";
   $("u-wins").innerHTML = usageData ? usageHTML(usageData, Date.now(), usageError) : '<div class="uwin stale">no usage data</div>';
   $("u-spend").textContent = usageData ? usageSpendText(usageData.factory_spend) : "";
+  if (isPhone()) pRenderUsage();
   renderGate();
 }
 /* ---------- S6: gate status, held jobs, pause banner, override controls, alerts ---------- */
@@ -1349,19 +1599,667 @@ for (const id of ["chat", "foremen", "jobs", "inboxes"]) {
 }
 $("state-filter").onchange = () => loadJobs();
 
-(async () => {
+// Start once the phone script below has loaded too: html.phone shows the
+// phone UI (#phone, pInit/pRoute), otherwise the desktop tabs run as before.
+document.addEventListener("DOMContentLoaded", async () => {
   $("adv").textContent = location.host;
   document.querySelector("main").classList.add("wide");
   loadUsage();
   setInterval(loadUsage, USAGE_POLL_MS);
   setInterval(renderUsage, 30000); // keep countdowns moving between polls
-  await loadChat();
+  pInit();
+  if (isPhone()) pRoute(); else await loadChat();
   connectStream();
   // SSE is the fast path; the slow poll is the safety net (and the only path
   // on older factories). Tables refresh slower (5s).
-  setInterval(() => { if (tab === "chat") loadChat(); }, 10000);
-  setInterval(() => { if (tab !== "chat") loaders[tab](); $("refreshed").textContent = "refreshed " + new Date().toLocaleTimeString(); }, 5000);
-})();
+  setInterval(() => { if (isPhone()) pLoad(); else if (tab === "chat") loadChat(); }, 10000);
+  setInterval(() => {
+    if (isPhone()) return;
+    if (tab !== "chat") loaders[tab]();
+    $("refreshed").textContent = "refreshed " + new Date().toLocaleTimeString();
+  }, 5000);
+});
+</script>
+<script>
+"use strict";
+/* ---------- phone UI (html.phone) ----------
+ * A separate, phone-first shell over the same JSON API: list -> detail
+ * navigation with hash routes (#/inbox, #/task/<id>, #/jobs, #/job/<id>,
+ * #/foremen, #/foreman/<id>, #/more, #/ibx/<id>) so iOS back-swipe works,
+ * a bottom tab bar, swipe/one-tap quick actions, bottom sheets for
+ * composing, and a reply composer pinned above the iOS keyboard. "Needs
+ * you" (section + Inbox badge) = an open task with the server-side
+ * needs_operator flag, which the planner sets and an operator reply or
+ * close clears, so it agrees on every device. Read/unread is a per-device
+ * visual (bold) only: planner spoke last and not opened here since, or
+ * marked unread by hand (localStorage).
+ */
+const PHONE_MQ = "(max-width: 760px), (pointer: coarse) and (max-height: 520px)";
+const isPhone = () => document.documentElement.classList.contains("phone");
+const P_ROOT = document.documentElement;
+
+function layoutPref() { try { return localStorage.getItem("factory.layout") || ""; } catch { return ""; } }
+function setLayoutPref(v) {
+  try { if (v) localStorage.setItem("factory.layout", v); else localStorage.removeItem("factory.layout"); } catch {}
+  applyLayout();
+}
+function wantPhone() { const f = layoutPref(); return f === "phone" || (f !== "desktop" && matchMedia(PHONE_MQ).matches); }
+function applyLayout() {
+  const was = isPhone(), now = wantPhone();
+  P_ROOT.classList.toggle("phone", now);
+  $("to-phone").style.display = !now && layoutPref() === "desktop" && matchMedia(PHONE_MQ).matches ? "" : "none";
+  if (was === now) return;
+  if (now) pRoute();
+  else { P_ROOT.classList.remove("p-thread", "p-detail", "p-search", "p-sheet", "kb-open"); document.title = "factory"; setTab(tab); }
+}
+
+/* ----- read state (per device) ----- */
+const SEEN_KEY = "factory.seen.v1";
+let pSeen = (() => { try { return JSON.parse(localStorage.getItem(SEEN_KEY)) || {}; } catch { return {}; } })();
+function saveSeen() { try { localStorage.setItem(SEEN_KEY, JSON.stringify(pSeen)); } catch {} }
+const actTs = (t) => t.last_activity_at || t.updated_at || "";
+const needsYou = (t) => t.status === "open" && !!t.needs_operator;
+function isUnread(t) {
+  if (t.status !== "open") return false;
+  const s = pSeen[t.id];
+  if (s === "!") return true; // marked unread by hand
+  return t.preview_from === "planner" && !(s && Date.parse(s) >= Date.parse(actTs(t)));
+}
+function markSeen(t, seen = true) {
+  if (!t) return;
+  if (seen) pSeen[t.id] = actTs(t); else pSeen[t.id] = "!";
+  saveSeen();
+}
+
+/* ----- state + routing ----- */
+const P = {
+  r: { name: "", arg: null }, tasks: [], alerts: [], showClosed: false, q: "",
+  thread: null, threadSig: "", showInternal: false,
+  jobs: [], jobState: "", job: null, foremen: [], fjobs: [], fmsgs: [], inboxes: [], imsgs: [],
+  err: "", busy: false, badge: 0,
+};
+const P_PARENT = { task: "inbox", job: "jobs", foreman: "foremen", ibx: "more" };
+const P_TAB = { inbox: "inbox", task: "inbox", jobs: "jobs", job: "jobs", foremen: "foremen", foreman: "foremen", more: "more", ibx: "more" };
+
+function pParse() {
+  const h = location.hash.replace(/^#\/?/, "");
+  const i = h.indexOf("/");
+  const r = i < 0 ? { name: h || "inbox", arg: null } : { name: h.slice(0, i), arg: decodeURIComponent(h.slice(i + 1)) };
+  if (!P_TAB[r.name]) r.name = "inbox";
+  return r;
+}
+function pGo(name, arg, replace) {
+  const h = "#/" + name + (arg ? "/" + encodeURIComponent(arg) : "");
+  if (replace) history.replaceState(null, "", h); else history.pushState({ p: 1 }, "", h);
+  pRoute();
+}
+function pBack() {
+  if (history.state && history.state.p) history.back();
+  else pGo(P_PARENT[P.r.name] || "inbox", null, true);
+}
+
+function pRoute() {
+  if (!isPhone()) return;
+  pCloseSheet();
+  const r = pParse();
+  const changed = r.name !== P.r.name || r.arg !== P.r.arg;
+  P.r = r;
+  P_ROOT.classList.toggle("p-thread", r.name === "task");
+  P_ROOT.classList.toggle("p-detail", !!P_PARENT[r.name] && r.name !== "task");
+  P_ROOT.classList.toggle("p-search", r.name === "inbox" && P.searchOpen === true);
+  for (const b of document.querySelectorAll("#p-tabs button")) b.classList.toggle("active", b.dataset.tab === P_TAB[r.name]);
+  const fab = $("p-fab");
+  fab.classList.toggle("on", r.name === "inbox" || r.name === "jobs");
+  $("p-fab-label").textContent = r.name === "jobs" ? "New job" : "New task";
+  fab.setAttribute("aria-label", $("p-fab-label").textContent);
+  if (changed) {
+    P.thread = null; P.threadSig = ""; P.busy = false; P.err = "";
+    window.scrollTo(0, 0);
+    pTop(pTitles[r.name] || "", "");
+    $("p-body").innerHTML = '<div class="p-empty">loading…</div>';
+  }
+  pLoad();
+}
+const pTitles = { inbox: "Inbox", jobs: "Jobs", foremen: "Foremen", more: "More", task: "", job: "Job", foreman: "Foreman", ibx: "Inbox log" };
+
+let pLoading = false, pAgain = false;
+async function pLoad() {
+  if (!isPhone()) return;
+  if (pLoading) { pAgain = true; return; }
+  pLoading = true;
+  try { do { pAgain = false; await pLoadOnce(); } while (pAgain); }
+  finally { pLoading = false; }
+}
+
+async function pLoadInboxData() {
+  const qs = "?status=" + (P.showClosed ? "all" : "open") + "&limit=200" + (P.q ? "&q=" + encodeURIComponent(P.q) : "");
+  const tasksP = st.tasksAvailable ? getJ("/v1/tasks" + qs).then(d => d.tasks || []).catch(e => {
+    if (api404(e)) { st.tasksAvailable = false; return []; }
+    P.err = e.message; return P.tasks;
+  }) : Promise.resolve([]);
+  const alertsP = st.alertsAvailable ? getJ("/v1/alerts").then(d => d.alerts || []).catch(e => {
+    if (api404(e)) { st.alertsAvailable = false; return []; }
+    P.err = e.message; return P.alerts;
+  }) : Promise.resolve([]);
+  [P.tasks, P.alerts] = await Promise.all([tasksP, alertsP]);
+}
+
+async function pLoadOnce() {
+  const r = P.r, enc = encodeURIComponent(r.arg || "");
+  P.err = "";
+  const inbox = pLoadInboxData();
+  try {
+    switch (r.name) {
+      case "task":
+        try { P.thread = await getJ("/v1/tasks/" + enc + (P.showInternal ? "?internal=1" : "")); }
+        catch (e) { if (e.status === 404) P.thread = { missing: true }; else throw e; }
+        break;
+      case "jobs": P.jobs = (await getJ("/v1/jobs?limit=100" + (P.jobState ? "&state=" + encodeURIComponent(P.jobState) : ""))) || []; break;
+      case "job": P.job = await getJ("/v1/jobs/" + enc); break;
+      case "foremen": P.foremen = (await getJ("/v1/foremen")) || []; break;
+      case "foreman":
+        [P.foremen, P.fjobs, P.fmsgs] = await Promise.all([getJ("/v1/foremen"),
+          getJ("/v1/jobs?foreman=" + enc + "&limit=25"), getJ("/v1/inboxes/" + enc + "/recent?limit=25")]);
+        break;
+      case "more": P.inboxes = (await getJ("/v1/inboxes")) || []; break;
+      case "ibx": P.imsgs = (await getJ("/v1/inboxes/" + enc + "/recent?limit=100")) || []; break;
+    }
+  } catch (e) { P.err = e.message; }
+  await inbox;
+  if (P.r !== r || !isPhone()) return; // navigated away meanwhile
+  pRender();
+}
+
+/* ----- rendering ----- */
+const pShort = (s) => s.replace(" ago", "").replace("just now", "now");
+const pSvg = (d) => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + d + "</svg>";
+const P_ICON = {
+  search: pSvg('<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>'),
+  more: pSvg('<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>'),
+};
+function pTop(titleHTML, actsHTML) { $("p-title").innerHTML = titleHTML; $("p-topacts").innerHTML = actsHTML || ""; }
+function pSec(label, n, extra) {
+  return '<div class="p-sec"><span>' + esc(label) + (n != null ? '<span class="n">' + n + "</span>" : "") + "</span>" + (extra || "") + "</div>";
+}
+function pErr() { return P.err ? '<div class="err">' + esc(P.err) + "</div>" : ""; }
+
+function pBadge() {
+  if (P.q) return; // a search narrows P.tasks; keep the last full count
+  const n = P.alerts.length + P.tasks.filter(needsYou).length;
+  P.badge = n;
+  const c = $("p-cnt");
+  c.textContent = n > 99 ? "99+" : String(n);
+  c.style.display = n ? "" : "none";
+  document.title = (n ? "(" + n + ") " : "") + "factory";
+  if (navigator.setAppBadge) (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {});
+}
+
+function pRender() {
+  pBadge();
+  switch (P.r.name) {
+    case "inbox": if (!P.busy) pRenderInbox(); break;
+    case "task": pRenderThread(); break;
+    case "jobs": pRenderJobs(); break;
+    case "job": pRenderJob(); break;
+    case "foremen": pRenderForemen(); break;
+    case "foreman": pRenderForeman(); break;
+    case "more": pRenderMore(); break;
+    case "ibx": pRenderInboxLog(); break;
+  }
+}
+
+function pUsageChip() {
+  if (!usageData) return "";
+  const s = usageState(usageData.state), w = usageData.windows && usageData.windows.five_hour;
+  const pct = w && w.utilization_pct != null ? Math.round(w.utilization_pct) + "%" : "?";
+  return '<button class="p-uchip" id="p-uchip" data-go="more" aria-label="Usage ' + s + '"><i class="' + s + '"></i>5h ' + pct + "</button>";
+}
+function pRenderUsage() {
+  if (P.r.name === "inbox") { const c = $("p-uchip"); if (c) c.outerHTML = pUsageChip(); else if (usageData) pTop("Inbox", pInboxActs()); }
+  if (P.r.name === "more" && $("p-usage")) $("p-usage").innerHTML = pUsageHTML();
+}
+function pUsageHTML() {
+  const overall = usageData ? usageState(usageData.state) : "UNKNOWN";
+  return '<h3>Usage <span class="badge ' + overall + '">' + overall + "</span></h3>" +
+    (usageError ? '<div class="err" style="padding:0 0 8px">unavailable: ' + esc(usageError) + "</div>" : "") +
+    (usageData && pauseBannerHTML(usageData.gate, Date.now()) ? '<div class="upause">' + pauseBannerHTML(usageData.gate, Date.now()) + "</div>" : "") +
+    '<div class="uwins">' + (usageData ? usageHTML(usageData, Date.now(), usageError) : '<div class="uwin stale">no usage data</div>') + "</div>" +
+    (usageData ? '<div class="udetail" style="margin-top:10px">' + esc(usageSpendText(usageData.factory_spend)) + "</div>" : "");
+}
+function pInboxActs() {
+  return pUsageChip() + '<button class="p-icon" data-act="search" aria-label="Search">' + P_ICON.search + "</button>";
+}
+
+function pTaskRow(t) {
+  const unread = isUnread(t), needs = needsYou(t), closed = t.status !== "open", id = esc(t.id);
+  const who = t.preview_from === "planner" ? "Planner: " : t.preview_from === "operator" ? "You: " : "";
+  const jobs = (t.job_ids || []).length;
+  return '<div class="p-row" data-id="' + id + '">' +
+    '<div class="p-acts"><button class="pa-read" data-act="toggle-read" data-id="' + id + '">' + (unread ? "Read" : "Unread") + "</button><span></span>" +
+    '<button class="pa-reply" data-act="quick-reply" data-id="' + id + '">Reply</button>' +
+    (closed ? "" : '<button class="pa-close" data-act="close" data-id="' + id + '">Close</button>') + "</div>" +
+    '<div class="p-item swipe' + (unread ? " unread" : "") + (closed ? " closed" : "") + '" data-go="task/' + id + '" data-w="' + (closed ? 84 : 168) + '">' +
+    '<span class="p-dot"></span><div class="p-title">' + esc(t.title) + '</div><span class="p-time">' + esc(pShort(rel(actTs(t)))) + "</span>" +
+    (t.preview ? '<div class="p-prev"><span class="who">' + who + "</span>" + esc(t.preview) + "</div>" : "") +
+    '<div class="p-meta">' + prioBadge(t.priority) + (needs ? ' <span class="badge needs">needs you</span>' : "") + (closed ? ' <span class="badge">closed</span>' : "") +
+    (jobs ? "<span>· " + jobs + " job" + (jobs === 1 ? "" : "s") + "</span>" : "") + "</div></div></div>";
+}
+function pAlertRow(a) {
+  const id = esc(a.id);
+  return '<div class="p-row"><div class="p-item unread"' + (a.task_id ? ' data-go="task/' + esc(a.task_id) + '"' : "") + ">" +
+    '<span class="p-dot" style="background:' + (a.priority <= 1 ? "var(--bad)" : "var(--warn)") + '"></span>' +
+    '<div class="p-title">' + prioBadge(a.priority) + " " + esc(a.title) + '</div><span class="p-time">' + esc(pShort(rel(a.created_at))) + "</span>" +
+    (a.body ? '<div class="p-prev">' + esc(a.body) + "</div>" : "") +
+    '<div class="p-afoot"><div class="p-meta">' + esc(a.source || "") + (a.expires_at ? " · expires " + esc(relIn(a.expires_at)) : "") + "</div>" +
+    '<button data-act="ack" data-id="' + id + '">Ack</button>' +
+    '<button class="pri" data-act="alert-reply" data-id="' + id + '">Reply</button></div></div></div>';
+}
+const pList = (rows) => '<div class="p-list">' + rows.join("") + "</div>";
+
+function pRenderInbox() {
+  pTop("Inbox", pInboxActs());
+  const body = $("p-body");
+  if (!st.tasksAvailable) {
+    body.innerHTML = '<div class="p-empty">This factory has no task API yet. Use the desktop layout (More → Desktop layout).</div>';
+    return;
+  }
+  const alerts = [...P.alerts].sort((a, b) => a.priority - b.priority || Date.parse(b.created_at) - Date.parse(a.created_at));
+  const open = P.tasks.filter(t => t.status === "open");
+  const needs = open.filter(needsYou), rest = open.filter(t => !needsYou(t)), closed = P.tasks.filter(t => t.status !== "open");
+  let h = '<div class="p-chips"><button class="p-chip' + (P.showClosed ? "" : " on") + '" data-act="closed-off">Open</button>' +
+    '<button class="p-chip' + (P.showClosed ? " on" : "") + '" data-act="closed-on">Include closed</button></div>' + pErr();
+  if (!alerts.length && !needs.length && !P.q) h += '<div class="p-zero">All caught up: nothing needs you.</div>';
+  if (alerts.length) h += pSec("Alerts", alerts.length) + pList(alerts.map(pAlertRow));
+  if (needs.length) h += pSec("Needs you", needs.length) + pList(needs.map(pTaskRow));
+  h += pSec(needs.length ? "Other open" : "Open", rest.length) +
+    (rest.length ? pList(rest.map(pTaskRow)) : '<div class="p-empty">' + (P.q ? "no matching open tasks" : "no other open tasks") + "</div>");
+  if (P.showClosed) h += pSec("Closed", closed.length) + (closed.length ? pList(closed.map(pTaskRow)) : '<div class="p-empty">none</div>');
+  h += '<p class="p-hint">Swipe a task left to reply or close it, right to mark it read or unread.</p>';
+  body.innerHTML = h;
+}
+
+function pRenderThread() {
+  const th = P.thread;
+  if (!th) { if (P.err) $("p-body").innerHTML = pErr(); return; }
+  if (th.missing) { pTop("Task not found", ""); $("p-body").innerHTML = '<div class="p-empty">This task no longer exists.</div>'; return; }
+  const t = th.task, msgs = th.messages || [];
+  if (document.visibilityState === "visible") markSeen(t);
+  pTop(esc(t.title), '<button class="p-icon" data-act="task-menu" aria-label="Task actions">' + P_ICON.more + "</button>");
+  const shown = P.showInternal ? msgs : msgs.filter(m => !isInternalEnv(m));
+  const last = shown[shown.length - 1];
+  const typing = !!(last && last.from === "human:operator" && t.status === "open");
+  const sig = [t.status, t.priority, shown.length, last ? last.id : "", P.showInternal, typing, P.err].join("|");
+  $("p-input").placeholder = t.status === "closed" ? "Reply to reopen…" : "Reply…";
+  if (sig === P.threadSig) return; // nothing new: keep the scroll position and avoid flicker
+  const first = !P.threadSig;
+  const atBottom = first || window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 120;
+  P.threadSig = sig;
+  $("p-body").innerHTML = pErr() +
+    '<div class="p-thead">' + prioBadge(t.priority) + ' <span class="st ' + (t.status === "open" ? "running" : "") + '">' + esc(t.status) + "</span>" +
+    "<span>" + esc(t.id) + "</span>" + (P.showInternal ? '<span class="badge">showing internal</span>' : "") + "</div>" +
+    '<div class="p-log">' + (shown.length ? shown.map(m => (isInternalEnv(m) ? '<div class="internal">' + bubble(m) + "</div>" : bubble(m))).join("")
+      : '<div class="p-empty">no messages in this task yet</div>') +
+    (typing ? '<div class="typing">the planner is thinking…</div>' : "") + "</div>";
+  if (atBottom) pScrollBottom();
+}
+function pScrollBottom() { requestAnimationFrame(() => window.scrollTo(0, document.documentElement.scrollHeight)); }
+
+const JOB_STATES = ["", "running", "pending", "dispatched", "failed", "done", "timed_out", "dead", "cancelled", "superseded"];
+function pRenderJobs() {
+  pTop("Jobs", "");
+  const chips = '<div class="p-chips">' + JOB_STATES.map(s =>
+    '<button class="p-chip' + (s === P.jobState ? " on" : "") + '" data-act="job-state" data-id="' + s + '">' + (s ? esc(s.replace("_", " ")) : "All") + "</button>").join("") + "</div>";
+  $("p-body").innerHTML = chips + pErr() + pSec(P.jobState ? P.jobState.replace("_", " ") : "Latest", P.jobs.length) +
+    (P.jobs.length ? pList(P.jobs.map(j =>
+      '<div class="p-row"><div class="p-item" data-go="job/' + esc(j.id) + '"><span></span>' +
+      '<div class="p-title" style="font-family:var(--mono);font-size:15px">' + esc(j.id) + '</div><span class="p-time">' + esc(pShort(rel(j.created_at))) + "</span>" +
+      '<div class="p-meta"><span class="st ' + esc(j.state) + '">' + esc(j.state) + "</span>" + esc(j.foreman_id || "no foreman") +
+      (j.over_budget ? ' <span class="badge hot">over budget</span>' : "") + "</div></div></div>")) : '<div class="p-empty">no jobs</div>');
+}
+function pRenderJob() {
+  const j = P.job;
+  pTop("Job", "");
+  if (!j) { $("p-body").innerHTML = pErr(); return; }
+  const results = j.results || [];
+  $("p-body").innerHTML = pErr() + '<div class="p-card"><h3>' + esc(j.id) + "</h3><dl class=\"p-kv\">" +
+    '<dt>state</dt><dd><span class="st ' + esc(j.state) + '">' + esc(j.state) + "</span>" + (j.over_budget ? ' <span class="badge hot">over budget</span>' : "") + "</dd>" +
+    "<dt>foreman</dt><dd>" + esc(j.foreman_id || "-") + "</dd><dt>attempts</dt><dd>" + esc(j.attempts) + "</dd>" +
+    "<dt>created</dt><dd>" + esc(rel(j.created_at)) + "</dd><dt>updated</dt><dd>" + esc(rel(j.updated_at)) + "</dd>" +
+    (j.task_id ? '<dt>task</dt><dd><a href="#/task/' + encodeURIComponent(j.task_id) + '" data-go="task/' + esc(j.task_id) + '">' + esc(j.task_id) + "</a></dd>" : "") +
+    (j.last_error ? '<dt>error</dt><dd style="color:var(--bad)">' + esc(j.last_error) + "</dd>" : "") + "</dl></div>" +
+    '<div class="p-card"><h3>spec</h3><pre>' + esc(JSON.stringify(j.spec, null, 2)) + "</pre></div>" +
+    '<div class="p-card"><h3>results (' + results.length + ")</h3>" + (results.length ? "<pre>" + esc(JSON.stringify(results, null, 2)) + "</pre>" : '<div class="p-empty">no results yet</div>') + "</div>" +
+    '<div class="p-card"><h3>usage</h3><pre>' + esc(JSON.stringify(j.usage || null, null, 2)) + "</pre></div>";
+}
+function pForemanRow(f) {
+  const caps = parseCaps(f.capabilities), n = Object.keys(caps).length;
+  return '<div class="p-row"><div class="p-item" data-go="foreman/' + esc(f.id) + '"><span class="dot ' + (f.online ? "online" : "offline") + '" style="margin-top:7px"></span>' +
+    '<div class="p-title">' + esc(f.id) + '</div><span class="p-time">' + esc(pShort(rel(f.last_seen))) + "</span>" +
+    '<div class="p-meta"><span class="st ' + (f.online ? "online" : "offline") + '">' + (f.online ? "online" : "offline") + "</span>" +
+    "build " + esc(caps.build || "-") + " · " + n + " cap" + (n === 1 ? "" : "s") + "</div></div></div>";
+}
+function pRenderForemen() {
+  pTop("Foremen", "");
+  const on = P.foremen.filter(f => f.online).length;
+  $("p-body").innerHTML = pErr() + pSec(on + " of " + P.foremen.length + " online") +
+    (P.foremen.length ? pList(P.foremen.map(pForemanRow)) : '<div class="p-empty">no foremen</div>');
+}
+function pMsgDetails(e) {
+  return "<details><summary><b>" + esc(e.type) + "</b>" + esc(e.from) + " · " + esc(pShort(rel(e.ts))) + "</summary>" +
+    (e.job_id ? '<div class="p-meta" style="margin:0 0 6px">job <a data-go="job/' + esc(e.job_id) + '" href="#/job/' + encodeURIComponent(e.job_id) + '">' + esc(e.job_id) + "</a></div>" : "") +
+    "<pre>" + esc(JSON.stringify(e.payload ?? null, null, 2)) + "</pre></details>";
+}
+function pRenderForeman() {
+  const f = P.foremen.find(x => x.id === P.r.arg);
+  pTop("Foreman", "");
+  if (!f) { $("p-body").innerHTML = pErr() + '<div class="p-empty">foreman ' + esc(P.r.arg) + " is no longer registered</div>"; return; }
+  $("p-body").innerHTML = pErr() + pList([pForemanRow(f).replace(/ data-go="[^"]*"/, "")]) +
+    '<div class="p-card"><h3>capabilities</h3><pre>' + esc(JSON.stringify(parseCaps(f.capabilities), null, 2)) + "</pre></div>" +
+    pSec("Recent jobs", (P.fjobs || []).length) + ((P.fjobs || []).length ? pList(P.fjobs.map(j =>
+      '<div class="p-row"><div class="p-item" data-go="job/' + esc(j.id) + '"><span></span><div class="p-title" style="font-family:var(--mono);font-size:15px">' + esc(j.id) +
+      '</div><span class="p-time">' + esc(pShort(rel(j.created_at))) + '</span><div class="p-meta"><span class="st ' + esc(j.state) + '">' + esc(j.state) + "</span></div></div></div>")) : '<div class="p-empty">none</div>') +
+    '<div class="p-card"><h3>inbox, newest first</h3>' + ((P.fmsgs || []).length ? [...P.fmsgs].reverse().map(pMsgDetails).join("") : '<div class="p-empty">no messages</div>') + "</div>";
+}
+function pRenderMore() {
+  pTop("More", "");
+  $("p-body").innerHTML = pErr() + '<div class="p-card" id="p-usage">' + pUsageHTML() + "</div>" +
+    pSec("Inboxes", P.inboxes.length) + (P.inboxes.length ? pList(P.inboxes.map(s =>
+      '<div class="p-row"><div class="p-item" data-go="ibx/' + esc(s.inbox_id) + '"><span></span><div class="p-title" style="font-family:var(--mono);font-size:15px">' + esc(s.inbox_id) +
+      '</div><span class="p-time">' + esc(pShort(rel(s.last_ts))) + '</span><div class="p-meta">' + s.total + " messages" +
+      (s.unacked > 0 ? ' <span class="badge hot">' + s.unacked + " unacked</span>" : "") + "</div></div></div>")) : '<div class="p-empty">no inboxes</div>') +
+    pSec("Display") + '<div class="p-menu"><button class="p-btn" data-act="desktop">Use the desktop layout on this device</button></div>' +
+    '<p class="p-hint">' + esc(location.host) + ' · Add to Home Screen from the Share menu for a full-screen app.</p>';
+}
+function pRenderInboxLog() {
+  pTop(esc(P.r.arg), "");
+  $("p-body").innerHTML = pErr() + '<div class="p-card"><h3>newest first, acked included</h3>' +
+    ((P.imsgs || []).length ? [...P.imsgs].reverse().map(pMsgDetails).join("") : '<div class="p-empty">no messages</div>') + "</div>";
+}
+
+/* ----- sheets, toast ----- */
+let pSheetOnClose = null;
+function pSheet(html, onSubmit, onClose) {
+  pCloseSheet();
+  const sh = $("p-sheet");
+  sh.innerHTML = '<div class="p-sheet-h"><span class="p-sheet-t"></span><button class="p-icon" data-act="sheet-close" aria-label="Close">✕</button></div>' + html;
+  P_ROOT.classList.add("p-sheet");
+  pSheetOnClose = onClose || null;
+  const form = sh.querySelector("form.p-sheetform");
+  if (form && onSubmit) {
+    const ta = form.querySelector("textarea");
+    ta.focus(); // synchronous inside the tap so iOS opens the keyboard
+    form.onsubmit = async (ev) => {
+      ev.preventDefault();
+      const text = ta.value.trim();
+      if (!text) return;
+      const btn = form.querySelector("button[type=submit]");
+      btn.disabled = true;
+      try { await onSubmit(text); pCloseSheet(); }
+      catch (e) { form.querySelector(".p-sheet-err").textContent = e.message; }
+      finally { btn.disabled = false; }
+    };
+  }
+  return sh;
+}
+function pCloseSheet() {
+  if (!P_ROOT.classList.contains("p-sheet")) return;
+  P_ROOT.classList.remove("p-sheet");
+  if (document.activeElement && $("p-sheet").contains(document.activeElement)) document.activeElement.blur();
+  const f = pSheetOnClose; pSheetOnClose = null;
+  if (f) f();
+  $("p-sheet").innerHTML = "";
+}
+function pComposeForm(placeholder, sendLabel, extraBtn) {
+  return '<form class="p-sheetform"><textarea rows="3" placeholder="' + esc(placeholder) + '"></textarea>' +
+    '<div class="p-sheet-btns">' + (extraBtn || "") + '<button type="submit" class="p-btn pri">' + esc(sendLabel) + "</button></div>" +
+    '<div class="p-sheet-err" role="alert"></div></form>';
+}
+let pToastTimer = null;
+function pToast(msg, bad) {
+  const el = $("p-toast");
+  el.textContent = msg;
+  el.className = "show" + (bad ? " bad" : "");
+  clearTimeout(pToastTimer);
+  pToastTimer = setTimeout(() => { el.className = ""; }, bad ? 4000 : 2200);
+}
+
+/* ----- actions ----- */
+function pTask(id) { return P.tasks.find(t => t.id === id) || (P.thread && P.thread.task && P.thread.task.id === id ? P.thread.task : null); }
+
+function pNewTask() {
+  const sh = pSheet(pComposeForm("What do you need? The planner picks it up.", "Start task"), async (text) => {
+    const out = await sendText(text, null);
+    if (out && out.task_id) pGo("task", out.task_id); else pLoad();
+  });
+  sh.querySelector(".p-sheet-t").textContent = "New task";
+}
+function pNewJob() {
+  const sh = pSheet('<div id="p-jobslot"></div>', null, () => { $("createpanel").appendChild($("createjob")); });
+  sh.querySelector(".p-sheet-t").textContent = "New job";
+  $("p-jobslot").appendChild($("createjob"));
+  $("job-note").textContent = "";
+  $("job-task").focus();
+}
+function pQuickReply(id) {
+  const t = pTask(id);
+  const who = t && t.preview_from === "planner" ? "Planner: " : t && t.preview_from === "operator" ? "You: " : "";
+  const sh = pSheet('<div class="p-sheet-ctx"><div class="p-title">' + esc(t ? t.title : id) + "</div>" +
+    (t && t.preview ? '<div class="p-prev"><span class="who">' + who + "</span>" + esc(t.preview) + "</div>" : "") + "</div>" +
+    pComposeForm(t && t.status === "closed" ? "Reply to reopen…" : "Reply…", "Send",
+      '<button type="button" class="p-btn" data-go="task/' + esc(id) + '">Open thread</button>'), async (text) => {
+    await sendText(text, id);
+    if (t) markSeen(t);
+    pToast("Sent");
+    pLoad();
+  });
+  sh.querySelector(".p-sheet-t").textContent = "Reply";
+}
+function pAlertReply(id) {
+  const a = P.alerts.find(x => x.id === id);
+  const sh = pSheet('<div class="p-sheet-ctx"><div class="p-title">' + (a ? prioBadge(a.priority) + " " + esc(a.title) : esc(id)) + "</div>" +
+    (a && a.body ? '<div class="p-prev">' + esc(a.body) + "</div>" : "") + "</div>" +
+    pComposeForm("Reply (opens a task)…", "Send"), async (text) => {
+    try {
+      const out = await postJ("/v1/alerts/" + encodeURIComponent(id) + "/reply", { text });
+      if (out.task_id) pGo("task", out.task_id); else pLoad();
+    } catch (e) {
+      if (e.status === 409) { pToast("Alert already closed"); pLoad(); return; }
+      throw e;
+    }
+  });
+  sh.querySelector(".p-sheet-t").textContent = "Reply to alert";
+}
+async function pAck(id) {
+  P.alerts = P.alerts.filter(a => a.id !== id);
+  pRender();
+  try { await postJ("/v1/alerts/" + encodeURIComponent(id) + "/ack"); pToast("Acked"); }
+  catch (e) { if (e.status !== 409) pToast("ack failed: " + e.message, true); }
+  pLoad();
+}
+async function pCloseTask(id) {
+  const t = pTask(id);
+  if (t) t.status = "closed";
+  pRender();
+  try { await postJ("/v1/tasks/" + encodeURIComponent(id) + "/close", {}); pToast("Closed; the planner will stop its jobs. Reply to reopen."); }
+  catch (e) { pToast("close failed: " + e.message, true); }
+  P.threadSig = "";
+  pLoad();
+}
+function pTaskMenu() {
+  const t = P.thread && P.thread.task;
+  if (!t) return;
+  const jobs = t.job_ids || [];
+  const sh = pSheet('<div class="p-menu">' +
+    '<button class="p-btn" data-act="toggle-internal">' + (P.showInternal ? "Hide" : "Show") + " internal messages (jobs, reports)</button>" +
+    (t.status === "open" ? '<button class="p-btn" data-act="close" data-id="' + esc(t.id) + '">Close task</button>' : "") +
+    '<button class="p-btn" data-act="mark-unread" data-id="' + esc(t.id) + '">Mark unread and go back</button>' +
+    '<button class="p-btn" data-act="copy-id" data-id="' + esc(t.id) + '">Copy task id</button>' +
+    (jobs.length ? pSec("Linked jobs", jobs.length) + jobs.map(j => '<button class="p-btn" style="font-family:var(--mono)" data-go="job/' + esc(j) + '">' + esc(j) + "</button>").join("") : "") +
+    "</div>");
+  sh.querySelector(".p-sheet-t").textContent = "Task";
+}
+
+async function pAct(act, id, el) {
+  switch (act) {
+    case "sheet-close": pCloseSheet(); break;
+    case "search": {
+      P.searchOpen = !P.searchOpen;
+      P_ROOT.classList.toggle("p-search", P.searchOpen);
+      if (P.searchOpen) $("p-q").focus();
+      else if (P.q) { P.q = ""; $("p-q").value = ""; pLoad(); }
+      break;
+    }
+    case "closed-on": case "closed-off": P.showClosed = act === "closed-on"; pRenderInbox(); pLoad(); break;
+    case "toggle-read": { const t = pTask(id); if (t) { markSeen(t, isUnread(t)); pRender(); } break; }
+    case "quick-reply": pResetSwipe(); pQuickReply(id); break;
+    case "close": pResetSwipe(); pCloseSheet(); pCloseTask(id); break;
+    case "ack": pAck(id); break;
+    case "alert-reply": pAlertReply(id); break;
+    case "task-menu": pTaskMenu(); break;
+    case "toggle-internal": pCloseSheet(); P.showInternal = !P.showInternal; P.threadSig = ""; pLoad(); break;
+    case "mark-unread": pCloseSheet(); markSeen(pTask(id), false); pBack(); break;
+    case "copy-id":
+      pCloseSheet();
+      try { await navigator.clipboard.writeText(id); pToast("Copied " + id); } catch { pToast(id); }
+      break;
+    case "job-state": P.jobState = id || ""; pRenderJobs(); pLoad(); break;
+    case "desktop": setLayoutPref("desktop"); break;
+  }
+}
+
+/* ----- swipe on task rows ----- */
+let pSw = null, pSuppressClick = 0;
+function pSetX(it, x, animate) {
+  it.classList.toggle("dragging", !animate);
+  it.style.transform = x ? "translateX(" + x + "px)" : "";
+  it._x = x;
+  it.classList.toggle("open", x !== 0);
+}
+function pOpenRow() { return document.querySelector("#p-body .p-item.swipe.open"); }
+function pResetSwipe() {
+  const o = pOpenRow();
+  if (o) pSetX(o, 0, true);
+  P.busy = false;
+}
+function pSwipeInit(root) {
+  root.addEventListener("touchstart", (e) => {
+    pSuppressClick = 0; // a new gesture: only the click right after a drag is swallowed
+    const it = e.target.closest(".p-item.swipe");
+    const open = pOpenRow();
+    if (open && open !== it && !e.target.closest(".p-acts")) pResetSwipe();
+    if (!it || e.touches.length !== 1) { pSw = null; return; }
+    pSw = { it, x0: e.touches[0].clientX, y0: e.touches[0].clientY, base: it._x || 0, lock: null };
+  }, { passive: true });
+  root.addEventListener("touchmove", (e) => {
+    if (!pSw) return;
+    const dx = e.touches[0].clientX - pSw.x0, dy = e.touches[0].clientY - pSw.y0;
+    if (!pSw.lock) {
+      if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy) * 1.3) pSw.lock = "x";
+      else if (Math.abs(dy) > 10) pSw.lock = "y";
+    }
+    if (pSw.lock !== "x") return;
+    P.busy = true;
+    const w = +pSw.it.dataset.w || 168;
+    pSetX(pSw.it, Math.max(-w - 24, Math.min(110, pSw.base + dx)), false);
+  }, { passive: true });
+  const end = () => {
+    if (!pSw) return;
+    const { it, lock } = pSw;
+    pSw = null;
+    if (lock !== "x") return;
+    pSuppressClick = Date.now();
+    const x = it._x || 0, w = +it.dataset.w || 168;
+    if (x > 72) { pSetX(it, 0, true); pAct("toggle-read", it.closest(".p-row").dataset.id); }
+    else if (x < -48) pSetX(it, -w, true);
+    else pSetX(it, 0, true);
+    P.busy = !!pOpenRow();
+  };
+  root.addEventListener("touchend", end);
+  root.addEventListener("touchcancel", end);
+}
+
+/* ----- keyboard: keep the composer / sheet above the iOS keyboard ----- */
+function pViewport() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  const kb = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
+  P_ROOT.style.setProperty("--kb", kb + "px");
+  P_ROOT.classList.toggle("kb-open", kb > 60);
+}
+function pAutosize() {
+  const ta = $("p-input");
+  ta.style.height = "auto";
+  ta.style.height = Math.min(ta.scrollHeight + 2, window.innerHeight * 0.4) + "px";
+  P_ROOT.style.setProperty("--composer-h", $("p-composer").offsetHeight + "px");
+}
+
+function pInit() {
+  if (pInit.done) return;
+  pInit.done = true;
+  $("to-phone").onclick = () => setLayoutPref("");
+  if (window.matchMedia) matchMedia(PHONE_MQ).addEventListener("change", applyLayout);
+  if (!/^#\//.test(location.hash)) history.replaceState(null, "", "#/inbox");
+  window.addEventListener("popstate", () => { if (isPhone()) pRoute(); });
+  window.addEventListener("hashchange", () => { if (isPhone() && (P.r.name !== pParse().name || P.r.arg !== pParse().arg)) pRoute(); });
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && isPhone()) { P.threadSig = ""; pLoad(); } });
+  if (window.visualViewport) { visualViewport.addEventListener("resize", pViewport); visualViewport.addEventListener("scroll", pViewport); }
+
+  const phone = $("phone");
+  phone.addEventListener("click", (ev) => {
+    const act = ev.target.closest("[data-act]");
+    const open = pOpenRow();
+    if (open && !(act && open.parentNode.contains(act))) { ev.preventDefault(); pResetSwipe(); return; }
+    if (Date.now() - pSuppressClick < 400) return;
+    if (act) { ev.preventDefault(); pAct(act.dataset.act, act.dataset.id, act); return; }
+    const go = ev.target.closest("[data-go]");
+    if (go) {
+      ev.preventDefault();
+      const v = go.dataset.go, i = v.indexOf("/");
+      const name = i < 0 ? v : v.slice(0, i), arg = i < 0 ? null : v.slice(i + 1);
+      if (P_TAB[name] === name && !arg) pGo(name, null, true); else pGo(name, arg);
+    }
+  });
+  for (const b of document.querySelectorAll("#p-tabs button")) {
+    b.onclick = () => {
+      if (P.r.name === b.dataset.tab) { window.scrollTo({ top: 0, behavior: "smooth" }); pLoad(); return; }
+      pGo(b.dataset.tab, null, true);
+    };
+  }
+  $("p-back").onclick = pBack;
+  $("p-sheet-bg").onclick = pCloseSheet;
+  $("p-fab").onclick = () => (P.r.name === "jobs" ? pNewJob() : pNewTask());
+  pSwipeInit($("p-body"));
+
+  let qTimer = null;
+  $("p-q").oninput = () => {
+    clearTimeout(qTimer);
+    qTimer = setTimeout(() => { P.q = $("p-q").value.trim(); pLoad(); }, 250);
+  };
+  $("p-q").onkeydown = (ev) => { if (ev.key === "Enter") { ev.preventDefault(); $("p-q").blur(); } };
+
+  const ta = $("p-input");
+  ta.addEventListener("input", pAutosize);
+  ta.addEventListener("focus", () => { setTimeout(() => { pViewport(); pScrollBottom(); }, 350); });
+  $("p-composer").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const text = ta.value.trim();
+    if (!text || P.r.name !== "task") return;
+    const id = P.r.arg;
+    $("p-send").disabled = true;
+    try {
+      await sendText(text, id);
+      ta.value = "";
+      pAutosize();
+      P.threadSig = "";
+      await pLoad();
+      pScrollBottom();
+    } catch (e) { pToast("send failed: " + e.message, true); }
+    finally { $("p-send").disabled = false; }
+  };
+  pAutosize();
+  pViewport();
+  applyLayout();
+}
 </script>
 </body>
 </html>

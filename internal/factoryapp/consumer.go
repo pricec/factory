@@ -153,6 +153,12 @@ func (a *App) handleEnvelope(ctx context.Context, env wire.MessageEnvelope, seen
 const (
 	foremanReportType = "foreman.report"
 	brainFailedType   = "brain.failed"
+	// taskClosedByOperatorType is posted into planner:main, threaded on
+	// the task, when the operator closes a task (POST /v1/tasks/{id}/close,
+	// spec §9.5.2). It wakes the planner so it can cancel the task's
+	// running/held jobs; it never reopens the task. Planner closes
+	// (update_task) post nothing, so there is no wake loop.
+	taskClosedByOperatorType = "task.closed_by_operator"
 )
 
 // relayToPlanner copies one factory:main envelope (type, job id, sender,

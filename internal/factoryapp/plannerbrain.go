@@ -246,6 +246,8 @@ func promptTags(env wire.MessageEnvelope, trigger bool) string {
 const taskWakeFooter = `
 This session is bound to task %s: notify_operator and create_job default to it. Reply to the operator ONLY with notify_operator. ` +
 	`Retitle or reprioritise with update_task; close it with update_task(status=closed) once its jobs are terminal and the operator has been told. ` +
+	`When you are waiting on an operator decision, approval or answer, set update_task(needs_operator=true) (it puts the task in their "Needs you" list); ` +
+	`set it false when that is no longer true. It clears itself when the operator replies or closes the task, so set it again if you are still waiting. ` +
 	`Handle the [new] messages with your tools, then finish; do not repeat work.`
 
 // runOpencode is the opencode-runner Exec (the non-claude route, spec
