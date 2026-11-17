@@ -132,6 +132,12 @@ type App struct {
 	// for (spec §8.7). The startup orphan pass never fails these.
 	spawnedMu sync.Mutex
 	spawned   map[string]bool
+	// live is the subset of spawned whose harness goroutine has not yet
+	// returned (guarded by spawnedMu). A live job's credential is revoked
+	// when its harness exits, not when its job.result is forwarded: the
+	// harness posts job.usage after the agent child exits, which can be
+	// after report_result.
+	live map[string]bool
 	// procRoot is the process table the orphan probe reads (spec §8.7).
 	procRoot string
 
@@ -197,6 +203,7 @@ func New(cfg Config) (*App, error) {
 		childParent: map[string]string{},
 		childrenOf:  map[string]map[string]bool{},
 		spawned:     map[string]bool{},
+		live:        map[string]bool{},
 		procRoot:    cfg.ProcRoot,
 		build:       cfg.Build,
 		gate:        &intakeGate{},
@@ -527,8 +534,12 @@ func (a *App) handleBatch(ctx context.Context, envs []wire.MessageEnvelope, ack 
 		}
 		ids = append(ids, env.ID)
 		if env.Type == "job.result" && env.JobID != "" {
-			if err := a.auth.InvalidateJob(ctx, env.JobID); err != nil {
-				log.Printf("foremanapp: revoke worker credential for %s: %v", env.JobID, err)
+			// A job whose harness is still running keeps its credential
+			// until the harness exits (runWorker revokes then): the
+			// harness's post-exit job.usage needs it. Other jobs (remote,
+			// orphan, no local harness) are revoked right away.
+			if !a.workerLive(env.JobID) {
+				a.revokeJobCredential(ctx, env.JobID)
 			}
 		}
 	}

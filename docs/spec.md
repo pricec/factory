@@ -812,8 +812,17 @@ own inbox at the factory), `factory:main` (factory processing inbox),
 Called exactly once on terminal transition; registered by #11, wired by #9.
 Execution site (integration note, #21): worker tokens live in the FOREMAN's
 auth store, so revocation runs foreman-side - the foreman's local consumer
-loop calls InvalidateJob(job_id) when it routes a terminal job.result. The
-factory-side OnTerminal hook still fires for jobs-bookkeeping (over-budget
+loop calls InvalidateJob(job_id) when it routes a terminal job.result.
+Amendment (2026-11-17, usage-401): for a job whose harness runs in this
+foreman process, that revocation is deferred until the harness returns
+(runWorker revokes on exit; a job with no live local harness is still
+revoked at result routing). The harness posts job.usage with the per-job
+bearer AFTER the agent child exits, which is after report_result when the
+agent reported mid-run; revoking at result routing made that post 401 and
+silently lost the worker usage row. The credential is still revoked before
+any new work for the job can start, a revoked token still cannot post, and
+the inbox's per-(inbox, job) job.result dedupe (409 = idempotent success)
+means the extra live window cannot produce a second result. The factory-side OnTerminal hook still fires for jobs-bookkeeping (over-budget
 flagging).
 
 ### 7.5 TLS posture (#11)
