@@ -60,6 +60,18 @@
   .badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px;
     border: 1px solid var(--border); color: var(--dim); }
   .badge.hot { color: var(--warn); border-color: var(--warn); }
+  /* merge queue state badges (spec §6.11) */
+  .badge.mq-queued { color: var(--dim); }
+  .badge.mq-merging { color: var(--accent); border-color: var(--accent); }
+  .badge.mq-landed { color: var(--ok); border-color: var(--ok); }
+  .badge.mq-needs_attention { color: var(--bad); border-color: var(--bad); }
+  .badge.mq-cancelled { color: var(--dim); text-decoration: line-through; }
+  #mq-status .badge.mq-paused { color: var(--warn); border-color: var(--warn); }
+  #mq-status { margin: 0 2px 12px; font-size: 12px; color: var(--dim); }
+  #mq-status button, #list button.mq-cancel { background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 2px 10px; font: 12px var(--mono); cursor: pointer; }
+  #list a.mq-job { color: var(--accent); cursor: pointer; }
+  #list .sub { color: var(--dim); font-size: 11px; }
   #detail { margin-top: 16px; background: var(--panel); border: 1px solid var(--border);
     border-radius: 8px; padding: 16px; }
   #detail h2 { margin: 0 0 4px; font-size: 14px; font-family: var(--mono); }
@@ -446,6 +458,7 @@
     <button id="tab-chat" class="active">Tasks</button>
     <button id="tab-foremen">Foremen</button>
     <button id="tab-jobs">Jobs</button>
+    <button id="tab-merges">Merge queue</button>
     <button id="tab-inboxes">Inboxes</button>
     <button id="to-phone" style="display:none">phone layout</button>
   </nav>
@@ -535,6 +548,18 @@
         <button type="submit">create job</button>
         <span class="result-note" id="job-note"></span>
       </form>
+    </div>
+    <div id="mergepanel" style="display:none">
+      <form class="panel" id="mq-form">
+        <div class="row">
+          <div><label>branch</label><input id="mq-branch" placeholder="feat/my-change" autocomplete="off"></div>
+          <div><label>head (commit sha the branch must point at)</label><input id="mq-head" placeholder="0123abc…" autocomplete="off"></div>
+        </div>
+        <label>note (PR title)</label><input id="mq-note" placeholder="what this merge does">
+        <button type="submit">queue merge</button>
+        <span class="result-note" id="mq-note-out"></span>
+      </form>
+      <div id="mq-status"></div>
     </div>
     <div class="toolbar">
       <span class="count" id="rowcount"></span>
@@ -1576,24 +1601,79 @@ async function loadUsage() {
   if (!usageError) { await Promise.all([loadHeld(), loadGateAlerts()]); renderUsage(); }
 }
 
+/* ---------- merge queue (spec §6.11) ---------- */
+
+// mqAge is the age of a request: "5m" since created_at.
+function mqAge(ts) { return ts ? fmtAge(Math.max(0, Math.floor((Date.now() - Date.parse(ts)) / 1000))) : "-"; }
+async function loadMerges() {
+  let q;
+  try { q = await getJSON("/v1/merge-requests"); }
+  catch (e) { $("list").innerHTML = '<div class="err">' + esc(e.message) + "</div>"; return; }
+  const reqs = q.requests || [];
+  const merging = reqs.find(m => m.state === "merging");
+  const queued = reqs.filter(m => m.state === "queued").length;
+  $("mq-status").innerHTML =
+    (q.paused ? '<span class="badge mq-paused">PAUSED</span> new merges are held; an in-flight merge still finishes · ' : "running · ") +
+    queued + " queued" + (merging ? " · merging " + esc(merging.branch) + " as " +
+      '<a class="mq-job" data-job="' + esc(merging.job_id) + '">' + esc(merging.job_id) + "</a>" : "") + " " +
+    (q.paused ? '<button id="mq-resume">resume</button>' : '<button id="mq-pause">pause</button>');
+  $("rowcount").textContent = reqs.length + " merge request" + (reqs.length === 1 ? "" : "s");
+  const rows = reqs.map(m =>
+    '<tr data-mr="' + esc(m.id) + '">' +
+    '<td><span class="badge mq-' + esc(m.state) + '">' + esc(m.state) + "</span></td>" +
+    "<td>" + esc(m.branch) + "</td><td>" + esc((m.head || "").slice(0, 12)) + "</td>" +
+    "<td>" + esc(mqAge(m.created_at)) + "</td>" +
+    "<td>" + (m.job_id ? '<a class="mq-job" data-job="' + esc(m.job_id) + '">' + esc(m.job_id) + "</a>" : "-") + "</td>" +
+    "<td>" + esc(m.note || "") + (m.result ? '<div class="sub">' + esc(m.result) + "</div>" : "") + "</td>" +
+    "<td>" + (m.state === "queued" || m.state === "merging"
+      ? '<button class="mq-cancel" data-id="' + esc(m.id) + '">cancel</button>' : "") + "</td></tr>");
+  $("list").innerHTML = table(["state", "branch", "head", "age", "job", "note / result", ""], rows);
+  for (const a of document.querySelectorAll("a.mq-job")) a.onclick = () => openJob(a.dataset.job);
+  for (const b of $("list").querySelectorAll("button.mq-cancel")) b.onclick = () => mqCancel(b.dataset.id);
+  if ($("mq-pause")) $("mq-pause").onclick = () => mqSetPaused(true);
+  if ($("mq-resume")) $("mq-resume").onclick = () => mqSetPaused(false);
+}
+async function mqSetPaused(paused) {
+  try { await postJSON("/v1/merge-requests/" + (paused ? "pause" : "resume"), {}); }
+  catch (e) { $("mq-note-out").textContent = "pause/resume failed: " + e.message; }
+  await loadMerges();
+}
+async function mqCancel(id) {
+  if (!window.confirm("Cancel merge request " + id + "?\n\nA merging request also cancels its merge job.")) return;
+  try { await postJSON("/v1/merge-requests/" + encodeURIComponent(id) + "/cancel", {}); $("mq-note-out").textContent = "cancelled " + id; }
+  catch (e) { $("mq-note-out").textContent = "cancel failed: " + e.message; }
+  await loadMerges();
+}
+$("mq-form").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const body = { branch: $("mq-branch").value.trim(), head: $("mq-head").value.trim(), note: $("mq-note").value.trim() };
+  try {
+    const mr = await postJSON("/v1/merge-requests", body);
+    $("mq-note-out").textContent = "queued " + mr.id;
+    $("mq-branch").value = $("mq-head").value = $("mq-note").value = "";
+  } catch (e) { $("mq-note-out").textContent = "queue failed: " + e.message; }
+  await loadMerges();
+};
+
 /* ---------- tabs & tick ---------- */
 
-const loaders = { chat: loadChat, foremen: loadForemen, jobs: loadJobs, inboxes: loadInboxes };
+const loaders = { chat: loadChat, foremen: loadForemen, jobs: loadJobs, merges: loadMerges, inboxes: loadInboxes };
 function setTab(t) {
   tab = t;
-  for (const id of ["chat", "foremen", "jobs", "inboxes"]) {
+  for (const id of ["chat", "foremen", "jobs", "merges", "inboxes"]) {
     $("tab-" + id).classList.toggle("active", id === t);
   }
   $("chatview").style.display = t === "chat" ? "block" : "none";
   document.querySelector("main").classList.toggle("wide", t === "chat");
   $("tableview").style.display = t === "chat" ? "none" : "block";
   $("createpanel").style.display = t === "jobs" ? "block" : "none";
+  $("mergepanel").style.display = t === "merges" ? "block" : "none";
   $("state-filter").style.display = t === "jobs" ? "inline" : "none";
   selectedForeman = selectedInbox = selectedJob = null;
   $("detail").style.display = "none";
   loaders[t]();
 }
-for (const id of ["chat", "foremen", "jobs", "inboxes"]) {
+for (const id of ["chat", "foremen", "jobs", "merges", "inboxes"]) {
   $("tab-" + id).onclick = () => setTab(id);
 }
 $("state-filter").onchange = () => loadJobs();
