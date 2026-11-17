@@ -459,6 +459,23 @@
   #p-usage .upause { margin: 0 0 12px; padding: 10px 12px; border: 2px solid var(--bad); border-radius: 8px;
     background: rgba(248,81,73,.16); font: bold 14px var(--mono); }
   #p-usage .upause .upreason { display: block; margin-top: 4px; font-size: 12px; font-weight: normal; color: var(--dim); }
+
+  /* copy/paste: text is selectable everywhere; only controls are not. Only
+     short ids may use user-select:all (one click selects the id). */
+  .bubble, .bubble .md, #detail, pre, .msg, .p-card { -webkit-user-select: text; user-select: text; }
+  .sid { -webkit-user-select: all; user-select: all; }
+  .copybtn { -webkit-user-select: none; user-select: none; cursor: pointer; }
+  pre.has-copy { position: relative; }
+  pre.has-copy > .copybtn { position: absolute; top: 4px; right: 4px; opacity: .55;
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; font: 11px var(--mono); padding: 2px 8px; }
+  pre.has-copy:hover > .copybtn, pre.has-copy > .copybtn:focus, pre.has-copy > .copybtn.copied { opacity: 1; }
+  .bubble { position: relative; }
+  .bubble > .copybtn.msgcopy { position: absolute; top: 4px; right: 6px; opacity: 0;
+    background: transparent; color: var(--dim); border: 1px solid transparent;
+    border-radius: 4px; font: 10.5px var(--mono); padding: 1px 6px; }
+  .bubble:hover > .copybtn.msgcopy, .bubble > .copybtn.msgcopy:focus, .bubble > .copybtn.msgcopy.copied { opacity: 1; border-color: var(--border); }
+  @media (pointer: coarse) { .bubble > .copybtn.msgcopy { opacity: .7; } pre.has-copy > .copybtn { opacity: 1; } }
 </style>
 </head>
 <body>
@@ -627,6 +644,105 @@ let tab = "chat";
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
+/* ----- copy/paste support -----
+ * selectionIn(el): true while the user has a non-collapsed selection that
+ * touches el. setHTML(el, html) is the guarded innerHTML for anything the
+ * poll/SSE refresh rewrites: it skips identical markup (no DOM churn) and
+ * defers the rewrite while a selection is inside el, because replacing the
+ * nodes would destroy/collapse the selection (the "selects the whole chat"
+ * bug). Deferred renders re-run via refreshSoon() once the selection clears. */
+function selectionIn(el) {
+  const sel = window.getSelection && window.getSelection();
+  if (!sel || sel.isCollapsed || !sel.rangeCount) return false;
+  return el.contains(sel.anchorNode) || el.contains(sel.focusNode) || sel.getRangeAt(0).intersectsNode(el);
+}
+let htmlDeferred = false;
+function setHTML(el, html) {
+  if (el._html === html && el._first === el.firstChild && el.firstChild) return true;
+  if (selectionIn(el)) { htmlDeferred = true; return false; }
+  el._html = html;
+  el.innerHTML = html;
+  el._first = el.firstChild;
+  return true;
+}
+document.addEventListener("selectionchange", () => {
+  if (!htmlDeferred) return;
+  const sel = window.getSelection();
+  if (sel && !sel.isCollapsed) return;
+  htmlDeferred = false;
+  refreshSoon();
+});
+function refreshSoon() {
+  setTimeout(() => { if (isPhone()) { P.threadSig = ""; pLoad(); } else if (tab === "chat") loadChat(); else loaders[tab](); }, 50);
+}
+
+// copyText copies raw text. navigator.clipboard only exists in secure
+// contexts (https/localhost); over plain http on a LAN IP fall back to a
+// hidden textarea + execCommand("copy").
+function copyText(text) {
+  const legacy = () => {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.cssText = "position:fixed;top:0;left:0;opacity:0;pointer-events:none";
+    document.body.appendChild(ta);
+    const sel = window.getSelection(), saved = sel && sel.rangeCount ? sel.getRangeAt(0) : null;
+    ta.select(); ta.setSelectionRange(0, text.length);
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+    document.body.removeChild(ta);
+    if (saved && sel) { sel.removeAllRanges(); sel.addRange(saved); }
+    return ok;
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext !== false) {
+    return navigator.clipboard.writeText(text).then(() => true, () => legacy());
+  }
+  return Promise.resolve(legacy());
+}
+function rawText(btn) {
+  const host = btn.parentElement;
+  if (host.dataset && host.dataset.raw != null && btn.classList.contains("msgcopy")) return host.dataset.raw;
+  const c = host.cloneNode(true);
+  for (const b of c.querySelectorAll(".copybtn")) b.remove();
+  const code = c.querySelector("code");
+  return (code && c.tagName === "PRE" ? code : c).textContent;
+}
+function addCopyButtons(root) {
+  for (const pre of root.querySelectorAll("pre:not(.has-copy)")) {
+    pre.classList.add("has-copy");
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "copybtn"; b.textContent = "Copy"; b.title = "Copy to clipboard";
+    b.setAttribute("contenteditable", "false");
+    pre.insertBefore(b, pre.firstChild);
+  }
+  for (const bub of root.querySelectorAll(".bubble[data-raw]")) {
+    if (bub.querySelector(":scope > .msgcopy")) continue;
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "copybtn msgcopy"; b.textContent = "Copy"; b.title = "Copy whole message";
+    bub.insertBefore(b, bub.firstChild);
+  }
+}
+document.addEventListener("click", (ev) => {
+  const b = ev.target.closest && ev.target.closest(".copybtn");
+  if (!b) return;
+  ev.preventDefault(); ev.stopPropagation();
+  copyText(rawText(b)).then((ok) => {
+    clearTimeout(b._t);
+    b.classList.add("copied");
+    b.textContent = ok ? "Copied" : "Copy failed";
+    b._t = setTimeout(() => { b.classList.remove("copied"); b.textContent = "Copy"; }, 1500);
+  });
+}, true);
+// Dynamic content (SSE/poll re-renders, detail panes, phone views): enhance
+// after any DOM change, debounced to one pass per frame.
+(function () {
+  let queued = false;
+  const run = () => { queued = false; addCopyButtons(document); };
+  const kick = () => { if (!queued) { queued = true; requestAnimationFrame(run); } };
+  new MutationObserver(kick).observe(document.documentElement, { childList: true, subtree: true });
+  document.addEventListener("DOMContentLoaded", kick);
+})();
+
 // relIn formats a future timestamp: "in 59m" ("now" once passed).
 function relIn(ts) {
   if (!ts) return "-";
@@ -772,6 +888,10 @@ function isInternalEnv(env) {
 }
 
 function bubble(env) {
+  const h = bubbleHTML(env), raw = chatPayloadText(env);
+  return raw ? h.replace('<div class="bubble', () => '<div data-raw="' + esc(raw) + '" class="bubble') : h;
+}
+function bubbleHTML(env) {
   const text = chatPayloadText(env);
   const md = (t) => '<div class="md">' + (t ? renderMarkdown(t) : "") + "</div>";
   if (env.from === "human:operator" || env.type === "chat.message") {
@@ -979,6 +1099,7 @@ function renderTasks() {
 
 async function selectTask(id) {
   st.selected = id; st.thread = null;
+  if (window.getSelection) window.getSelection().removeAllRanges(); // switching threads: never block on an old selection
   renderTasks();
   await loadThread();
 }
@@ -1022,9 +1143,9 @@ function renderThread() {
   const el = log;
   const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
   const shown = st.showInternal ? msgs : msgs.filter(m => !isInternalEnv(m));
-  log.innerHTML = shown.length ? shown.map(m => (isInternalEnv(m) ? '<div class="internal">' : "") + bubble(m) + (isInternalEnv(m) ? "</div>" : "")).join("")
-    : '<div class="empty">no messages in this task yet</div>';
-  if (atBottom) log.scrollTop = log.scrollHeight;
+  const rendered = setHTML(log, shown.length ? shown.map(m => (isInternalEnv(m) ? '<div class="internal">' : "") + bubble(m) + (isInternalEnv(m) ? "</div>" : "")).join("")
+    : '<div class="empty">no messages in this task yet</div>');
+  if (rendered && atBottom) log.scrollTop = log.scrollHeight;
   const last = shown[shown.length - 1];
   $("typing").style.display = last && last.from === "human:operator" && t.status === "open" ? "block" : "none";
   $("chat-input").placeholder = t.status === "closed" ? "reply to reopen this task…" : "reply in this task…";
@@ -1108,8 +1229,8 @@ async function loadLegacy() {
   const el = $("chatlog");
   const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
   $("threadhead").style.display = "none";
-  el.innerHTML = envs.length ? envs.map(bubble).join("") : '<div class="empty">no messages yet — say something to the factory</div>';
-  if (atBottom) el.scrollTop = el.scrollHeight;
+  const rendered = setHTML(el, envs.length ? envs.map(bubble).join("") : '<div class="empty">no messages yet — say something to the factory</div>');
+  if (rendered && atBottom) el.scrollTop = el.scrollHeight;
   const last = envs[envs.length - 1];
   $("typing").style.display = last && last.from === "human:operator" ? "block" : "none";
 }
@@ -1261,7 +1382,7 @@ async function loadForemen() {
       "<td>" + esc(caps.build || "-") + "</td>" +
       "<td>" + (n ? '<span class="badge">' + n + " cap" + (n === 1 ? "" : "s") + "</span>" : "-") + "</td></tr>";
   });
-  $("list").innerHTML = table(["foreman", "status", "last seen", "build", "capabilities"], rows);
+  setHTML($("list"), table(["foreman", "status", "last seen", "build", "capabilities"], rows));
   for (const tr of $("list").querySelectorAll("tr[data-id]")) {
     tr.onclick = () => { selectedForeman = tr.dataset.id; selectedInbox = null; renderForemanDetail(selectedForeman); };
   }
@@ -1312,7 +1433,7 @@ async function loadJobs() {
     "<td>" + esc(j.foreman_id || "-") + "</td>" +
     "<td>" + (j.over_budget ? '<span class="badge hot">over budget</span>' : "-") + "</td>" +
     "<td>" + esc(rel(j.created_at)) + "</td></tr>");
-  $("list").innerHTML = table(["job", "state", "foreman", "budget", "created"], rows);
+  setHTML($("list"), table(["job", "state", "foreman", "budget", "created"], rows));
   for (const tr of $("list").querySelectorAll("tr[data-id]")) {
     tr.onclick = () => { selectedJob = tr.dataset.id; renderJobDetail(selectedJob); };
   }
@@ -1353,7 +1474,7 @@ async function loadInboxes() {
     "<td>" + esc(s.inbox_id) + "</td>" +
     "<td>" + (s.unacked > 0 ? '<span class="badge hot">' + s.unacked + " unacked</span>" : "0") + "</td>" +
     "<td>" + s.total + "</td><td>" + esc(rel(s.last_ts)) + "</td></tr>");
-  $("list").innerHTML = table(["inbox", "backlog", "total messages", "last activity"], rows);
+  setHTML($("list"), table(["inbox", "backlog", "total messages", "last activity"], rows));
   for (const tr of $("list").querySelectorAll("tr[data-id]")) {
     tr.onclick = () => { selectedInbox = tr.dataset.id; renderInboxDetail(selectedInbox); };
   }
@@ -1649,7 +1770,7 @@ async function loadMerges() {
     "<td>" + esc(m.note || "") + (m.result ? '<div class="sub">' + esc(m.result) + "</div>" : "") + "</td>" +
     "<td>" + (m.state === "queued" || m.state === "merging"
       ? '<button class="mq-cancel" data-id="' + esc(m.id) + '">cancel</button>' : "") + "</td></tr>");
-  $("list").innerHTML = table(["state", "branch", "head", "age", "job", "note / result", ""], rows);
+  setHTML($("list"), table(["state", "branch", "head", "age", "job", "note / result", ""], rows));
   for (const a of document.querySelectorAll("a.mq-job")) a.onclick = () => openJob(a.dataset.job);
   for (const b of $("list").querySelectorAll("button.mq-cancel")) b.onclick = () => mqCancel(b.dataset.id);
   if ($("mq-pause")) $("mq-pause").onclick = () => mqSetPaused(true);
@@ -2033,10 +2154,11 @@ function pRenderThread() {
   if (sig === P.threadSig) return; // nothing new: keep the scroll position and avoid flicker
   const first = !P.threadSig;
   const atBottom = first || window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 120;
+  if (selectionIn($("p-body"))) { htmlDeferred = true; return; } // keep the user's selection; re-render once it clears
   P.threadSig = sig;
   $("p-body").innerHTML = pErr() +
     '<div class="p-thead">' + prioBadge(t.priority) + ' <span class="st ' + (t.status === "open" ? "running" : "") + '">' + esc(t.status) + "</span>" +
-    "<span>" + esc(t.id) + "</span>" + (P.showInternal ? '<span class="badge">showing internal</span>' : "") + "</div>" +
+    "<span class=\"sid\">" + esc(t.id) + "</span>" + (P.showInternal ? '<span class="badge">showing internal</span>' : "") + "</div>" +
     '<div class="p-log">' + (shown.length ? shown.map(m => (isInternalEnv(m) ? '<div class="internal">' + bubble(m) + "</div>" : bubble(m))).join("")
       : '<div class="p-empty">no messages in this task yet</div>') +
     (typing ? '<div class="typing">the planner is thinking…</div>' : "") + "</div>";
