@@ -124,21 +124,6 @@ fresh evidence directory, for example
    `/proc/$PID/exe` sha, and the check results. A merge job puts these in
    its `report_result`.
 
-## Factory-repo work and cancelling jobs
-
-- Work on the factory repo (`pricec/factory`, `/home/price/work/factory*`)
-  runs on `foreman:server` only. Planner `create_job` calls must pin
-  `foreman: "foreman:server"`; an unpinned job that mentions the repo or its
-  worktree paths is rejected with `factory_repo_needs_pin`. Do not pin it to
-  another foreman (a warning is returned). 2026-11-17: an unpinned job went
-  to `foreman:chatfrontend`, and its re-file went to `foreman:agentcloud`.
-- Cancelling or superseding a `dispatched`/`running` job posts a `job.cancel`
-  to its foreman, which SIGTERMs the worker's process group and SIGKILLs it
-  after 10s; no result is posted. Check `journalctl` for
-  `job.cancel <id>: stopping worker`. An offline foreman gets the cancel on
-  reconnect (durable inbox). If a worker still lingers, `kill -TERM -<pgid>`
-  by hand is the fallback.
-
 ## Credentials
 
 Secrets are named values with an env-var mapping, managed in the operator UI
@@ -162,3 +147,18 @@ envelopes, and output echoing it is replaced by `[REDACTED]`.
   `secret_grants` table in `jobs.db` has timestamps.
 - **Deleting** a secret a queued job still names fails that job at start
   with `could not fetch secrets [name]`; recreate the secret and requeue.
+
+## Factory-repo work and cancelling jobs
+
+- Work on the factory repo (`pricec/factory`, `/home/price/work/factory*`)
+  runs on `foreman:server` only. Planner `create_job` calls must pin
+  `foreman: "foreman:server"`; an unpinned job that mentions the repo or its
+  worktree paths is rejected with `factory_repo_needs_pin`. Do not pin it to
+  another foreman (a warning is returned). 2026-11-17: an unpinned job went
+  to `foreman:chatfrontend`, and its re-file went to `foreman:agentcloud`.
+- Cancelling or superseding a `dispatched`/`running` job posts a `job.cancel`
+  to its foreman, which SIGTERMs the worker's process group and SIGKILLs it
+  after 10s; no result is posted. Check `journalctl` for
+  `job.cancel <id>: stopping worker`. An offline foreman gets the cancel on
+  reconnect (durable inbox). If a worker still lingers, `kill -TERM -<pgid>`
+  by hand is the fallback.
