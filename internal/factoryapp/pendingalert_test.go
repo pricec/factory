@@ -16,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pricec/factory/internal/budgets"
 	"github.com/pricec/factory/internal/factoryapp"
 	"github.com/pricec/factory/internal/jobs"
 	"github.com/pricec/factory/internal/tasks"
@@ -32,7 +31,6 @@ func newQuietEnv(t *testing.T) *testEnv {
 		DataDir:      t.TempDir(),
 		Addr:         "127.0.0.1:0",
 		AdvertiseURL: testAdvertiseURL,
-		Budget:       budgets.DefaultConfig(),
 		Now:          clock.Now,
 	}
 	a, err := factoryapp.New(cfg)

@@ -1,7 +1,6 @@
 package budgets
 
 import (
-	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -13,12 +12,6 @@ func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg.PlannerModel != "" || cfg.ForemanBrainModel != "" || cfg.WorkerModel != "" {
 		t.Errorf("default models must be empty (opencode defaults): %+v", cfg)
-	}
-	if cfg.DailySpendCapUSD != 20 {
-		t.Errorf("default cap = %v, want 20", cfg.DailySpendCapUSD)
-	}
-	if cfg.SpendOverride {
-		t.Error("default config must not disable the breaker")
 	}
 }
 
@@ -33,16 +26,8 @@ func TestLoadConfig(t *testing.T) {
 	if cfg.PlannerModel != "model-p" || cfg.ForemanBrainModel != "model-fb" || cfg.WorkerModel != "model-w" {
 		t.Errorf("model overrides not applied: %+v", cfg)
 	}
-	if cfg.DailySpendCapUSD != 50.5 {
-		t.Errorf("cap override = %v, want 50.5", cfg.DailySpendCapUSD)
-	}
-	if !cfg.SpendOverride {
-		t.Error(`FACTORY_SPEND_OVERRIDE="1" must disable the breaker`)
-	}
-	// A breaker built from the loaded config honors the override.
-	if err := NewBreaker(cfg.DailySpendCapUSD, cfg.SpendOverride).Allow(1e9); err != nil {
-		t.Errorf("override breaker refused: %v", err)
-	}
+	// Deprecated spend env vars are tolerated (ignored) at startup.
+	WarnDeprecatedEnv()
 }
 
 func TestLoadConfigEmptyEnvKeepsDefaults(t *testing.T) {
@@ -94,44 +79,6 @@ func TestPromptFitsBudget(t *testing.T) {
 			if got != c.want {
 				t.Errorf("PromptFitsBudget(task %dB, payload %dB, cap %d) = %v, want %v",
 					c.taskLen, c.payloadLen, c.maxPromptByte, got, c.want)
-			}
-		})
-	}
-}
-
-func TestBreaker(t *testing.T) {
-	cases := []struct {
-		name        string
-		cap         float64
-		spend       float64
-		override    bool
-		wantRefusal bool
-	}{
-		{"below cap allowed", 20, 19.99, false, false},
-		{"exactly at cap allowed", 20, 20, false, false},
-		{"above cap refused", 20, 20.01, false, true},
-		{"override allows above cap", 20, 100, true, false},
-		{"zero cap refuses any spend", 0, 0.01, false, true},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			err := NewBreaker(c.cap, c.override).Allow(c.spend)
-			if !c.wantRefusal {
-				if err != nil {
-					t.Fatalf("Allow(%v) = %v, want nil", c.spend, err)
-				}
-				return
-			}
-			var sce *SpendCapError
-			if !errors.As(err, &sce) {
-				t.Fatalf("Allow(%v) = %v, want *SpendCapError", c.spend, err)
-			}
-			if sce.Code() != "spend_cap_exceeded" {
-				t.Errorf("Code() = %q, want spend_cap_exceeded", sce.Code())
-			}
-			if sce.Cap != c.cap || sce.Spend != c.spend {
-				t.Errorf("error fields = cap %v spend %v, want cap %v spend %v",
-					sce.Cap, sce.Spend, c.cap, c.spend)
 			}
 		})
 	}

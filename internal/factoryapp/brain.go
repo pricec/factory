@@ -17,7 +17,7 @@ import (
 
 // createJobRequest is the POST /v1/jobs body (spec §6.9): the same field set
 // as the MCP create_job tool (§9.4) so the UI drives the identical path -
-// spend breaker, capability match, create, dispatch, optional schedule.
+// capability match, create, dispatch, optional schedule.
 type createJobRequest struct {
 	Task     string   `json:"task"`
 	Requires []string `json:"requires,omitempty"`
@@ -56,17 +56,6 @@ func (a *App) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "internal", err.Error())
 			return
 		}
-	}
-
-	// Breaker first (spec §6.5), same as the MCP tool.
-	if err := a.jobs.RefuseIfSpendCap(r.Context(), a.budget.DailySpendCapUSD, a.budget.SpendOverride); err != nil {
-		var cap *jobs.CapError
-		if errors.As(err, &cap) {
-			writeError(w, http.StatusPaymentRequired, "spend_cap_exceeded", cap.Error())
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
 	}
 
 	spec := wire.NewJobSpec(in.Task, "ui")

@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/pricec/factory/internal/auth"
-	"github.com/pricec/factory/internal/budgets"
 	"github.com/pricec/factory/internal/factoryapp"
 	"github.com/pricec/factory/internal/foremanapp"
 	"github.com/pricec/factory/internal/jobs"
@@ -53,7 +52,6 @@ func newFactory(t *testing.T) *factoryEnv {
 		DataDir:      t.TempDir(),
 		Addr:         "127.0.0.1:0",
 		AdvertiseURL: "http://factory.test",
-		Budget:       budgets.DefaultConfig(),
 		Now:          clock.Now,
 	})
 	if err != nil {

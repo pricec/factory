@@ -431,7 +431,7 @@ payload and `GET /v1/jobs/{id}`.
   goes straight to `dead`, whatever its `error.kind` - a re-run could merge
   or deploy twice.
 
-### 6.5 Budget enforcement & spend breaker (#13)
+### 6.5 Budget enforcement (#13)
 
 True token spend is not enforceable mid-run; v1 uses proxies + post-hoc
 accounting (#13). Enforcement proxies, in order (#13):
@@ -445,10 +445,16 @@ accounting (#13). Enforcement proxies, in order (#13):
 4. Post-hoc: usage from `report_result` recorded on the job; if
    `usage.cost_usd > max_cost_usd`, set the `over_budget` flag.
 
-Circuit breaker (#13): daily spend = sum of `usage.cost_usd` over jobs
-created today; above the config cap (default $20/day) the factory refuses new
-`create_job` with error `spend_cap_exceeded`; reset by config bump or env
-`FACTORY_SPEND_OVERRIDE=1`.
+No dollar breaker (2026-11-17 amendment): the former daily spend circuit
+breaker (`spend_cap_exceeded`, `FACTORY_DAILY_SPEND_CAP`,
+`FACTORY_SPEND_OVERRIDE`) is removed. The Claude-usage throttle gate
+(`internal/throttle` + `internal/usagewin`: ORANGE >85%, RED >=95% or burn
+>1.6x, PAUSED) is the only spending limit on the factory; `create_job` and
+`POST /v1/jobs` never refuse on dollars. `GET /v1/spend` and the UI spend
+display remain as reporting only (daily sum of `usage.cost_usd` over jobs
+created that day). The per-job `budget.max_cost_usd` harness kill and
+`over_budget` flag are unchanged. The two env vars are deprecated: if set
+they are ignored and a one-line deprecation warning is logged at startup.
 
 Model tiering (#13, #28, #29, #30, #31, #32): the factory standardizes on GLM via
 OpenRouter (one provider, one credential) and optimizes for cost -
@@ -626,7 +632,7 @@ factory planner's list view carries summaries only (#7, #19).
 | Method & path | Notes |
 |---|---|
 | `GET /v1/jobs?state=&foreman=` | filter by state and foreman (#9) |
-| `POST /v1/jobs` | UI twin of the MCP `create_job` tool (§9.4): body `{task, requires[], secrets[]?, result_schema, tier, timeout_s, priority, schedule_cron, foreman?, task_id?}`; runs the same spend breaker + capability match (no match -> `pending`); `201 + {job_id, state, foreman}`. `requires` entries are tag names, validated at creation against the union of registered foremen tag keys (§6.7, 2026-11-15 amendment): unknown tag names -> `400 unknown_requires`; a loud `warnings` array rides the 201 when nothing could be validated (no foremen registered). `foreman` (2026-11-16 foreman-pin amendment, §6.7) pins the job to that foreman (bare or `foreman:{id}` form): the pin wins over the Matcher, requires validation is skipped (requires stay informational), an unknown foreman is `404 unknown_foreman` (the `POST /v1/foremen/{id}/messages` contract), and an offline pin leaves the job `pending` with a `warnings` entry until it returns |
+| `POST /v1/jobs` | UI twin of the MCP `create_job` tool (§9.4): body `{task, requires[], secrets[]?, result_schema, tier, timeout_s, priority, schedule_cron, foreman?, task_id?}`; runs the same capability match (no match -> `pending`); `201 + {job_id, state, foreman}`. `requires` entries are tag names, validated at creation against the union of registered foremen tag keys (§6.7, 2026-11-15 amendment): unknown tag names -> `400 unknown_requires`; a loud `warnings` array rides the 201 when nothing could be validated (no foremen registered). `foreman` (2026-11-16 foreman-pin amendment, §6.7) pins the job to that foreman (bare or `foreman:{id}` form): the pin wins over the Matcher, requires validation is skipped (requires stay informational), an unknown foreman is `404 unknown_foreman` (the `POST /v1/foremen/{id}/messages` contract), and an offline pin leaves the job `pending` with a `warnings` entry until it returns |
 | `POST /v1/foremen/{id}/messages` | UI twin of the MCP `message_foreman` tool (§9.4): body `{type, payload, job_id?}` posted from the planner identity; `201` + envelope. `{id}` accepts the bare foreman id or the full `foreman:{id}` form - both normalize to the same inbox (§7.3), never a double-prefixed one. `payload` is required (any JSON value; `{}` for an empty body); a null/missing payload is `400`. An id matching no registered foreman is `404 unknown_foreman` - posting never opens an inbox no foreman consumes (2026-11-14 amendment) |
 | `GET /v1/jobs/{id}/secrets` | Job secrets handout (2026-11-17 amendment, §13.2) - the ONLY surface that returns secret values: `200 {"secrets":[{"name","env_var","value"}]}`. Auth: the bearer must be a paired foreman credential (`401` missing/unknown, `403` planner/worker/other), the job row's `foreman_id` must equal that foreman (`403` otherwise - an unknown job is indistinguishable), the job must be `dispatched` or `running` (`409 job_not_live`), and only names in the spec's `secrets` are returned. A name since deleted from the store -> `404 unknown_secrets` (names only). Each successful handout writes `secret_grants` rows first (§13.2); a failed audit write hands out nothing (`500`). `Cache-Control: no-store` |
 | `GET /v1/jobs/{id}` | (#9) the job record; plus `granted_secrets` (names only, §13.2; omitted when none); plus `task_id` when the job is directly linked to a task (§9.5.2; 2026-11-16 deploy-18 follow-up - omitted when unlinked, a read never writes lineage links) |
@@ -1443,8 +1449,7 @@ Tools (exact):
   hardest ->
   GLM 5.3) - bias towards the cheapest tier that can do the job (#29);
   with `schedule_cron`, also creates a schedule via
-  the #8 API (§6.8). Refused with error `spend_cap_exceeded` when the
-  daily spend breaker is open (#13). Optional `task_id` (inbox redesign
+  the #8 API (§6.8). Never refused on dollar spend (the usage gate is the only limit, §6.5). Optional `task_id` (inbox redesign
   S2, §9.5.2) files the job under a task (`task_jobs`), defaulting to the
   session's woken task; the link is written before dispatch, the result
   carries `task_id`, and an unknown task is a tool error with no job
@@ -2007,7 +2012,7 @@ Pinned status codes:
 | `404` | cancel of an unknown job id (`POST /v1/jobs/{id}/cancel`) | 2026-11-15 amendment |
 | `404` | unknown task id (`POST /v1/chat` / `POST /v1/jobs` with `task_id`, `GET /v1/tasks/{id}`; code `unknown_task`) | 2026-11-16 inbox redesign S2 |
 
-Pinned error codes: `spend_cap_exceeded` (#13), `unknown_foreman`,
+Pinned error codes: `unknown_foreman`,
 `unknown_requires`. Validation rejects anything
 outside the `result_schema` subset at validation time (#3).
 
@@ -2027,7 +2032,7 @@ outside the `result_schema` subset at validation time (#3).
 | Summary length | required, 1-240 chars | #3, #7 |
 | Fallback summary | first 240 chars of stdout | #5 |
 | LLM context cap | 2KB per payload (except `read_result`) | #7 |
-| Daily spend breaker | $20/day default; `FACTORY_SPEND_OVERRIDE=1` bypass | #13 |
+| Daily spend breaker | removed 2026-11-17; usage throttle gate is the only limit; env vars deprecated/ignored | #13 |
 | Pairing token | 32B random hex, 15-min TTL, single use | #11 |
 | Bearer token | 32B random, stored SHA-256 only | #11 |
 | Long-poll window | `wait_seconds` 0-60 | #1 |

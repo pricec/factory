@@ -3,7 +3,6 @@ package jobs
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -141,44 +140,5 @@ func TestSpendHandler(t *testing.T) {
 	rec := get("/v1/spend?day=2026-13-99")
 	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "bad_request") {
 		t.Errorf("malformed day: %d %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestRefuseIfSpendCap(t *testing.T) {
-	s, now := spendSetup(t)
-	ctx := context.Background()
-	base := *now
-
-	// Yesterday's expensive job must not count toward today's breaker.
-	*now = base.AddDate(0, 0, -1)
-	spendJob(t, s, 50)
-	*now = base
-
-	// Today: 5 against a 20 cap is allowed even though yesterday hit 50.
-	spendJob(t, s, 5)
-	if err := s.RefuseIfSpendCap(ctx, 20, false); err != nil {
-		t.Fatalf("below cap refused: %v", err)
-	}
-
-	// A second job today pushes spend to 25: refused.
-	spendJob(t, s, 20)
-	err := s.RefuseIfSpendCap(ctx, 20, false)
-	var capErr *CapError
-	if !errors.As(err, &capErr) {
-		t.Fatalf("want *CapError, got %v", err)
-	}
-	if capErr.Code() != "spend_cap_exceeded" {
-		t.Errorf("Code() = %q, want spend_cap_exceeded", capErr.Code())
-	}
-	if capErr.Day != "2026-11-14" || capErr.Spend != 25 || capErr.Cap != 20 {
-		t.Errorf("cap error = %+v", capErr)
-	}
-
-	// Exactly at the cap is allowed; the override bypasses.
-	if err := s.RefuseIfSpendCap(ctx, 25, false); err != nil {
-		t.Errorf("at cap refused: %v", err)
-	}
-	if err := s.RefuseIfSpendCap(ctx, 20, true); err != nil {
-		t.Errorf("override refused: %v", err)
 	}
 }

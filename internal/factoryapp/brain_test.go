@@ -14,7 +14,7 @@ import (
 // waitFor helper re-exported for use here (defined in factoryapp_test.go).
 
 // TestCreateJobEndpoint: POST /v1/jobs drives the same path as the MCP
-// create_job tool - spend breaker, capability match, create, dispatch.
+// create_job tool - capability match, create, dispatch.
 func TestCreateJobEndpoint(t *testing.T) {
 	e := newEnv(t)
 

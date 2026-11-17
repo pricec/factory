@@ -1,8 +1,8 @@
 package budgets
 
 import (
+	"log"
 	"os"
-	"strconv"
 )
 
 // Roles in the model tiering map (spec §6.5).
@@ -12,37 +12,32 @@ const (
 	RoleWorker       = "worker"
 )
 
-// Env override names (spec §6.5: env-overridable; FACTORY_SPEND_OVERRIDE=1
-// bypasses the breaker). Config-file wiring lands with the cmd/
+// Env override names (spec §6.5). Config-file wiring lands with the cmd/
 // integration; swapping a role's model is an env change only for now.
 const (
 	envPlannerModel      = "FACTORY_PLANNER_MODEL"
 	envForemanBrainModel = "FACTORY_FOREMAN_BRAIN_MODEL"
 	envWorkerModel       = "FACTORY_WORKER_MODEL"
-	envDailySpendCap     = "FACTORY_DAILY_SPEND_CAP"
-	envSpendOverride     = "FACTORY_SPEND_OVERRIDE"
+	envDailySpendCap     = "FACTORY_DAILY_SPEND_CAP" // deprecated, ignored
+	envSpendOverride     = "FACTORY_SPEND_OVERRIDE"  // deprecated, ignored
 )
 
-// Config is the #13 model-tiering + spend-cap configuration. Empty model
+// Config is the #13 model-tiering configuration. Empty model
 // strings mean the opencode default (nothing injected).
 type Config struct {
 	PlannerModel      string
 	ForemanBrainModel string
 	WorkerModel       string
-	DailySpendCapUSD  float64
-	// SpendOverride disables the daily spend breaker (spec §6.5).
-	SpendOverride bool
 }
 
-// DefaultConfig returns the pinned defaults: opencode-default models and
-// a $20/day spend cap (spec §6.5, §11).
+// DefaultConfig returns the pinned defaults: opencode-default models.
 func DefaultConfig() Config {
-	return Config{DailySpendCapUSD: 20}
+	return Config{}
 }
 
 // LoadConfig returns DefaultConfig with env overrides applied: the three
-// model strings, FACTORY_DAILY_SPEND_CAP (unparsable values keep the
-// default), and FACTORY_SPEND_OVERRIDE="1" disabling the breaker.
+// model strings. The dollar spend cap is gone (the usage gate is the only
+// limit); FACTORY_DAILY_SPEND_CAP / FACTORY_SPEND_OVERRIDE are ignored.
 func LoadConfig() Config {
 	cfg := DefaultConfig()
 	if v := os.Getenv(envPlannerModel); v != "" {
@@ -54,12 +49,6 @@ func LoadConfig() Config {
 	if v := os.Getenv(envWorkerModel); v != "" {
 		cfg.WorkerModel = v
 	}
-	if v := os.Getenv(envDailySpendCap); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			cfg.DailySpendCapUSD = f
-		}
-	}
-	cfg.SpendOverride = os.Getenv(envSpendOverride) == "1"
 	return cfg
 }
 
@@ -87,4 +76,14 @@ func (c Config) ModelArgs(role string) []string {
 		return nil
 	}
 	return []string{"-m", m}
+}
+
+// WarnDeprecatedEnv logs once at startup when the removed daily-spend-cap
+// env vars are still set. They are ignored.
+func WarnDeprecatedEnv() {
+	for _, k := range []string{envDailySpendCap, envSpendOverride} {
+		if os.Getenv(k) != "" {
+			log.Printf("factory: %s is deprecated and ignored: the dollar spend cap was removed; the usage throttle gate is the only limit", k)
+		}
+	}
 }

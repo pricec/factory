@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/pricec/factory/internal/auth"
-	"github.com/pricec/factory/internal/budgets"
 	"github.com/pricec/factory/internal/tasks"
 	"github.com/pricec/factory/internal/wire"
 )
@@ -23,7 +22,6 @@ func newInternalApp(t *testing.T) *App {
 		DataDir:      t.TempDir(),
 		Addr:         "127.0.0.1:0",
 		AdvertiseURL: "http://factory.test",
-		Budget:       budgets.DefaultConfig(),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pricec/factory/internal/budgets"
 	"github.com/pricec/factory/internal/factoryapp"
 	"github.com/pricec/factory/internal/tasks"
 	_ "modernc.org/sqlite"
@@ -39,7 +38,7 @@ func TestBootMigratesLegacyInbox(t *testing.T) {
 
 	cfg := factoryapp.Config{
 		DataDir: dir, Addr: "127.0.0.1:0", AdvertiseURL: testAdvertiseURL,
-		Budget: budgets.DefaultConfig(), Now: func() time.Time { return time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC) },
+		Now: func() time.Time { return time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC) },
 	}
 	for i := 0; i < 2; i++ {
 		a, err := factoryapp.New(cfg)

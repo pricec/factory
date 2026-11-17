@@ -54,8 +54,6 @@ type Config struct {
 	// pre-built foreman binaries (see the Makefile release target). Empty
 	// -> ./downloads, resolved in New.
 	DownloadsDir string
-	// Budget carries the spend-cap breaker config (spec §6.5).
-	Budget budgets.Config
 	// Now is the clock; nil -> real UTC time. Propagated to the jobs and
 	// auth stores (sweeper, liveness, pairing TTLs all become
 	// fake-clockable).
@@ -84,7 +82,6 @@ type App struct {
 	picker    *jobs.RetryPicker
 	pending   *jobs.PendingPicker
 	matcher   *registry.CapabilityMatcher
-	budget    budgets.Config
 	planner   *PlannerBrain
 	wakes     *wakeDispatcher // per-task planner wakes (spec §9.5.2, tasks_wake.go)
 	reaper    *taskReaper     // idle-24h task auto-close (spec §9.5.2, tasks_reaper.go)
@@ -218,7 +215,6 @@ func New(cfg Config) (*App, error) {
 
 	matcher := &registry.CapabilityMatcher{Source: &foremanSource{store: a.jobs}}
 	a.matcher = matcher
-	a.budget = cfg.Budget
 	a.sweeper = jobs.NewSweeper(a.jobs)
 	a.scheduler = jobs.NewScheduler(a.jobs, matcher)
 	a.picker = jobs.NewRetryPicker(a.jobs)
@@ -229,7 +225,6 @@ func New(cfg Config) (*App, error) {
 		Store:   a.jobs,
 		Matcher: matcher,
 		Inbox:   a.inbox,
-		Budget:  cfg.Budget,
 		Secrets: a.secrets, // create_job secrets validation (spec §13.2)
 		// Task tools + woken-task defaults (spec §9.5.2).
 		Tasks:       a.tasks,

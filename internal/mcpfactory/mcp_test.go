@@ -13,7 +13,6 @@ import (
 	"testing"
 
 	"github.com/pricec/factory/internal/auth"
-	"github.com/pricec/factory/internal/budgets"
 	"github.com/pricec/factory/internal/inbox"
 	"github.com/pricec/factory/internal/jobs"
 	"github.com/pricec/factory/internal/mcpfactory"
@@ -57,7 +56,7 @@ type env struct {
 	changed []string // TaskChanged callbacks, in order
 }
 
-func newEnv(t *testing.T, budget budgets.Config) *env {
+func newEnv(t *testing.T) *env {
 	t.Helper()
 	dir := t.TempDir()
 	authStore, err := auth.Open(filepath.Join(dir, "auth.db"))
@@ -87,7 +86,6 @@ func newEnv(t *testing.T, budget budgets.Config) *env {
 		Store:   store,
 		Matcher: matcher,
 		Inbox:   svc,
-		Budget:  budget,
 		Secrets: secretStore,
 		Tasks:   taskStore,
 		TaskChanged: func(_ context.Context, id string) {
@@ -256,7 +254,7 @@ func (e *env) seedFinished(t *testing.T, task, summary string, result json.RawMe
 }
 
 func TestToolsListAndBudget(t *testing.T) {
-	e := newEnv(t, budgets.DefaultConfig())
+	e := newEnv(t)
 
 	status, out := e.rpc(e.planner, "initialize", map[string]any{
 		"protocolVersion": "2025-06-18",
@@ -326,7 +324,7 @@ func TestToolsListAndBudget(t *testing.T) {
 }
 
 func TestListJobsSummaryOnlyAndReadResult(t *testing.T) {
-	e := newEnv(t, budgets.DefaultConfig())
+	e := newEnv(t)
 
 	big := json.RawMessage(`{"data":"` + strings.Repeat("x", 4096) + `"}`)
 	spec := e.seedFinished(t, "do a big thing", "all done", big, 0.5)
@@ -386,7 +384,7 @@ func TestListJobsSummaryOnlyAndReadResult(t *testing.T) {
 }
 
 func TestCreateJobDispatch(t *testing.T) {
-	e := newEnv(t, budgets.DefaultConfig())
+	e := newEnv(t)
 	ctx := context.Background()
 
 	// Happy path: matcher returns a foreman -> dispatched.
@@ -437,7 +435,7 @@ func TestCreateJobDispatch(t *testing.T) {
 }
 
 func TestCreateJobSchedule(t *testing.T) {
-	e := newEnv(t, budgets.DefaultConfig())
+	e := newEnv(t)
 	ctx := context.Background()
 
 	sc := structured(t, resultOf(t, e.callTool("create_job", map[string]any{
@@ -484,7 +482,7 @@ func TestCreateJobSchedule(t *testing.T) {
 }
 
 func TestCreateJobValidation(t *testing.T) {
-	e := newEnv(t, budgets.DefaultConfig())
+	e := newEnv(t)
 	tests := []struct {
 		name string
 		args map[string]any
@@ -512,7 +510,7 @@ func TestCreateJobValidation(t *testing.T) {
 // key is a tool error and creates nothing, and with no foremen registered
 // creation succeeds with a loud warning.
 func TestCreateJobRequiresValidation(t *testing.T) {
-	e := newEnv(t, budgets.DefaultConfig())
+	e := newEnv(t)
 	ctx := context.Background()
 
 	// No registered tag keys yet (alpha's caps are {}): cannot validate -
@@ -585,7 +583,7 @@ func TestCreateJobRequiresValidation(t *testing.T) {
 // tag-name semantics so the planner cannot invent capability values (spec
 // §9.4, 2026-11-15 amendment).
 func TestCreateJobDescription(t *testing.T) {
-	e := newEnv(t, budgets.DefaultConfig())
+	e := newEnv(t)
 	_, out := e.rpc(e.planner, "tools/list", nil)
 	var create struct {
 		Name        string `json:"name"`
@@ -615,73 +613,21 @@ func TestCreateJobDescription(t *testing.T) {
 	}
 }
 
-func TestCreateJobSpendBreaker(t *testing.T) {
-	budget := budgets.Config{DailySpendCapUSD: 1.0, SpendOverride: false}
-	e := newEnv(t, budget)
-	ctx := context.Background()
+func TestCreateJobNoDollarCap(t *testing.T) {
+	e := newEnv(t)
 
-	// Seed today's spend above the cap with a completed expensive job.
-	e.seedFinished(t, "expensive", "costly", json.RawMessage(`{}`), 5.0)
+	// Huge spend today must not block create_job: the usage gate is the
+	// only spending limit (spec §6.5).
+	e.seedFinished(t, "expensive", "costly", json.RawMessage(`{}`), 5000.0)
 
-	msg := toolError(t, "create_job", e.callTool("create_job", map[string]any{"task": "one more"}))
-	if !strings.Contains(msg, "spend_cap_exceeded") {
-		t.Fatalf("tool error = %q, want spend_cap_exceeded", msg)
-	}
-
-	// FACTORY_SPEND_OVERRIDE=1 equivalent: the same store accepts again.
-	h2, err := mcpfactory.Handler(mcpfactory.Config{
-		Auth: e.authStore, Store: e.store, Matcher: e.matcher, Inbox: e.svc,
-		Budget: budgets.Config{DailySpendCapUSD: 1.0, SpendOverride: true},
-	})
-	if err != nil {
-		t.Fatalf("override Handler: %v", err)
-	}
-	srv2 := httptest.NewServer(h2)
-	t.Cleanup(srv2.Close)
-
-	body, err := json.Marshal(map[string]any{
-		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-		"params": map[string]any{"name": "create_job", "arguments": map[string]any{"task": "one more"}},
-	})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	req, err := http.NewRequest("POST", srv2.URL, bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("NewRequest: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	req.Header.Set("Authorization", "Bearer "+e.planner)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("POST: %v", err)
-	}
-	defer resp.Body.Close()
-	var out map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	res := resultOf(t, out)
+	res := e.callTool("create_job", map[string]any{"task": "one more"})
 	if isErr, _ := res["isError"].(bool); isErr {
-		t.Fatalf("override create_job errored: %v", res)
-	}
-	sc := structured(t, res)
-	if sc["state"] != "dispatched" {
-		t.Errorf("override state = %v, want dispatched", sc["state"])
-	}
-	// Sanity: the refused call created no job; the override call created one.
-	listed, err := e.store.List(ctx, "", "", 200)
-	if err != nil {
-		t.Fatalf("store.List: %v", err)
-	}
-	if len(listed) != 2 { // the seeded expensive job + the override job
-		t.Errorf("jobs after breaker test = %d, want 2 (refusal created none)", len(listed))
+		t.Fatalf("create_job refused despite no cap: %v", res)
 	}
 }
 
 func TestMessageForeman(t *testing.T) {
-	e := newEnv(t, budgets.DefaultConfig())
+	e := newEnv(t)
 	ctx := context.Background()
 
 	sc := structured(t, resultOf(t, e.callTool("message_foreman", map[string]any{
@@ -800,7 +746,7 @@ func TestMessageForeman(t *testing.T) {
 // TestNotifyOperator: notify_operator posts a brain.reply envelope into the
 // operator inbox (planner:main, spec §9.5) - the planner's only reply path.
 func TestNotifyOperator(t *testing.T) {
-	e := newEnv(t, budgets.DefaultConfig())
+	e := newEnv(t)
 	ctx := context.Background()
 
 	sc := structured(t, resultOf(t, e.callTool("notify_operator", map[string]any{
@@ -839,7 +785,7 @@ func TestNotifyOperator(t *testing.T) {
 }
 
 func TestListForemen(t *testing.T) {
-	e := newEnv(t, budgets.DefaultConfig())
+	e := newEnv(t)
 	ctx := context.Background()
 
 	if err := e.store.UpsertForeman(ctx, "alpha", json.RawMessage(`{"os":"linux"}`)); err != nil {
@@ -880,7 +826,7 @@ func TestListForemen(t *testing.T) {
 }
 
 func TestAuth(t *testing.T) {
-	e := newEnv(t, budgets.DefaultConfig())
+	e := newEnv(t)
 	tests := []struct {
 		name   string
 		bearer string
@@ -920,7 +866,7 @@ func TestAuth(t *testing.T) {
 // machine and the tool reports the resulting state; terminal jobs and
 // unknown ids are tool errors.
 func TestCancelJobTool(t *testing.T) {
-	e := newEnv(t, budgets.DefaultConfig())
+	e := newEnv(t)
 	ctx := context.Background()
 
 	seed := func(t *testing.T) string {
@@ -988,7 +934,7 @@ func TestCancelJobTool(t *testing.T) {
 // TestRaiseAlertTool: raise_alert forwards to Config.RaiseAlert and reports
 // the id/expiry; a missing backend and backend errors are tool errors.
 func TestRaiseAlertTool(t *testing.T) {
-	e := newEnv(t, budgets.DefaultConfig())
+	e := newEnv(t)
 	msg := toolError(t, "raise_alert", e.callTool("raise_alert", map[string]any{"priority": 1, "title": "x"}))
 	if !strings.Contains(msg, "not configured") {
 		t.Errorf("unconfigured error = %q", msg)
@@ -1001,7 +947,7 @@ func TestRaiseAlertTool(t *testing.T) {
 // errors on an unregistered foreman, and pends with a loud warning while
 // the pinned foreman is offline.
 func TestCreateJobForemanPin(t *testing.T) {
-	e := newEnv(t, budgets.DefaultConfig())
+	e := newEnv(t)
 	ctx := context.Background()
 	// newEnv registered foreman "alpha" in the jobs store's registry
 	// (the pin's real source) and left it online like pairing does.

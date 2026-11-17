@@ -75,7 +75,7 @@ func (s *Store) MarkOverBudget(ctx context.Context, jobID string) error {
 
 // SpendHandler serves GET /v1/spend?day= (spec §6.9): the day's spend
 // totals. An empty day defaults to the store clock's today; a malformed
-// day is a 400. The cap and the breaker live at create_job, not here.
+// day is a 400. Reporting only: there is no dollar cap; the usage gate is the only limit.
 func (s *Store) SpendHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/spend", s.handleSpend)
@@ -96,38 +96,4 @@ func (s *Store) handleSpend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, totals)
-}
-
-// CapError is the daily spend breaker refusal (spec §6.5, §10); the MCP
-// surface maps Code() to the wire error code.
-type CapError struct {
-	Day   string
-	Spend float64
-	Cap   float64
-}
-
-func (e *CapError) Error() string {
-	return fmt.Sprintf("daily spend $%.2f exceeds cap $%.2f", e.Spend, e.Cap)
-}
-
-// Code is the pinned wire error code (spec §10).
-func (e *CapError) Code() string { return "spend_cap_exceeded" }
-
-// RefuseIfSpendCap is the create_job breaker check (spec §6.5): it sums
-// today's spend and refuses when it is above capUSD, unless override
-// (FACTORY_SPEND_OVERRIDE=1). Exactly at the cap is allowed. The refusal
-// is a *CapError.
-func (s *Store) RefuseIfSpendCap(ctx context.Context, capUSD float64, override bool) error {
-	if override {
-		return nil
-	}
-	day := s.Now().UTC().Format(spendDayLayout)
-	totals, err := s.DailySpend(ctx, day)
-	if err != nil {
-		return err
-	}
-	if totals.Total > capUSD {
-		return &CapError{Day: day, Spend: totals.Total, Cap: capUSD}
-	}
-	return nil
 }

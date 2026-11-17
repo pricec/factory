@@ -167,16 +167,6 @@ func createJobTool(cfg Config) mcp.ToolHandlerFor[createJobArgs, any] {
 			return nil, nil, err
 		}
 
-		// Breaker first (spec §6.5): refuse with spend_cap_exceeded when the
-		// daily spend breaker is open.
-		if err := cfg.Store.RefuseIfSpendCap(ctx, cfg.Budget.DailySpendCapUSD, cfg.Budget.SpendOverride); err != nil {
-			var cap *jobs.CapError
-			if errors.As(err, &cap) {
-				return nil, nil, fmt.Errorf("spend_cap_exceeded: %s", cap.Error())
-			}
-			return nil, nil, err
-		}
-
 		spec := wire.NewJobSpec(in.Task, "factory")
 		spec.Requires = in.Requires
 		spec.Secrets = in.Secrets
