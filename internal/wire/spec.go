@@ -15,13 +15,19 @@ const (
 	DefaultTimeoutS = 14400
 	// DefaultIdleTimeoutS is how long a worker may produce no output
 	// (idle_timeout_s) before the harness kills it (15m).
-	DefaultIdleTimeoutS    = 900
+	DefaultIdleTimeoutS = 900
+	// DefaultLoopLimit is the loop guard default (identical call+result repeats).
+	DefaultLoopLimit       = 8
 	DefaultPriority        = 5
 	MinPriority            = 1
 	MaxPriority            = 9
 	DefaultMaxPromptBytes  = 32768
 	DefaultMaxOutputTokens = 8192
-	DefaultMaxCostUSD      = 5.0
+	// DefaultMaxCostUSD is the default live spend cap. NOT real money: the
+	// factory runs on a Claude subscription usage plan, not API billing;
+	// this is an API-equivalent cost ESTIMATE standing in for usage-window
+	// consumption (see internal/claudecli price table).
+	DefaultMaxCostUSD = 20.0
 )
 
 // Job tiers (§5.1, §6.5): the model tier a job runs at. Empty means
@@ -56,9 +62,12 @@ func TierCeilingS(tier string) int {
 
 // Budget bounds a job's prompt size, output size, and spend (§5.1).
 type Budget struct {
-	MaxPromptBytes  int     `json:"max_prompt_bytes"`
-	MaxOutputTokens int     `json:"max_output_tokens"`
-	MaxCostUSD      float64 `json:"max_cost_usd"`
+	MaxPromptBytes  int `json:"max_prompt_bytes"`
+	MaxOutputTokens int `json:"max_output_tokens"`
+	// MaxCostUSD caps the live spend estimate (default $20). It is an
+	// API-equivalent estimate standing in for subscription usage-window
+	// consumption (we do not pay per token), not an invoice amount.
+	MaxCostUSD float64 `json:"max_cost_usd"`
 }
 
 func defaultBudget() Budget {
@@ -91,11 +100,15 @@ type JobSpec struct {
 	// IdleTimeoutS kills the job (reason=idle) after this many seconds
 	// without any worker output; any output resets the timer. Zero means
 	// DefaultIdleTimeoutS; it never exceeds the ceiling in effect.
-	IdleTimeoutS int    `json:"idle_timeout_s,omitempty"`
-	Priority     int    `json:"priority"`
-	Budget       Budget `json:"budget"`
-	CreatedBy    string `json:"created_by,omitempty"`
-	CreatedAt    string `json:"created_at,omitempty"`
+	IdleTimeoutS int `json:"idle_timeout_s,omitempty"`
+	// LoopLimit is the loop guard's threshold: that many consecutive tool
+	// calls with identical name, input AND result kill the job
+	// (reason=loop). 0 means DefaultLoopLimit (8); negative disables it.
+	LoopLimit int    `json:"loop_limit,omitempty"`
+	Priority  int    `json:"priority"`
+	Budget    Budget `json:"budget"`
+	CreatedBy string `json:"created_by,omitempty"`
+	CreatedAt string `json:"created_at,omitempty"`
 	// ParentJobID is set on child jobs spawned by a worker via the
 	// worker-MCP spawn_child tool (§9.2, 2026-11-15 sub-spawning
 	// amendment): it names the parent job, whose per-job inbox receives a

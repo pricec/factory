@@ -93,8 +93,10 @@ type Config struct {
 	Timeout time.Duration
 	// IdleTimeout overrides the spec's idle_timeout_s; same seam role.
 	IdleTimeout time.Duration
-	// LoopLimit is how many identical back-to-back tool calls trip the
-	// loop guard; zero means DefaultLoopLimit, negative disables it.
+	// LoopLimit is how many back-to-back tool calls with identical name,
+	// input and result trip the loop guard (kill, reason=loop); zero means
+	// DefaultLoopLimit, negative disables it. JobSpec.loop_limit, when
+	// non-zero, overrides it per job.
 	LoopLimit int
 	// TermGrace is how long a budget kill waits after SIGTERM before
 	// SIGKILL; zero means 5s.
@@ -102,7 +104,7 @@ type Config struct {
 }
 
 // DefaultLoopLimit is the loop guard's default threshold.
-const DefaultLoopLimit = 8
+const DefaultLoopLimit = wire.DefaultLoopLimit
 
 // defaults validates the required fields and fills the optional seams.
 func (c *Config) defaults() error {
@@ -183,8 +185,11 @@ func Run(ctx context.Context, cfg Config) error {
 		ceiling: jobTimeout(cfg, spec), idle: jobIdleTimeout(cfg, spec),
 		maxCostUSD: spec.Budget.MaxCostUSD, loopLimit: cfg.LoopLimit,
 	}
+	if spec.LoopLimit != 0 { // per-job override (negative disables)
+		lim.loopLimit = spec.LoopLimit
+	}
 	if lim.loopLimit == 0 {
-		lim.loopLimit = DefaultLoopLimit
+		lim.loopLimit = wire.DefaultLoopLimit
 	}
 	runErr, kill, harnessErr := execChild(ctx, cfg, lim, jobDir, buildPrompt(spec, runnerFor(cfg.Model)), stdout, stderr)
 	if harnessErr != nil {
@@ -397,7 +402,7 @@ func execChild(ctx context.Context, cfg Config, lim limits, jobDir, prompt strin
 	hb := newHeartbeat()
 	var stream *claudecli.Stream
 	if isClaudeModel(cfg.Model) {
-		stream = claudecli.NewStream()
+		stream = claudecli.NewStream(cfg.Model)
 	}
 	cmd.Stdout = &beatWriter{w: stdout, hb: hb, stream: stream}
 	cmd.Stderr = &beatWriter{w: stderr, hb: hb}
@@ -418,7 +423,9 @@ func execChild(ctx context.Context, cfg Config, lim limits, jobDir, prompt strin
 		if stream != nil {
 			k.costUSD, _ = stream.Cost()
 		}
-		if k.reason == wire.ReasonBudget {
+		var waitErr error
+		exited := false
+		if k.reason == wire.ReasonBudget || k.reason == wire.ReasonLoop {
 			// Clean stop: let the CLI flush its result object first.
 			killGroup(syscall.SIGTERM)
 			grace := cfg.TermGrace
@@ -426,13 +433,19 @@ func execChild(ctx context.Context, cfg Config, lim limits, jobDir, prompt strin
 				grace = 5 * time.Second
 			}
 			select {
-			case err := <-done:
-				return err, k, nil
+			case waitErr = <-done:
+				exited = true
 			case <-time.After(grace):
 			}
 		}
+		// Always SIGKILL the whole process group once the grace ends, even
+		// if the leader already exited: grandchildren that ignore SIGTERM
+		// must not survive.
 		killGroup(syscall.SIGKILL)
-		return <-done, k, nil
+		if !exited {
+			waitErr = <-done
+		}
+		return waitErr, k, nil
 	}
 
 	started := time.Now()

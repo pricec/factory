@@ -496,6 +496,46 @@ func TestOverBudget(t *testing.T) {
 	})
 }
 
+// TestLoopKillDeadLetters: a harness loop kill (reason=loop) must not be
+// retried - it dead-letters immediately, like a budget kill.
+func TestLoopKillDeadLetters(t *testing.T) {
+	e := newEnv(t)
+	foremanBearer := e.pair("alpha", nil)
+	ctx := context.Background()
+
+	spec := wire.NewJobSpec("loops forever", "factory")
+	if err := e.a.Jobs().Create(ctx, spec); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := e.a.Jobs().Dispatch(ctx, spec.ID, "foreman:alpha"); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if status := e.postToFactoryMain(foremanBearer, wire.MessageEnvelope{
+		Type: "job.event", JobID: spec.ID, From: "foreman:alpha",
+		Payload: json.RawMessage(`{"event":"started"}`),
+	}); status != http.StatusCreated {
+		t.Fatalf("post job.event status = %d", status)
+	}
+	result := wire.JobResult{
+		JobID: spec.ID, Status: wire.StatusFailed, Summary: "loop guard",
+		Error: &wire.JobError{Kind: wire.KindOther, Reason: wire.ReasonLoop, Message: "tool repeated"},
+	}
+	if status := e.postToFactoryMain(foremanBearer, wire.MessageEnvelope{
+		Type: "job.result", JobID: spec.ID, From: "foreman:alpha",
+		Payload: mustJSON(t, result),
+	}); status != http.StatusCreated {
+		t.Fatalf("post job.result status = %d", status)
+	}
+	var job jobs.Job
+	waitFor(t, "loop-killed job dead-lettered (reason=loop, no retry)", 5*time.Second, func() bool {
+		_ = e.do("GET", "/v1/jobs/"+spec.ID, "", nil, &job)
+		return job.State == jobs.StateDead
+	})
+	if !strings.Contains(string(job.Results), `"reason":"loop"`) {
+		t.Errorf("results = %s, want reason=loop recorded", job.Results)
+	}
+}
+
 func TestWorkerTokenInvalidation(t *testing.T) {
 	e := newEnv(t)
 	foremanBearer := e.pair("alpha", nil)
