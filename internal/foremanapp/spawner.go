@@ -232,8 +232,10 @@ var opencodeUsageReader ocusage.Reader = ocusage.ReaderFor("")
 // defaultHarnessConfig builds the harness config for one job (spec §8.1):
 // the persisted spec path, the loopback ResultURL and MCPURL (see
 // localBaseURL - workers are local in-process children), the per-job token,
-// DataDir as the per-job root, and the model from the job's tier (spec
-// §6.5): flash (and no-tier jobs - the cost-biased default) run GLM 5.3
+// DataDir as the per-job root, and the model: the job's explicit `model`
+// when set (spec §5.1, 2026-11-15 amendment - it overrides the tier),
+// else the settings-synced tier mapping (spec §6.5, settings.go; panel >
+// env > pinned default). Defaults: flash (and no-tier jobs - the cost-biased default) run GLM 5.3
 // Flash, `tier: "default"` runs GLM 5.3 Flash at max reasoning effort,
 // `tier: "hardest"` runs GLM 5.3. The model string also routes the
 // runner (§8.4): a claude-* override (e.g.
@@ -241,12 +243,9 @@ var opencodeUsageReader ocusage.Reader = ocusage.ReaderFor("")
 // Claude Code CLI; the pinned GLM defaults are unchanged.
 func (a *App) defaultHarnessConfig(spec wire.JobSpec, bearer string) workerharness.Config {
 	base := localBaseURL(a.cfg.Addr)
-	model := a.cfg.WorkerFlashModel
-	switch spec.Tier {
-	case wire.TierDefault:
-		model = a.cfg.WorkerModel
-	case wire.TierHardest:
-		model = a.cfg.WorkerHardestModel
+	model := a.workerModelForTier(spec.Tier)
+	if spec.Model != "" {
+		model = spec.Model
 	}
 	return workerharness.Config{
 		JobPath:   filepath.Join(a.dataDir, jobsDirName, spec.ID, "job.json"),
@@ -259,4 +258,21 @@ func (a *App) defaultHarnessConfig(spec wire.JobSpec, bearer string) workerharne
 		// opencode database (the claude route parses stdout instead).
 		ReadUsage: opencodeUsageReader,
 	}
+}
+
+// workerModelForTier resolves the tier's worker model from the
+// settings-synced modelCfg (set by New). An App built without New (bare
+// &App{} in tests) has no modelCfg; it falls back to the static cfg
+// models - the pre-settings behaviour.
+func (a *App) workerModelForTier(tier string) string {
+	if a.modelCfg != nil {
+		return a.modelCfg.WorkerForTier(tier)
+	}
+	switch tier {
+	case wire.TierDefault:
+		return a.cfg.WorkerModel
+	case wire.TierHardest:
+		return a.cfg.WorkerHardestModel
+	}
+	return a.cfg.WorkerFlashModel
 }

@@ -408,3 +408,42 @@ func TestPlannerBrainTimeoutBound(t *testing.T) {
 		t.Errorf("plannerBrainTimeout = %v, want 30m (1800s)", plannerBrainTimeout)
 	}
 }
+
+// TestPlannerModelFnPerSession: the settings panel's live override
+// (spec §6.5, 2026-11-15 amendment) - ModelFn wins over the static
+// Model, is resolved once per session (session/forTask), and the
+// resolved value drives the runner route (§9.4): a panel switch from a
+// claude-* id to an opencode id re-routes the next session.
+func TestPlannerModelFnPerSession(t *testing.T) {
+	current := "claude-opus-5-5"
+	b := &PlannerBrain{
+		Model:   "openrouter/z-ai/glm-5.3",
+		ModelFn: func() string { return current },
+		MCPURL:  "http://127.0.0.1:1/v1/mcp/factory",
+		WorkDir: t.TempDir(),
+	}
+	s := b.session()
+	if s.Model != "claude-opus-5-5" || s.ModelFn != nil {
+		t.Fatalf("session = model %q fn-nil=%v, want the ModelFn value frozen", s.Model, s.ModelFn == nil)
+	}
+	if !isClaudeModel(s.Model) {
+		t.Errorf("claude panel model %q does not route to the claude runner", s.Model)
+	}
+	// A later panel change does not leak into an already-resolved session.
+	current = "ollama/qwen3:8b"
+	if s.Model != "claude-opus-5-5" {
+		t.Errorf("resolved session model changed mid-session to %q", s.Model)
+	}
+	// ...but the next session (task-bound included) picks it up.
+	if got := b.forTask("task_1").Model; got != "ollama/qwen3:8b" {
+		t.Errorf("forTask model = %q, want the new panel value", got)
+	}
+	if isClaudeModel(b.session().Model) {
+		t.Errorf("opencode panel model routes to the claude runner")
+	}
+	// No ModelFn: the static Model applies.
+	b.ModelFn = nil
+	if got := b.session().Model; got != "openrouter/z-ai/glm-5.3" {
+		t.Errorf("static session model = %q, want the Model field", got)
+	}
+}

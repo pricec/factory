@@ -53,6 +53,13 @@ type BrainRunner struct {
 	// Model is the child CLI model string; "" -> the CLI's default. A
 	// claude-* model selects the claude runner (FACTORY_FOREMAN_BRAIN_MODEL).
 	Model string
+	// ModelFn, when set, resolves the model per session - the settings
+	// panel's live override path (spec §6.5, 2026-11-15 amendment):
+	// ModelFn wins over the static Model field so panel changes apply to
+	// the next brain session without a restart. nil -> the static field.
+	// It is read once per session so the runner route and the model the
+	// child runs never disagree.
+	ModelFn func() string
 	// ClaudeBin is the Claude Code CLI binary; "" means "claude" on PATH.
 	// Used only by sessions routed to the claude runner.
 	ClaudeBin string
@@ -81,12 +88,13 @@ type BrainRunner struct {
 // brain never panics.
 func (b *BrainRunner) Handle(ctx context.Context, env wire.MessageEnvelope) error {
 	prompt := llmctx.BuildWakePrompt("New messages need decisions.", []wire.MessageEnvelope{env})
-	exec := b.Exec
+	s := b.session()
+	exec := s.Exec
 	if exec == nil {
-		if claudecli.IsModel(b.Model) {
-			exec = b.runClaude
+		if claudecli.IsModel(s.Model) {
+			exec = s.runClaude
 		} else {
-			exec = b.runOpencode
+			exec = s.runOpencode
 		}
 	}
 	stdout, err := exec(ctx, prompt)
@@ -96,6 +104,28 @@ func (b *BrainRunner) Handle(ctx context.Context, env wire.MessageEnvelope) erro
 	log.Printf("foremanapp: brain handled %s %s; stdout: %s", env.Type, env.ID, snippet(stdout))
 	return nil
 }
+
+// currentModel resolves the session model: ModelFn when wired (the
+// settings pull path), else the static Model field.
+func (b *BrainRunner) currentModel() string {
+	if b.ModelFn != nil {
+		return b.ModelFn()
+	}
+	return b.Model
+}
+
+// session returns a copy of b with the model resolved once for one
+// session (spec §6.5).
+func (b *BrainRunner) session() *BrainRunner {
+	c := *b
+	c.Model = b.currentModel()
+	c.ModelFn = nil
+	return &c
+}
+
+// CurrentModel returns the brain's current effective model (the
+// settings-synced value when wired; spec §6.5).
+func (b *BrainRunner) CurrentModel() string { return b.currentModel() }
 
 // runClaude is the claude-runner Exec (spec §9.3, 2026-11-16
 // foreman-brain-claude amendment): it regenerates the Claude Code MCP

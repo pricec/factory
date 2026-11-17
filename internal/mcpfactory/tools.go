@@ -47,6 +47,7 @@ type (
 		Foreman      string `json:"foreman,omitempty"`
 		ResultSchema any    `json:"result_schema,omitempty"`
 		Tier         string `json:"tier,omitempty"`
+		Model        string `json:"model,omitempty"`
 		TimeoutS     *int   `json:"timeout_s,omitempty"`
 		Priority     *int   `json:"priority,omitempty"`
 		ScheduleCron string `json:"schedule_cron,omitempty"`
@@ -178,6 +179,7 @@ func createJobTool(cfg Config) mcp.ToolHandlerFor[createJobArgs, any] {
 			spec.ResultSchema = b
 		}
 		spec.Tier = in.Tier
+		spec.Model = in.Model
 		if in.TimeoutS != nil {
 			spec.TimeoutS = *in.TimeoutS
 		}

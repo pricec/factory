@@ -29,9 +29,12 @@ type createJobRequest struct {
 	Foreman      string          `json:"foreman,omitempty"`
 	ResultSchema json.RawMessage `json:"result_schema,omitempty"`
 	Tier         string          `json:"tier,omitempty"`
-	TimeoutS     int             `json:"timeout_s,omitempty"`
-	Priority     int             `json:"priority,omitempty"`
-	ScheduleCron string          `json:"schedule_cron,omitempty"`
+	// Model is the explicit per-job model (spec §5.1, 2026-11-15
+	// amendment): it overrides the tier on the foreman.
+	Model        string `json:"model,omitempty"`
+	TimeoutS     int    `json:"timeout_s,omitempty"`
+	Priority     int    `json:"priority,omitempty"`
+	ScheduleCron string `json:"schedule_cron,omitempty"`
 	// TaskID files the job under a task (spec §9.5.2): recorded in
 	// task_jobs before dispatch, so the job's reports thread onto it.
 	TaskID string `json:"task_id,omitempty"`
@@ -63,6 +66,7 @@ func (a *App) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	spec.Secrets = in.Secrets
 	spec.ResultSchema = in.ResultSchema
 	spec.Tier = in.Tier
+	spec.Model = in.Model
 	if in.TimeoutS != 0 {
 		spec.TimeoutS = in.TimeoutS
 	}
