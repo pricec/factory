@@ -49,6 +49,13 @@ func main() {
 		log.Fatalf("foreman: %v", err)
 	}
 
+	if w := claudeLoginWarning([]string{
+		os.Getenv("FACTORY_FOREMAN_BRAIN_MODEL"), os.Getenv("FACTORY_WORKER_FLASH_MODEL"),
+		os.Getenv("FACTORY_WORKER_MODEL"), os.Getenv("FACTORY_WORKER_HARDEST_MODEL"),
+	}, os.Getenv); w != "" {
+		log.Print(w)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

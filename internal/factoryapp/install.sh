@@ -217,6 +217,26 @@ sed -i "s|{{SERVICE_PATH}}|$SERVICE_PATH|" /etc/systemd/system/factory-foreman.s
 # root-only.
 chmod 600 /etc/systemd/system/factory-foreman.service
 
+# Claude model routing (spec §8.4). Without these a new foreman defaults to
+# the opencode GLM tiers. They live in an installer-owned DROP-IN, not the
+# main unit, so: (1) re-running refreshes them without touching the pairing
+# token, paired.json or any other env; (2) values an operator set by hand
+# win - systemd applies drop-ins in lexical order and the later assignment
+# wins, so 05-* is overridden by an operator's override.conf / 10-*.conf
+# (and by the unit's own Environment= lines). No secrets are written here.
+DROPIN_DIR=/etc/systemd/system/factory-foreman.service.d
+mkdir -p "$DROPIN_DIR"
+cat >"$DROPIN_DIR/05-claude-models.conf" <<'MODELS_EOF'
+# Written by the factory install script (re-run refreshes it). To override,
+# set the same variables in override.conf - it sorts after this file.
+[Service]
+Environment=FACTORY_WORKER_FLASH_MODEL=claude-haiku-5-5
+Environment=FACTORY_WORKER_MODEL=claude-sonnet-5-5
+Environment=FACTORY_WORKER_HARDEST_MODEL=claude-opus-5-5
+Environment=FACTORY_FOREMAN_BRAIN_MODEL=claude-opus-5-5
+MODELS_EOF
+chmod 644 "$DROPIN_DIR/05-claude-models.conf"
+
 systemctl daemon-reload
 systemctl enable factory-foreman >/dev/null
 systemctl restart factory-foreman
@@ -230,6 +250,11 @@ echo "issued; if pairing failed, re-fetch the install script for a fresh one."
 echo "note: worker CLIs are visible on the service PATH (spec §8.4):"
 echo "note:   opencode: $(PATH="$SERVICE_PATH" command -v opencode || echo MISSING)"
 echo "note:   claude:   $(PATH="$SERVICE_PATH" command -v claude || echo MISSING)"
-echo "note: claude auth is the service user's (login once as $SERVICE_USER"
-echo "note: or set ANTHROPIC_API_KEY in the unit's environment); an"
-echo "note: unauthenticated claude run fails the job loudly (spec §8.4)."
+echo "note: workers and the brain are routed to Claude (see"
+echo "note: $DROPIN_DIR/05-claude-models.conf). The claude CLI is NOT"
+echo "note: logged in yet. NEXT STEP - authenticate once, as the service user:"
+echo "note:"
+echo "note:   sudo -u $SERVICE_USER -H claude /login"
+echo "note:"
+echo "note: (or set ANTHROPIC_API_KEY in a unit drop-in). Until then claude"
+echo "note: jobs fail loudly (spec §8.4); the foreman logs a warning at start."
