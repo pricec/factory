@@ -397,8 +397,24 @@ payload and `GET /v1/jobs/{id}`.
   are no-ops, so registration can neither duplicate nor clobber.
 - Sweeper (10s tick, fake-clockable): `running` past `timeout_s + 60s` ->
   `timed_out`.
-- Offline foreman's jobs are left as-is unless past timeout + grace ->
-  `timed_out`.
+- Offline foreman's jobs: past timeout + grace -> `timed_out`; and a
+  foreman offline for 10 minutes has its `running` jobs reaped (below).
+- Reconciliation (2026-11-17 zombie-running amendment): the server believes a
+  job is `running` only while its foreman does. The 60s capabilities push
+  (§6.7) may carry `active_jobs: [job_id]`, the jobs the foreman has live
+  workers for (a restarted foreman sends `[]`; absent = older foreman, no
+  reconciliation). On each push the factory reaps that foreman's `running`
+  jobs not listed whose `updated_at` is at least 2 minutes old (grace for a
+  result still in flight). Reaping goes through the ordinary machine:
+  `running -> failed`, `last_error` "reconciled: ...", then retry per §6.4
+  with kind `crash`; if a final result for the current attempt is already
+  recorded (`results` holds more entries than `attempts`) or the job is a
+  merge job (§6.11) it goes to `dead` instead. The sweeper applies the same
+  reap to `running` jobs whose foreman has been offline 10 minutes, and
+  settles `failed` jobs with no retry armed after 2 minutes (arming lost,
+  or the failed result carried no error kind: armed per the last result's
+  kind, `dead` when unknown). `timeout_s + 60s` remains the server-side
+  ceiling for any `running` job whose worker has gone quiet.
 - Foreman restart orphans (2026-11-16 orphan-recovery amendment, §8.7): a
   restarted foreman fails its own running jobs that have no live worker
   process at startup (`crash`, retry armed). The sweeper above is the
@@ -691,7 +707,7 @@ factory planner's list view carries summaries only (#7, #19).
 | `DELETE /v1/schedules` | (#8) |
 | `POST /v1/schedules/{id}/enable` | (#8) |
 | `POST /v1/schedules/{id}/disable` | (#8) |
-| `POST /v1/foreman/capabilities` | foreman token; upserts tags, bumps `last_seen` (#12) |
+| `POST /v1/foreman/capabilities` | foreman token; upserts tags, bumps `last_seen`; optional `active_jobs` triggers reconciliation (§6.2) (#12) |
 | `GET /v1/spend?day=` | daily totals `{total_usd, jobs}`; per-role deferred until jobs carry role tags (#13) |
 | `GET /v1/inboxes` | per-inbox aggregate listing `{inbox_id, total, unacked, last_ts}` (UI; §4.1) |
 | `GET /v1/inboxes/{id}/recent` | recent envelopes for one inbox, acked included (UI; §4.1) |

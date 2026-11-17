@@ -325,3 +325,32 @@ func TestDetectToolsSortedAndAbsent(t *testing.T) {
 		t.Errorf("tools = %q, want empty when nothing is detected", got)
 	}
 }
+
+func TestRefreshReconcilesOnlyWhenActiveJobsReported(t *testing.T) {
+	authz := func(r *http.Request, identity *string) error { *identity = "foreman:alpha"; return nil }
+	upsert := func(context.Context, string, map[string]string) error { return nil }
+	for _, tc := range []struct {
+		body string
+		want []string
+		call bool
+	}{
+		{`{"capabilities":{}}`, nil, false},                                      // older foreman: no claim
+		{`{"capabilities":{},"active_jobs":[]}`, []string{}, true},               // restarted: claims nothing
+		{`{"capabilities":{},"active_jobs":["job_a"]}`, []string{"job_a"}, true}, // claims one
+	} {
+		var got []string
+		called := false
+		h := RefreshHandlerReconciling(authz, upsert, nil, func(_ context.Context, id string, active []string) error {
+			called, got = true, active
+			if id != "foreman:alpha" {
+				t.Errorf("identity = %q", id)
+			}
+			return nil
+		})
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/foreman/capabilities", strings.NewReader(tc.body)))
+		if rec.Code != http.StatusNoContent || called != tc.call || len(got) != len(tc.want) {
+			t.Errorf("body %s: code=%d called=%v got=%v", tc.body, rec.Code, called, got)
+		}
+	}
+}

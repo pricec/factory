@@ -77,7 +77,14 @@ func (c Capabilities) Tags() []string {
 // refreshBody is the POST /v1/foreman/capabilities payload (spec §6.7).
 type refreshBody struct {
 	Capabilities map[string]string `json:"capabilities"`
+	// ActiveJobs is the ids the foreman has live workers for (spec §6.2
+	// reconciliation). nil (absent) means an older foreman that does not
+	// report: nothing is reconciled.
+	ActiveJobs *[]string `json:"active_jobs,omitempty"`
 }
+
+// ReconcileFunc receives the foreman's claimed in-flight jobs on a refresh.
+type ReconcileFunc func(ctx context.Context, identity string, active []string) error
 
 // maxRefreshBody caps the refresh payload; capabilities are small tags.
 const maxRefreshBody = 64 << 10
@@ -100,6 +107,13 @@ func RefreshHandler(authz AuthzFunc, upsert func(ctx context.Context, identity s
 // advert (spec §6.7): when advert returns non-nil the refresh answers 200
 // {"foreman_update":...}; nil advert or nil result keeps the 204.
 func RefreshHandlerWithAdvert(authz AuthzFunc, upsert func(ctx context.Context, identity string, caps map[string]string) error, advert AdvertFunc) http.Handler {
+	return RefreshHandlerReconciling(authz, upsert, advert, nil)
+}
+
+// RefreshHandlerReconciling is RefreshHandlerWithAdvert plus job
+// reconciliation: when the body carries active_jobs, reconcile runs after
+// the upsert (spec §6.2).
+func RefreshHandlerReconciling(authz AuthzFunc, upsert func(ctx context.Context, identity string, caps map[string]string) error, advert AdvertFunc, reconcile ReconcileFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "POST required", false)
@@ -122,6 +136,12 @@ func RefreshHandlerWithAdvert(authz AuthzFunc, upsert func(ctx context.Context, 
 		if err := upsert(r.Context(), identity, body.Capabilities); err != nil {
 			writeError(w, http.StatusInternalServerError, "internal", err.Error(), true)
 			return
+		}
+		if reconcile != nil && body.ActiveJobs != nil {
+			if err := reconcile(r.Context(), identity, *body.ActiveJobs); err != nil {
+				writeError(w, http.StatusInternalServerError, "internal", err.Error(), true)
+				return
+			}
 		}
 		var fu *ForemanUpdate
 		if advert != nil {

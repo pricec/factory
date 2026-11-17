@@ -846,7 +846,7 @@ func (a *App) pushCapabilities(ctx context.Context) error {
 	caps := detectCapabilities()
 	caps["build"] = a.build
 	status, body, err := postJSONResponse(ctx, a.factoryURL+"/v1/foreman/capabilities", a.paired.Bearer,
-		map[string]any{"capabilities": caps})
+		map[string]any{"capabilities": caps, "active_jobs": a.liveJobIDs()})
 	if err != nil {
 		return err
 	}
