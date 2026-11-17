@@ -147,3 +147,30 @@ envelopes, and output echoing it is replaced by `[REDACTED]`.
   `secret_grants` table in `jobs.db` has timestamps.
 - **Deleting** a secret a queued job still names fails that job at start
   with `could not fetch secrets [name]`; recreate the secret and requeue.
+
+## Factory auditor
+
+The daily audit (spec §6.12) is configured by the factory service's
+environment (systemd unit); changes apply on the next factory restart,
+which re-creates the audit schedule:
+
+| Env | Default | Meaning |
+|---|---|---|
+| `FACTORY_AUDIT_ENABLED` | `1` | `0` removes the schedule |
+| `FACTORY_AUDIT_AUTOFIX` | `1` | `0` files every finding as a proposal |
+| `FACTORY_AUDIT_CRON` / `FACTORY_AUDIT_TZ` | `0 6 * * *` / host zone | when it runs |
+| `FACTORY_AUDIT_BUDGET_USD` | `10` | per-run `cost_usd` meter (audit + fix jobs) |
+| `FACTORY_AUDIT_FIX_RESERVE_USD` | `1.5` | what an unfinished fix job counts against the meter |
+| `FACTORY_AUDIT_MAX_AUTOFIXES` | `5` | per-run cap; can only be lowered |
+| `FACTORY_AUDIT_MAX_CHANGED_LINES` | `150` | per-PR cap; can only be lowered |
+| `FACTORY_AUDIT_FOREMAN` | `foreman:server` | where audit and fix jobs run |
+| `FACTORY_AUDIT_REPO_DIR` | `/home/price/temp/factory` | clone scanned READ-ONLY for worktrees (`-` disables) |
+| `FACTORY_AUDIT_WORKTREE_ROOT` | `/home/price/work` | only worktrees under it may be cleaned |
+| `FACTORY_AUDIT_REPO_URL` | `git@github.com:pricec/factory.git` | fetched into `<data>/auditor/mirror.git` for the diff check |
+
+Preview a run without side effects:
+`factory audit -data /var/lib/factory -dry-run`.
+
+Raising the hard caps (5 auto-fixes, 150 lines) or editing the denylist is
+a code change in `internal/auditor`, which auto-fixes can never touch.
+

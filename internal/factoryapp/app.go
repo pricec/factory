@@ -21,6 +21,7 @@ import (
 
 	"github.com/pricec/factory/internal/claudecli"
 
+	"github.com/pricec/factory/internal/auditor"
 	"github.com/pricec/factory/internal/auth"
 	"github.com/pricec/factory/internal/budgets"
 	"github.com/pricec/factory/internal/inbox"
@@ -68,6 +69,10 @@ type Config struct {
 	// (spec §6.11, mergequeue.go); empty -> FACTORY_MERGE_FOREMAN, then
 	// foreman:server.
 	MergeForeman string
+	// Audit configures the daily factory auditor (spec §6.12, auditor.go);
+	// nil disables it (cmd/factory passes auditor.LoadConfig of the
+	// FACTORY_AUDIT_* env).
+	Audit *auditor.Config
 }
 
 // App is the wired factory controller.
@@ -120,6 +125,9 @@ type App struct {
 	mergeMu      sync.Mutex
 	mergeKick    chan struct{}
 	mergeForeman string
+
+	// audit is the factory auditor (spec §6.12, auditor.go).
+	audit *auditRuntime
 }
 
 // New opens the three sqlite stores under cfg.DataDir, wires every
@@ -278,6 +286,7 @@ func New(cfg Config) (*App, error) {
 	a.initUsage(cfg)
 	a.initTasks()
 	a.initThrottle(cfg)
+	a.initAuditor(cfg)
 	a.handler = buildMux(a, mcpH)
 	return a, nil
 }
@@ -307,6 +316,9 @@ func (a *App) Auth() *auth.Store     { return a.auth }
 // factory:main consumer, the dispatch notifier, the long-pending alert,
 // and the merge queue. It blocks until ctx is done.
 func (a *App) Run(ctx context.Context) error {
+	if err := a.EnsureAuditSchedule(ctx); err != nil {
+		log.Printf("factoryapp: auditor: schedule: %v", err)
+	}
 	var wg sync.WaitGroup
 	run := func(name string, fn func() error) {
 		wg.Add(1)
@@ -363,6 +375,8 @@ func (a *App) onTerminal(jobID, finalState string) {
 	// A merge job's terminal transition closes its merge request and
 	// releases the queue (spec §6.11).
 	a.finishMerge(ctx, jobID, finalState)
+	// Audit runs and their fix jobs (spec §6.12, auditor.go).
+	a.auditTerminal(ctx, jobID, finalState)
 	a.notifyOperatorJob(ctx, jobID)
 	job, ok, err := a.jobs.Get(ctx, jobID)
 	if err != nil || !ok {

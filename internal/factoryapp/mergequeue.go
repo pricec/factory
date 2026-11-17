@@ -120,7 +120,7 @@ func (a *App) MergeQueuePass(ctx context.Context) (string, error) {
 	}
 	mr.JobID, mr.State = jobID, jobs.MergeMerging
 	spec := jobs.MergeJobSpec(mr, jobID, a.mergeForeman)
-	if err := a.createMergeJob(ctx, spec); err != nil {
+	if err := a.createPinnedJob(ctx, spec); err != nil {
 		a.mergeNeedsAttention(ctx, mr.ID, "could not create merge job "+jobID+": "+err.Error())
 		return "", fmt.Errorf("create merge job for %s: %w", mr.ID, err)
 	}
@@ -136,11 +136,11 @@ func (a *App) MergeQueuePass(ctx context.Context) (string, error) {
 	return mr.ID, nil
 }
 
-// createMergeJob stores spec through the same gate and pin path as the
+// createPinnedJob stores spec through the same gate and pin path as the
 // scheduler (spec §6.7, §6.10): held when the usage throttle holds,
 // otherwise created and dispatched to the pinned foreman when it is
 // online (pending - and alerted on by the long-pending alert - when not).
-func (a *App) createMergeJob(ctx context.Context, spec wire.JobSpec) error {
+func (a *App) createPinnedJob(ctx context.Context, spec wire.JobSpec) error {
 	if hold, reason := a.jobs.Admit(ctx, spec, ""); hold {
 		return a.jobs.CreateHeld(ctx, spec, reason)
 	}

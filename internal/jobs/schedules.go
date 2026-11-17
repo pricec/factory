@@ -204,6 +204,10 @@ type Scheduler struct {
 	matcher registry.Matcher
 	// Tick is the Run-loop interval; default 1s.
 	Tick time.Duration
+	// Prepare, if set, may fill in a fired job before admission (the
+	// factory auditor writes its fire-time snapshot into the payload,
+	// spec §6.12). An error is logged and the template job runs as is.
+	Prepare func(ctx context.Context, sch Schedule, spec *wire.JobSpec) error
 }
 
 // NewScheduler creates a scheduler over store dispatching via matcher.
@@ -272,8 +276,16 @@ func (s *Scheduler) Pump(ctx context.Context) (int, error) {
 			continue
 		}
 		spec := sch.JobTemplate
-		spec.ID = wire.NewJobID()
+		specID := wire.NewJobID()
+		spec.ID = specID
 		spec.CreatedAt = runAt
+		if s.Prepare != nil {
+			if err := s.Prepare(ctx, sch, &spec); err != nil {
+				log.Printf("scheduler: schedule %s: prepare %s: %v (running the template as is)", sch.ID, spec.ID, err)
+				spec = sch.JobTemplate
+				spec.ID, spec.CreatedAt = specID, runAt
+			}
+		}
 		// Dispatch gate (S3 token throttle): a held scheduled job waits in
 		// the held queue for the releaser instead of dispatching now.
 		if hold, reason := s.store.Admit(ctx, spec, ""); hold {
