@@ -59,6 +59,10 @@ type stack struct {
 	// terminal-revocation assert in the happy path.
 	mu            sync.Mutex
 	workerBearers map[string]string
+	// harnessModels records the per-job model the spawner resolved
+	// (captured via the same override seam), for the model-override and
+	// settings-panel e2e scenarios.
+	harnessModels map[string]string
 
 	// happyJobID/happyTask carry scenario 1's finished job into the
 	// scenario 4 summary-view subtest.
@@ -74,7 +78,7 @@ type stack struct {
 func boot(t *testing.T) *stack {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &stack{t: t, ctx: ctx, cancel: cancel, workerBearers: map[string]string{}}
+	s := &stack{t: t, ctx: ctx, cancel: cancel, workerBearers: map[string]string{}, harnessModels: map[string]string{}}
 
 	s.factoryDataDir = t.TempDir()
 	fac, err := factoryapp.New(factoryapp.Config{
@@ -116,6 +120,9 @@ func boot(t *testing.T) *stack {
 		DataDir:      s.foremanDataDir,
 		Addr:         "127.0.0.1:0",
 		PairingToken: pairTok,
+		// Fast settings pulls so the SettingsPanel scenario does not
+		// wait a full 60s refresh (spec §6.5: production default 60s).
+		SettingsRefresh: 200 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("foremanapp.New: %v", err)
@@ -142,6 +149,9 @@ func boot(t *testing.T) *stack {
 			hook(spec)
 		}
 		c := orig(spec, bearer)
+		s.mu.Lock()
+		s.harnessModels[spec.ID] = c.Model
+		s.mu.Unlock()
 		c.OpenCODEBin = s.fakeOpencode
 		c.ResultURL = s.foremanSrv.URL + "/v1/inboxes/" + foremanInbox + "/messages"
 		c.MCPURL = s.foremanSrv.URL + "/v1/mcp/worker"
@@ -303,6 +313,14 @@ func (s *stack) workerBearer(jobID string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.workerBearers[jobID]
+}
+
+// harnessModel returns the model the spawner resolved for jobID (empty
+// until the foreman has consumed the job.request).
+func (s *stack) harnessModel(jobID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.harnessModels[jobID]
 }
 
 // waitFor polls cond every 50ms until it holds or the deadline lapses.

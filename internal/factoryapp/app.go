@@ -88,12 +88,21 @@ type App struct {
 	pending   *jobs.PendingPicker
 	matcher   *registry.CapabilityMatcher
 	planner   *PlannerBrain
-	wakes     *wakeDispatcher // per-task planner wakes (spec §9.5.2, tasks_wake.go)
-	reaper    *taskReaper     // idle-24h task auto-close (spec §9.5.2, tasks_reaper.go)
-	handler   http.Handler
-	usage     *usagewin.Tracker
-	usagePoll *usagewin.Poller // nil unless Usage.Poll
-	gate      *throttle.Gate   // S3 dispatch gate (throttle.go)
+
+	// Models listing cache (spec §6.9 GET /v1/models, models.go): one
+	// `opencode models` exec reused for modelsCacheTTL; single-flight via
+	// the mutex. modelsBin is the opencode binary - a test seam so no
+	// test ever shells out to a real opencode.
+	modelsMu        sync.Mutex
+	modelsCache     []models.ModelInfo
+	modelsFetchedAt time.Time
+	modelsBin       string
+	wakes           *wakeDispatcher // per-task planner wakes (spec §9.5.2, tasks_wake.go)
+	reaper          *taskReaper     // idle-24h task auto-close (spec §9.5.2, tasks_reaper.go)
+	handler         http.Handler
+	usage           *usagewin.Tracker
+	usagePoll       *usagewin.Poller // nil unless Usage.Poll
+	gate            *throttle.Gate   // S3 dispatch gate (throttle.go)
 	// S5 pause (pause.go): jobs that hit the limit (job id -> true), and
 	// test seams for the re-probe, jitter and wake poll interval.
 	limitHit    sync.Map
@@ -266,6 +275,10 @@ func New(cfg Config) (*App, error) {
 		MCPURL:  loopbackMCPURL(cfg.Addr) + "/v1/mcp/factory",
 		Bearer:  a.plannerTok,
 		WorkDir: filepath.Join(cfg.DataDir, "planner"),
+		// The settings panel's planner role (spec §6.5, 2026-11-15
+		// amendment): stored panel value > env > pinned default,
+		// resolved per session so a save applies to the next wake.
+		ModelFn: a.resolvePlannerModel,
 	}
 	a.planner.OnUsage = func(ctx context.Context, taskID string, u claudecli.Usage) {
 		ev := wire.UsageEvent{
@@ -273,7 +286,7 @@ func New(cfg Config) (*App, error) {
 			CacheCreate: u.CacheCreate, CacheRead: u.CacheRead, CostUSD: u.CostUSD, SessionID: u.SessionID, Limit: u.Limit, RateLimit: u.RateLimit,
 		}
 		if ev.Model == "" {
-			ev.Model = a.planner.Model
+			ev.Model = a.planner.currentModel()
 		}
 		if err := a.recordUsage(ctx, ev); err != nil {
 			log.Printf("factoryapp: record planner usage: %v", err)
@@ -298,6 +311,17 @@ func (a *App) PlannerToken() string { return a.plannerTok }
 // pattern of foremanapp, #9.3).
 func (a *App) SetPlannerExec(fn func(ctx context.Context, prompt string) (string, error)) {
 	a.planner.Exec = fn
+}
+
+// SetModelsBin is a test seam: it replaces the opencode binary the models
+// listing shells out to (spec §6.9 GET /v1/models), so no test ever
+// invokes a real opencode (the fake-binary pattern of test/e2e). It also
+// drops the cached listing.
+func (a *App) SetModelsBin(bin string) {
+	a.modelsMu.Lock()
+	defer a.modelsMu.Unlock()
+	a.modelsBin = bin
+	a.modelsCache, a.modelsFetchedAt = nil, time.Time{}
 }
 
 // AdvertiseURL returns the URL advertised to pairing children.
@@ -417,6 +441,13 @@ func buildMux(a *App, mcpH http.Handler) http.Handler {
 	a.mountAlertRoutes(mux)
 	mux.HandleFunc("POST /v1/jobs", a.handleCreateJob)
 	mux.HandleFunc("POST /v1/foremen/{id}/messages", a.handleMessageForeman)
+	// Model picker feed (spec §6.9, models.go): the UI's model pickers
+	// list what the host's opencode can run.
+	mux.HandleFunc("GET /v1/models", a.handleModels)
+	// Settings panel (spec §6.9, 2026-11-15 amendment, settings.go):
+	// role-default models, persisted here and pulled by foremen.
+	mux.HandleFunc("GET /v1/settings", a.handleGetSettings)
+	mux.HandleFunc("POST /v1/settings", a.handlePostSettings)
 	// Onboarding surfaces (#24): top-level, outside /v1. /install.sh is
 	// planner-authed; downloads are unauthenticated per spec §7.5.
 	mux.HandleFunc("GET /install.sh", a.handleInstall)

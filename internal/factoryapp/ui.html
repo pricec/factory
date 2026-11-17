@@ -470,6 +470,7 @@
     <button id="tab-jobs">Jobs</button>
     <button id="tab-merges">Merge queue</button>
     <button id="tab-inboxes">Inboxes</button>
+    <button id="tab-settings">Settings</button>
     <button id="to-phone" style="display:none">phone layout</button>
   </nav>
 </header>
@@ -562,6 +563,10 @@
           <div><label>priority 1-9</label><input id="job-priority" type="number" min="1" max="9" placeholder="5"></div>
         </div>
         <div class="row">
+          <div><label>model (overrides tier)</label><select id="job-model"><option value="">tier default — model from the tier above</option><option value="__custom__">custom…</option></select></div>
+          <div id="job-model-custom-wrap" style="display:none"><label>custom model id</label><input id="job-model-custom" list="model-list" placeholder="provider/model, e.g. ollama/qwen3:8b"></div>
+        </div>
+        <div class="row">
           <div><label>schedule (cron, optional)</label><input id="job-cron" placeholder="0 3 * * *"></div>
           <div><label>result schema (JSON, optional)</label><input id="job-schema" placeholder='{"type":"object"}'></div>
           <div><label>foreman (optional pin)</label><input id="job-foreman" placeholder="videochat or foreman:videochat"></div>
@@ -594,6 +599,17 @@
     </div>
     <div id="list"></div>
     <div id="detail" style="display:none"></div>
+  </div>
+  <div id="settingsview" style="display:none">
+    <form class="panel" id="settingsform">
+      <div class="toolbar" style="margin-bottom:4px">
+        <span>role-default models — pick a model per role (grouped by provider) or leave it at default; custom… for an unlisted id (e.g. a claude-* id, which runs via the Claude Code CLI). planner changes apply to the next planner session; worker &amp; brain changes reach foremen within ~60s. a per-host env override still applies when a role sits at default.</span>
+      </div>
+      <div id="settingsrows"></div>
+      <button type="submit">save settings</button>
+      <span class="result-note" id="settings-note"></span>
+    </form>
+    <datalist id="model-list"></datalist>
   </div>
 </main>
 <div id="phone">
@@ -1381,6 +1397,97 @@ async function renderInboxDetail(id) {
 
 /* ---------- create job form ---------- */
 
+// Model picker (spec §6.9 GET /v1/models): a real <select> per picker,
+// grouped by provider (openrouter, ollama, ...) - never a datalist,
+// whose dropdown several browsers do not render at all. "custom…" swaps
+// in free text for ids the list cannot see (a model pulled after page
+// load, a claude-* id run via the Claude Code CLI). Picking a model in
+// the create form overrides the tier's model - the tier select dims to
+// say so (it still sets the timeout ceiling).
+const CUSTOM_MODEL = "__custom__";
+let allModels = null;     // cached /v1/models listing
+let modelFetchError = ""; // set when the listing cannot be fetched
+let settingsRows = null;  // last-rendered settings state
+
+function modelGroups() {
+  const groups = {};
+  for (const m of allModels || []) (groups[m.provider] = groups[m.provider] || []).push(m);
+  return groups;
+}
+
+function isKnownModel(id) {
+  return (allModels || []).some(m => m.id === id);
+}
+
+// populateModelSelect fills one picker select: the default sentinel, the
+// custom… escape, every provider group from /v1/models, and - when the
+// current value is not in the list (a saved id, a #max variant or a
+// claude-* id the listing does not carry) - an explicit "(current)"
+// option so the select never silently resets a saved choice.
+function populateModelSelect(sel, defaultLabel, selected) {
+  if (!sel) return;
+  const opts = [
+    '<option value="">' + esc(defaultLabel) + "</option>",
+    '<option value="' + CUSTOM_MODEL + '">custom…</option>',
+  ];
+  if (modelFetchError) {
+    opts.push('<option value="" disabled>model list unavailable: ' + esc(modelFetchError) + "</option>");
+  }
+  if (selected && !isKnownModel(selected)) {
+    opts.push('<option value="' + esc(selected) + '">' + esc(selected) + " (current)</option>");
+  }
+  const groups = modelGroups();
+  for (const p of Object.keys(groups).sort()) {
+    opts.push('<optgroup label="' + esc(p) + " (" + groups[p].length + ')">' +
+      groups[p].map(m => '<option value="' + esc(m.id) + '">' + esc(m.model) + "</option>").join("") + "</optgroup>");
+  }
+  sel.innerHTML = opts.join("");
+  if (selected) sel.value = selected;
+}
+
+async function loadModels() {
+  let list;
+  try {
+    list = await getJSON("/v1/models");
+    modelFetchError = "";
+  } catch (e) {
+    list = [];
+    modelFetchError = e.message;
+  }
+  allModels = list || [];
+  // Free-text aid for the custom… inputs only (datalist support varies
+  // by browser; the selects are the reliable picker).
+  $("model-list").innerHTML = allModels.map(m => '<option value="' + esc(m.id) + '">').join("");
+  const keep = $("job-model").value;
+  populateModelSelect($("job-model"), "tier default — model from the tier above", keep === CUSTOM_MODEL ? "" : keep);
+  if (keep === CUSTOM_MODEL) $("job-model").value = CUSTOM_MODEL;
+  if (settingsRows) renderSettings(settingsRows); // re-render rows with the list
+  syncTier();
+}
+
+function jobModelValue() {
+  if ($("job-model").value === CUSTOM_MODEL) return $("job-model-custom").value.trim();
+  return $("job-model").value;
+}
+
+// syncTier marks the tier select when an explicit model is picked: the
+// model overrides the tier's model, but the tier still sets the job's
+// default timeout ceiling (spec §5.1 TierCeilingS), so it stays enabled
+// and is still sent.
+function syncTier() {
+  const picked = jobModelValue() !== "";
+  $("job-tier").style.opacity = picked ? "0.6" : "";
+  $("job-tier").title = picked ? "model ignored — the explicit model overrides it; the tier still sets the default timeout ceiling" : "";
+}
+
+$("job-model").onchange = () => {
+  const custom = $("job-model").value === CUSTOM_MODEL;
+  $("job-model-custom-wrap").style.display = custom ? "block" : "none";
+  if (custom) $("job-model-custom").focus();
+  syncTier();
+};
+$("job-model-custom").addEventListener("input", syncTier);
+
 $("createjob").onsubmit = async (ev) => {
   ev.preventDefault();
   const note = $("job-note");
@@ -1389,6 +1496,7 @@ $("createjob").onsubmit = async (ev) => {
   if ($("job-requires").value.trim()) body.requires = $("job-requires").value.split(",").map(s => s.trim()).filter(Boolean);
   if ($("job-secrets").value.trim()) body.secrets = $("job-secrets").value.split(",").map(s => s.trim()).filter(Boolean);
   if ($("job-tier").value) body.tier = $("job-tier").value;
+  if (jobModelValue()) body.model = jobModelValue();
   if ($("job-timeout").value) body.timeout_s = parseInt($("job-timeout").value, 10);
   if ($("job-priority").value) body.priority = parseInt($("job-priority").value, 10);
   if ($("job-cron").value.trim()) body.schedule_cron = $("job-cron").value.trim();
@@ -1677,17 +1785,87 @@ $("mq-form").onsubmit = async (ev) => {
   await loadMerges();
 };
 
+/* ---------- settings (role-default models) ---------- */
+
+// Role labels for the settings panel (spec §6.5): the managed roles and
+// what each one drives.
+const ROLE_LABELS = {
+  planner: "factory planner (task & chat sessions)",
+  foreman_brain: "foreman brain (job Q&A, spawn decisions)",
+  worker_flash: "worker tier “flash” — also the default for jobs with no model/tier",
+  worker_default: "worker tier “default” (max thinking)",
+  worker_hardest: "worker tier “hardest” (strongest)",
+};
+
+// renderSettings draws one picker row per role: a provider-grouped
+// select (the same component as the create form's picker) plus a
+// per-row custom… input. The default option names the pinned default
+// so "leave at default" is an explicit, visible choice. The select
+// mirrors the STORE, not the effective value: a default-sourced row sits
+// on the sentinel (saving keeps it cleared), a panel row shows its
+// stored model (or an explicit "(current)" option when the listing
+// cannot see it).
+function renderSettings(rows) {
+  settingsRows = rows || [];
+  $("settingsrows").innerHTML = settingsRows.map(r =>
+    '<div class="row"><div><label>' + esc(ROLE_LABELS[r.role] || r.role) +
+    ' <span class="badge' + (r.source === "panel" ? " hot" : "") + '" title="panel = saved here; default = pinned default, per role (a per-host env override also applies)">' + esc(r.source) + "</span></label>" +
+    '<select id="setting-' + esc(r.role) + '"></select>' +
+    '<input id="setting-' + esc(r.role) + '-custom" list="model-list" placeholder="provider/model, e.g. ollama/qwen3:8b" style="display:none;margin-top:6px">' +
+    "</div></div>"
+  ).join("");
+  for (const r of settingsRows) {
+    const sel = $("setting-" + r.role);
+    populateModelSelect(sel, "default — " + r.default_model, r.source === "panel" ? r.model : "");
+    sel.onchange = () => {
+      const input = $("setting-" + r.role + "-custom");
+      const custom = sel.value === CUSTOM_MODEL;
+      input.style.display = custom ? "block" : "none";
+      if (custom) input.focus();
+    };
+  }
+}
+
+async function loadSettings() {
+  let data;
+  try { data = await getJSON("/v1/settings"); }
+  catch (e) { $("settingsrows").innerHTML = '<div class="err">' + esc(e.message) + "</div>"; return; }
+  renderSettings(data.roles);
+  if (allModels === null || modelFetchError) loadModels();
+}
+
+$("settingsform").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const note = $("settings-note");
+  note.textContent = "";
+  const body = {};
+  for (const r of settingsRows || []) {
+    const sel = $("setting-" + r.role);
+    if (!sel) continue;
+    body[r.role] = sel.value === CUSTOM_MODEL
+      ? $("setting-" + r.role + "-custom").value.trim()
+      : sel.value;
+  }
+  try {
+    const data = await postJSON("/v1/settings", body);
+    renderSettings(data.roles);
+    note.style.color = "var(--ok)";
+    note.textContent = "saved — planner applies on the next session; workers & brains within ~60s";
+  } catch (e) { note.style.color = "var(--bad)"; note.textContent = e.message; }
+};
+
 /* ---------- tabs & tick ---------- */
 
-const loaders = { chat: loadChat, foremen: loadForemen, jobs: loadJobs, merges: loadMerges, inboxes: loadInboxes };
+const loaders = { chat: loadChat, foremen: loadForemen, jobs: loadJobs, merges: loadMerges, inboxes: loadInboxes, settings: loadSettings };
 function setTab(t) {
   tab = t;
-  for (const id of ["chat", "foremen", "jobs", "merges", "inboxes"]) {
+  for (const id of ["chat", "foremen", "jobs", "merges", "inboxes", "settings"]) {
     $("tab-" + id).classList.toggle("active", id === t);
   }
   $("chatview").style.display = t === "chat" ? "block" : "none";
   document.querySelector("main").classList.toggle("wide", t === "chat");
-  $("tableview").style.display = t === "chat" ? "none" : "block";
+  $("tableview").style.display = t === "chat" || t === "settings" ? "none" : "block";
+  $("settingsview").style.display = t === "settings" ? "block" : "none";
   $("createpanel").style.display = t === "jobs" ? "block" : "none";
   $("mergepanel").style.display = t === "merges" ? "block" : "none";
   $("state-filter").style.display = t === "jobs" ? "inline" : "none";
@@ -1695,7 +1873,7 @@ function setTab(t) {
   $("detail").style.display = "none";
   loaders[t]();
 }
-for (const id of ["chat", "foremen", "jobs", "merges", "inboxes"]) {
+for (const id of ["chat", "foremen", "jobs", "merges", "inboxes", "settings"]) {
   $("tab-" + id).onclick = () => setTab(id);
 }
 $("state-filter").onchange = () => loadJobs();
@@ -1744,6 +1922,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("adv").textContent = location.host;
   document.querySelector("main").classList.add("wide");
   loadSecrets();
+  loadModels(); // populate the create-form picker; never blocks the page
   loadUsage();
   setInterval(loadUsage, USAGE_POLL_MS);
   setInterval(renderUsage, 30000); // keep countdowns moving between polls
@@ -1755,7 +1934,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   setInterval(() => { if (isPhone()) pLoad(); else if (tab === "chat") loadChat(); }, 10000);
   setInterval(() => {
     if (isPhone()) return;
-    if (tab !== "chat") loaders[tab]();
+    // The settings form is never auto-refreshed: a re-render would wipe
+    // unsaved picks mid-edit (it reloads on tab switch and after save).
+    if (tab !== "chat" && tab !== "settings") loaders[tab]();
     $("refreshed").textContent = "refreshed " + new Date().toLocaleTimeString();
   }, 5000);
 });

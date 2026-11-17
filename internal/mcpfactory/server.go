@@ -91,7 +91,7 @@ func Handler(cfg Config) (http.Handler, error) {
 			"Work on the factory repo (pricec/factory or its worktrees) MUST pin foreman=foreman:server; " +
 			"an unpinned job that mentions it is rejected (factory_repo_needs_pin). " +
 			"tier: flash (cheapest, default), default (Flash max-thinking), hardest (strongest); " +
-			"pick the cheapest that works. " +
+			"pick the cheapest that works. model: explicit model id (provider/model or claude-*) overrides tier. " +
 			"When subscription usage is high the job may come back state=held with held_reason: " +
 			"it is queued and dispatches automatically (task priority 0 is never held); cancel_job works on it.",
 	}, createJobTool(cfg))

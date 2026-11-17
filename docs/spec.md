@@ -184,7 +184,9 @@ The two UI endpoints are unauthenticated like the §6.9 control plane (trusted-L
 posture, §7.5) and exist because no factory credential carries inbox-read
 scopes: the UI reads the store server-side instead. `GET /` serves the
 single-page operator UI (§9.5 conversational chat over `planner:main`, foremen
-list with `last_seen`, inbox listing, per-item detail views) over these
+list with `last_seen`, inbox listing, per-item detail views, the job create
+form with its per-job model picker and the role-default settings panel -
+2026-11-15 amendments) over these
 endpoints plus §6.9.
 
 `wait_seconds` 0-60 long-polls until non-empty (#1). Error responses use the
@@ -253,6 +255,7 @@ a different, fixed curve.)
   "secrets": ["github-push"],
   "foreman": "foreman:server",
   "tier": "flash",
+  "model": "",
   "timeout_s": 300,
   "priority": 5,
   "budget": {
@@ -268,6 +271,18 @@ a different, fixed curve.)
 Defaults shown; `priority` 1-9, 9 highest (#3). `tier` selects the
 worker's model tier (#28, #29): `flash` (or absent - the cost-biased
 default), `default`, or `hardest`; see §6.5.
+
+`model` (2026-11-15 amendment) is an optional explicit model id: an
+opencode `provider/model` id as `opencode run -m` accepts (e.g.
+`openrouter/z-ai/glm-5.3`, `ollama/qwen3:8b`), or a `claude-*` id that
+the worker harness routes to the Claude Code CLI (§8.4). When set it
+overrides the tier mapping (§6.5) at the worker harness; when absent the
+tier resolves the model as before (the tier still sets the default
+`timeout_s` ceiling either way). It rides the spec through every create
+path (`create_job` §9.4, `POST /v1/jobs`, schedules §6.8, the job create
+UI) and the `job.request` envelope. Validation: 1-128 printable ASCII
+characters, no whitespace (§11); availability is NOT validated at create
+time - model reachability is per host and enforced by the run itself.
 
 `foreman` (2026-11-16 foreman-pin amendment, §6.7) is the explicit
 routing pin: when set, the job runs on that foreman instead of the
@@ -516,6 +531,40 @@ Model strings reach the child via the generated config or its runner
 flags (§8.4; §9.4 for the planner's claude runner, where the model rides
 `--model`).
 
+Per-job model override (2026-11-15 amendment): a JobSpec's explicit
+`model` (§5.1) wins over the tier mapping at the worker harness - the
+operator (UI model picker) or the planner (`create_job`'s `model` arg)
+pins the exact model; tiers stay the no-`model` path and remain the
+cost-biased default dispatchers should prefer (#29). Model *discovery*
+for the picker: `GET /v1/models` (§6.9) runs `opencode models` on the
+factory host and lists every id that host's opencode reports
+(`{id, provider, model}`, provider-split, sorted) - openrouter,
+ollama/ollama-cloud, or any other configured provider. Claude Code CLI
+ids (`claude-*`) are not discoverable that way; the UI's `custom…` entry
+takes them. v1 assumes the fleet is homogeneous per the one-provider
+pinning above, so the factory host's listing stands in for the
+workers'; per-foreman aggregation is *Not pinned*.
+
+Role-default settings (2026-11-15 amendment): the operator manages the
+five role models above from the web UI's settings panel (§4.1),
+persisted on the factory in the jobs store's `settings` table
+(`{role PK, model, updated_at}`) and served at `GET/POST /v1/settings`
+(§6.9). Per-role precedence: stored panel setting > env var (the table
+above) > pinned default; an empty panel value clears the stored
+setting. Application: the factory re-resolves the planner model per
+session (panel changes apply to the next planner session, no restart;
+the runner follows the resolved model per §9.4); foremen pull the
+settings at startup and every 60s (mirroring the capabilities refresh
+cadence, §6.7) - worker and brain spawns follow within one interval,
+and jobs dispatched in the window run with the previous defaults. The
+pull applies panel-set roles and reverts cleared roles to the foreman's
+env-resolved seeds, so a foreman-side env override (e.g. the claude
+pins `install.sh` writes) still wins over the pinned default when no
+panel value is stored; the factory cannot see foreman-side env, so
+`GET /v1/settings` reports only `panel`/`default` sources and the UI
+says so. `Config.SettingsRefresh` (foreman) overrides the 60s interval
+as a test seam.
+
 Claude runner override (2026-11-16 amendment): a tier may also be pointed
 at a claude model through the SAME env override (`FACTORY_WORKER_*_MODEL`
 = a bare `claude-*` id, the bare `claude` alias, or
@@ -653,7 +702,10 @@ factory planner's list view carries summaries only (#7, #19).
 | Method & path | Notes |
 |---|---|
 | `GET /v1/jobs?state=&foreman=` | filter by state and foreman (#9) |
-| `POST /v1/jobs` | UI twin of the MCP `create_job` tool (§9.4): body `{task, requires[], secrets[]?, result_schema, tier, timeout_s, priority, schedule_cron, foreman?, task_id?}`; runs the same capability match (no match -> `pending`); `201 + {job_id, state, foreman}`. `requires` entries are tag names, validated at creation against the union of registered foremen tag keys (§6.7, 2026-11-15 amendment): unknown tag names -> `400 unknown_requires`; a loud `warnings` array rides the 201 when nothing could be validated (no foremen registered). `foreman` (2026-11-16 foreman-pin amendment, §6.7) pins the job to that foreman (bare or `foreman:{id}` form): the pin wins over the Matcher, requires validation is skipped (requires stay informational), an unknown foreman is `404 unknown_foreman` (the `POST /v1/foremen/{id}/messages` contract), and an offline pin leaves the job `pending` with a `warnings` entry until it returns |
+| `POST /v1/jobs` | UI twin of the MCP `create_job` tool (§9.4): body `{task, requires[], secrets[]?, result_schema, tier, model?, timeout_s, priority, schedule_cron, foreman?, task_id?}`; runs the same capability match (no match -> `pending`); `201 + {job_id, state, foreman}`. `requires` entries are tag names, validated at creation against the union of registered foremen tag keys (§6.7, 2026-11-15 amendment): unknown tag names -> `400 unknown_requires`; a loud `warnings` array rides the 201 when nothing could be validated (no foremen registered). `foreman` (2026-11-16 foreman-pin amendment, §6.7) pins the job to that foreman (bare or `foreman:{id}` form): the pin wins over the Matcher, requires validation is skipped (requires stay informational), an unknown foreman is `404 unknown_foreman` (the `POST /v1/foremen/{id}/messages` contract), and an offline pin leaves the job `pending` with a `warnings` entry until it returns |
+| `GET /v1/models` | UI model-picker feed (2026-11-15 amendment): runs `opencode models` on the factory host and returns `[{id, provider, model}]`, provider-split and sorted (§6.5); empty listing is `[]` and is NOT cached (empty is opencode's degraded mode when its background service is unreachable - the next request retries); non-empty listings cached 5 min (§11); exec failure is `500 internal`; unauthenticated like the rest of the control plane |
+| `GET /v1/settings` | settings panel (2026-11-15 amendment, §6.5): `{"roles": [{role, model, default_model, source}]}` for the five managed roles (`planner`, `foreman_brain`, `worker_flash`, `worker_default`, `worker_hardest`) in pinned order; `source` is `panel` (stored) or `default` (pinned; a per-host env override may still apply at spawn); unauthenticated |
+| `POST /v1/settings` | settings panel save (2026-11-15 amendment, §6.5): body is a role -> model map; a present key stores, `""` clears (back to env/default), an absent key is untouched; unknown roles and invalid models (§5.1 rules) are `400`; response is the updated state, same shape as GET; unauthenticated |
 | `POST /v1/foremen/{id}/messages` | UI twin of the MCP `message_foreman` tool (§9.4): body `{type, payload, job_id?}` posted from the planner identity; `201` + envelope. `{id}` accepts the bare foreman id or the full `foreman:{id}` form - both normalize to the same inbox (§7.3), never a double-prefixed one. `payload` is required (any JSON value; `{}` for an empty body); a null/missing payload is `400`. An id matching no registered foreman is `404 unknown_foreman` - posting never opens an inbox no foreman consumes (2026-11-14 amendment) |
 | `GET /v1/jobs/{id}/secrets` | Job secrets handout (2026-11-17 amendment, §13.2) - the ONLY surface that returns secret values: `200 {"secrets":[{"name","env_var","value"}]}`. Auth: the bearer must be a paired foreman credential (`401` missing/unknown, `403` planner/worker/other), the job row's `foreman_id` must equal that foreman (`403` otherwise - an unknown job is indistinguishable), the job must be `dispatched` or `running` (`409 job_not_live`), and only names in the spec's `secrets` are returned. A name since deleted from the store -> `404 unknown_secrets` (names only). Each successful handout writes `secret_grants` rows first (§13.2); a failed audit write hands out nothing (`500`). `Cache-Control: no-store` |
 | `GET /v1/jobs/{id}` | (#9) the job record; plus `granted_secrets` (names only, §13.2; omitted when none); plus `task_id` when the job is directly linked to a task (§9.5.2; 2026-11-16 deploy-18 follow-up - omitted when unlinked, a read never writes lineage links) |
@@ -1490,7 +1542,7 @@ token is a LOCAL foreman credential on the foreman's own auth store (the
 factory-paired bearer lives in the factory's store and cannot authenticate
 against the foreman's local endpoints); the foreman mints it at startup (#21).
 
-- Runner routing: the brain session model (`FACTORY_FOREMAN_BRAIN_MODEL`,
+- Runner routing: the brain session model (settings panel > `FACTORY_FOREMAN_BRAIN_MODEL`,
   §6.5) routes the child CLI with the §8.4 semantics exactly. A bare
   `claude-*` id (or the bare `claude` alias), optionally behind the
   `anthropic/` provider prefix, runs via the Claude Code CLI in
@@ -1563,7 +1615,7 @@ Tools (exact):
 - `list_jobs(state?, limit=50)` - `{jobs: [{id, state, summary, usage,
   over_budget}]}` (summaries only, per #7; record-wrapped per the
   `list_foremen` amendment).
-- `create_job(task, requires?, result_schema?, tier?, timeout_s?, priority?,
+- `create_job(task, requires?, result_schema?, tier?, model?, timeout_s?, priority?,
   schedule_cron?, foreman?)` - ad hoc dispatch via the Matcher interface;
   `requires`
   entries are capability tag names - accepted forms `os:linux`,
@@ -1578,7 +1630,8 @@ Tools (exact):
   the cheapest and the no-tier default; default -> GLM 5.3 Flash max-reasoning;
   hardest ->
   GLM 5.3) - bias towards the cheapest tier that can do the job (#29);
-  with `schedule_cron`, also creates a schedule via
+  `model` (2026-11-15 amendment, §5.1) pins an explicit model id and
+  overrides the tier; with `schedule_cron`, also creates a schedule via
   the #8 API (§6.8). Never refused on dollar spend (the usage gate is the only limit, §6.5). Optional `task_id` (inbox redesign
   S2, §9.5.2) files the job under a task (`task_jobs`), defaulting to the
   session's woken task; the link is written before dispatch, the result
@@ -1648,10 +1701,11 @@ routing (2026-11-16 planner-claude amendment, the §8.4 worker twin):
   OpenRouter key's credential path, not the Anthropic CLI's own auth) -
   runs via opencode (§8.4: `opencode.json` in the planner WorkDir,
   `--standalone`, `-m`, allow-all permissions, unchanged). The session
-  model resolves per session: `FACTORY_PLANNER_MODEL` > the §6.5 pinned
-  default (`claude-opus-5-5`), so the factory planner runs on the
-  claude runner out of the box and an env override to a non-claude
-  string flips the runner back without a restart.
+  model resolves per session: settings panel (2026-11-15 amendment,
+  §6.5) > `FACTORY_PLANNER_MODEL` > the §6.5 pinned default
+  (`claude-opus-5-5`), so the factory planner runs on the claude runner
+  out of the box and a panel/env override to a non-claude string flips
+  the runner back without a restart.
 - Claude Code invocation (flags per §8.4, verified against the
   installed CLI, 2.1.325): `claude -p [--model <model>] --mcp-config
   <claude-mcp.json> --strict-mcp-config --permission-mode
@@ -1736,7 +1790,7 @@ Planner loop (internal/factoryapp, twin of the consumer loop): drains
 `planner:main`; `chat.message`, `foreman.report`, `brain.failed` and a
 threaded, not self-initiated terminal `notify.job` wake the planner, ONE session per touched task with that task's thread as context
 (§9.5.2). A session is the §9.4 surface with the planner bearer and the model
-from `FACTORY_PLANNER_MODEL` (default per §6.5; the child CLI routes on the
+from the settings panel > `FACTORY_PLANNER_MODEL` (default per §6.5; the child CLI routes on the
 model: the Claude Code CLI for claude-* ids, opencode otherwise, §9.4).
 Per-payload 2KB caps apply (§6.6). The wake reason names the trigger:
 operator chat needs a reply; a foreman report must be relayed to the operator
@@ -2174,6 +2228,9 @@ outside the `result_schema` subset at validation time (#3).
 | MCP description budgets | worker < 1.5KB (2026-11-17 typed report_result schema; was 1KB); foreman < 2KB (2026-11-16 raise_alert; was 1.5KB); factory < 5KB (2026-11-17 job secrets; was 4.5KB after merge queue; 4KB, 2KB before 2026-11-16) | #17, #18, #19 |
 | JobSpec defaults | `timeout_s` 14400 (ceiling); `idle_timeout_s` 900; `priority` 5 (1-9, 9 highest); `budget` `{max_prompt_bytes 32768, max_output_tokens 8192, max_cost_usd 20.0}` | #3 |
 | Long-pending alert | `pending` with no matching online foreman for > 30 min -> one `notify.pending` in `planner:main` (dedupe per job per pending episode); check tick 1 min | 2026-11-15 amendment |
+| Explicit model string | optional; 1-128 printable ASCII chars, no whitespace; overrides the tier mapping | 2026-11-15 amendment |
+| Models listing cache | `GET /v1/models` re-execs `opencode models` at most every 5 min (non-empty listings only); one exec bounded at 10s | 2026-11-15 amendment |
+| Settings pull interval | foremen re-read `GET /v1/settings` at startup and every 60s (fetch bounded at 10s) | 2026-11-15 amendment |
 | Merge queue | one `merging` at a time; tick 5s + kicks; merge job tier `hardest`, `timeout_s` 7200, `idle_timeout_s` 1800, priority 3, pinned `foreman:server` (`FACTORY_MERGE_FOREMAN`), never retried; needs_attention alert P1 source `factory:merge_queue` | 2026-11-17 amendment, §6.11 |
 | Foreman orphan recovery | startup pass before any loop; listing 1000 rows per owner spelling; 5 attempts, 2s apart; orphan result kind `crash` | 2026-11-16 orphan-recovery amendment, §8.7 |
 

@@ -59,6 +59,13 @@ const (
 type PlannerBrain struct {
 	// Model is the child CLI model string; "" -> the CLI's default.
 	Model string
+	// ModelFn, when set, resolves the model per session - the settings
+	// panel's live override path (spec §6.5, 2026-11-15 amendment):
+	// ModelFn wins over the static Model field so panel changes apply to
+	// the next session without a restart. nil -> the static Model field.
+	// It is read once per session (session/forTask) so the runner route
+	// and the model the child runs can never disagree mid-session.
+	ModelFn func() string
 	// ClaudeBin is the Claude Code CLI binary; "" means "claude" on
 	// PATH. Used only by sessions routed to the claude runner (§9.4).
 	ClaudeBin string
@@ -85,12 +92,31 @@ type PlannerBrain struct {
 // caller to surface to the operator - the brain never panics.
 func (b *PlannerBrain) Handle(ctx context.Context, reason string, history, envs []wire.MessageEnvelope) error {
 	prompt := llmctx.BuildWakePrompt(reason, append(history, envs...))
-	stdout, err := b.exec()(ctx, prompt)
+	stdout, err := b.session().exec()(ctx, prompt)
 	if err != nil {
 		return fmt.Errorf("planner session for %d envelope(s): %w", len(envs), err)
 	}
 	log.Printf("factoryapp: planner handled %d envelope(s); stdout: %s", len(envs), snippet(stdout))
 	return nil
+}
+
+// currentModel resolves the session model: ModelFn when wired (the
+// settings panel path), else the static Model field.
+func (b *PlannerBrain) currentModel() string {
+	if b.ModelFn != nil {
+		return b.ModelFn()
+	}
+	return b.Model
+}
+
+// session returns a copy of b with the model resolved once for one
+// session (spec §6.5): every later read of Model in the runner sees the
+// same value.
+func (b *PlannerBrain) session() *PlannerBrain {
+	c := *b
+	c.Model = b.currentModel()
+	c.ModelFn = nil
+	return &c
 }
 
 // exec returns the session runner: Exec when set (tests), else the child
@@ -159,7 +185,7 @@ func (b *PlannerBrain) HandleTask(ctx context.Context, w PlannerWake) error {
 // forTask returns a copy of b bound to taskID: MCP URL with the task
 // query, per-task work dir.
 func (b *PlannerBrain) forTask(taskID string) *PlannerBrain {
-	c := *b
+	c := *b.session()
 	c.taskID = taskID
 	c.MCPURL = plannerTaskURL(b.MCPURL, taskID)
 	c.WorkDir = filepath.Join(filepath.Dir(filepath.Clean(b.WorkDir)), "planner-tasks", taskID)

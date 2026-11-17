@@ -45,6 +45,11 @@ const (
 // Tiers is every allowed tier value (§5.1).
 var Tiers = []string{TierFlash, TierDefault, TierHardest}
 
+// MaxModelLen caps an explicit model string (§5.1, 2026-11-15
+// amendment): it rides argv, JSON, and logs as one opaque token, so it
+// stays short.
+const MaxModelLen = 128
+
 // tierCeilingS is the per-tier timeout_s ceiling applied by Normalize when
 // a spec leaves timeout_s unset (zero) and names a tier.
 var tierCeilingS = map[string]int{
@@ -100,6 +105,12 @@ type JobSpec struct {
 	// capability-matched.
 	Foreman string `json:"foreman,omitempty"`
 	Tier    string `json:"tier,omitempty"`
+	// Model is the explicit per-job model (§5.1, 2026-11-15
+	// amendment): when set it overrides the tier mapping on the foreman
+	// (§6.5) - the operator's UI/MCP pick is exactly what runs. Any id
+	// the worker CLIs accept (opencode "provider/model", or claude-*
+	// routed to the Claude Code CLI, §8.4).
+	Model string `json:"model,omitempty"`
 	// TimeoutS is the hard wall-clock ceiling in seconds; the job is killed
 	// (reason=ceiling) when it passes even if it is still producing output.
 	TimeoutS int `json:"timeout_s"`
@@ -224,6 +235,9 @@ func (s *JobSpec) validate(requireID bool) error {
 	default:
 		return fmt.Errorf("tier: must be one of %v, got %q", Tiers, s.Tier)
 	}
+	if err := ValidateModelID(s.Model); err != nil {
+		return fmt.Errorf("model: %w", err)
+	}
 	if s.Budget.MaxPromptBytes <= 0 || s.Budget.MaxOutputTokens <= 0 || s.Budget.MaxCostUSD <= 0 {
 		return fmt.Errorf("budget: fields must be > 0, got %+v", s.Budget)
 	}
@@ -233,6 +247,26 @@ func (s *JobSpec) validate(requireID bool) error {
 	if len(s.ResultSchema) > 0 {
 		if err := ValidateSchema(s.ResultSchema); err != nil {
 			return fmt.Errorf("result_schema: %w", err)
+		}
+	}
+	return nil
+}
+
+// ValidateModelID checks an explicit model string (§5.1, 2026-11-15
+// amendment): empty is allowed (the tier resolves the model, §6.5);
+// otherwise 1-MaxModelLen printable ASCII characters with no whitespace.
+// The string passes through argv, JSON envelopes, and logs as one opaque
+// token, so anything unprintable is rejected at validation time.
+func ValidateModelID(model string) error {
+	if model == "" {
+		return nil
+	}
+	if len(model) > MaxModelLen {
+		return fmt.Errorf("must be at most %d chars, got %d", MaxModelLen, len(model))
+	}
+	for i := 0; i < len(model); i++ {
+		if model[i] < 0x21 || model[i] > 0x7e { // printable ASCII, no space
+			return fmt.Errorf("must be printable ASCII without whitespace, got %q", model)
 		}
 	}
 	return nil

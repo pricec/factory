@@ -144,6 +144,9 @@ CREATE INDEX IF NOT EXISTS idx_secret_grants_job ON secret_grants(job_id);
 	if _, err := db.Exec(mergeDDL); err != nil {
 		return err
 	}
+	if _, err := db.Exec(settingsDDL); err != nil {
+		return err
+	}
 	_, err := db.Exec(usageDDL)
 	return err
 }

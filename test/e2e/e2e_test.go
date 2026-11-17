@@ -18,6 +18,7 @@ import (
 
 	"github.com/pricec/factory/internal/auth"
 	"github.com/pricec/factory/internal/jobs"
+	"github.com/pricec/factory/internal/models"
 	"github.com/pricec/factory/internal/wire"
 )
 
@@ -42,6 +43,8 @@ func TestE2E(t *testing.T) {
 	t.Run("QuestionLoop", func(t *testing.T) { testQuestionLoop(t, s) })
 	t.Run("DeadLetter", func(t *testing.T) { testDeadLetter(t, s) })
 	t.Run("CancelAPI", func(t *testing.T) { testCancelAPI(t, s) })
+	t.Run("ModelOverride", func(t *testing.T) { testModelOverride(t, s) })
+	t.Run("SettingsPanel", func(t *testing.T) { testSettingsPanel(t, s) })
 	t.Run("SummaryView", func(t *testing.T) { testSummaryView(t, s) })
 	t.Run("MergeQueue", func(t *testing.T) { testMergeQueue(t, s) })
 }
@@ -513,5 +516,137 @@ func testSummaryView(t *testing.T, s *stack) {
 	}
 	if specOut.Task != s.happyTask {
 		t.Errorf("read_result spec.Task = %q, want %q", specOut.Task, s.happyTask)
+	}
+}
+
+// testModelOverride: an explicit model rides the whole chain over the
+// public surfaces - create (both the MCP create_job tool and its POST
+// /v1/jobs UI twin) -> dispatch notifier -> foreman spawner -> the
+// harness config the worker runs with - and overrides the tier mapping
+// there (spec §5.1, §6.5, 2026-11-15 amendments). Jobs are pinned to the
+// real foreman: DeadLetter pairs a synthetic foreman:bravo that stays
+// online, and the least-loaded Matcher would otherwise hand it a job
+// whenever alpha still counts one as running.
+func testModelOverride(t *testing.T, s *stack) {
+	// MCP path: an explicit ollama model on a tier:"hardest" job - the
+	// model must win over the tier's pinned GLM default.
+	sc := s.callTool(s.factoryMCP(), s.factory.PlannerToken(), "create_job", map[string]any{
+		"task": "e2e model override via mcp", "tier": "hardest", "model": "ollama/qwen3:8b",
+		"foreman": foremanInbox,
+	})
+	mcpJobID, _ := sc["job_id"].(string)
+	if !strings.HasPrefix(mcpJobID, "job_") {
+		t.Fatalf("create_job job_id = %v, want job_-prefixed", sc["job_id"])
+	}
+	if sc["state"] != "dispatched" {
+		t.Fatalf("create_job state = %v, want dispatched", sc["state"])
+	}
+	var job jobs.Job
+	waitFor(t, "foreman spawned the mcp job", 5*time.Second, func() bool {
+		_ = s.do("GET", "/v1/jobs/"+mcpJobID, "", nil, &job)
+		return s.harnessModel(mcpJobID) != ""
+	})
+	if got := s.harnessModel(mcpJobID); got != "ollama/qwen3:8b" {
+		t.Errorf("harness model = %q, want the explicit %q (tier mapping must not win)", got, "ollama/qwen3:8b")
+	}
+	if job.Spec.Model != "ollama/qwen3:8b" || job.Spec.Tier != "hardest" {
+		t.Errorf("stored spec = model %q tier %q, want model ollama/qwen3:8b tier hardest", job.Spec.Model, job.Spec.Tier)
+	}
+
+	// UI twin: POST /v1/jobs with a bare model (no tier) dispatches the
+	// same way.
+	var created struct {
+		JobID string `json:"job_id"`
+		State string `json:"state"`
+	}
+	if st := s.do("POST", "/v1/jobs", "", map[string]any{
+		"task": "e2e model override via ui", "model": "openrouter/z-ai/glm-4.7-flash",
+		"foreman": foremanInbox,
+	}, &created); st != http.StatusCreated {
+		t.Fatalf("POST /v1/jobs status = %d, want 201", st)
+	}
+	waitFor(t, "foreman spawned the ui job", 5*time.Second, func() bool {
+		return s.harnessModel(created.JobID) != ""
+	})
+	if got := s.harnessModel(created.JobID); got != "openrouter/z-ai/glm-4.7-flash" {
+		t.Errorf("harness model = %q, want the explicit %q", got, "openrouter/z-ai/glm-4.7-flash")
+	}
+}
+
+// testSettingsPanel: the role-default settings survive over the public
+// surfaces end to end - POST /v1/settings stores them, the foreman's
+// pull applies them (within its refresh interval) so no-model jobs spawn
+// with the panel's default, and clearing reverts to the pinned default
+// (spec §6.5, §6.9, 2026-11-15 amendments). The BuildHarnessConfig
+// seam doubles as the observation point: probe it until the pull has
+// landed, then create the job - no dispatch race.
+func testSettingsPanel(t *testing.T, s *stack) {
+	// Sanity: the default view is all pinned defaults.
+	var view struct {
+		Roles []struct {
+			Role         string `json:"role"`
+			Model        string `json:"model"`
+			DefaultModel string `json:"default_model"`
+			Source       string `json:"source"`
+		} `json:"roles"`
+	}
+	if st := s.do("GET", "/v1/settings", "", nil, &view); st != http.StatusOK {
+		t.Fatalf("GET /v1/settings status = %d, want 200", st)
+	}
+	for _, r := range view.Roles {
+		if r.Role == "worker_flash" && (r.Source != "default" || r.Model != r.DefaultModel) {
+			t.Fatalf("initial worker_flash = %+v, want the pinned default", r)
+		}
+	}
+
+	// The harness-config seam observes the foreman's current tier
+	// resolution (the same seam the harnessModels capture rides).
+	probe := wire.NewJobSpec("settings probe", "e2e")
+	resolvedFlash := func() string {
+		return s.foreman.BuildHarnessConfig(probe, "bearer").Model
+	}
+
+	// Save a flash default via the panel's save path; wait until the
+	// foreman's pull has applied it, then spawn a no-model, no-tier job.
+	const panelModel = "ollama/gemma3:4b"
+	if st := s.do("POST", "/v1/settings", "", map[string]string{"worker_flash": panelModel}, &view); st != http.StatusOK {
+		t.Fatalf("POST /v1/settings status = %d, want 200", st)
+	}
+	waitFor(t, "foreman applied the panel default", 5*time.Second, func() bool {
+		return resolvedFlash() == panelModel
+	})
+	var created struct {
+		JobID string `json:"job_id"`
+	}
+	if st := s.do("POST", "/v1/jobs", "", map[string]any{"task": "e2e settings panel default", "foreman": foremanInbox}, &created); st != http.StatusCreated {
+		t.Fatalf("POST /v1/jobs status = %d, want 201", st)
+	}
+	waitFor(t, "foreman spawned the settings job", 5*time.Second, func() bool {
+		return s.harnessModel(created.JobID) != ""
+	})
+	if got := s.harnessModel(created.JobID); got != panelModel {
+		t.Errorf("no-model job harness model = %q, want the panel default %q", got, panelModel)
+	}
+
+	// Clearing reverts to the pinned default on the next pull.
+	if st := s.do("POST", "/v1/settings", "", map[string]string{"worker_flash": ""}, &view); st != http.StatusOK {
+		t.Fatalf("POST /v1/settings clear status = %d, want 200", st)
+	}
+	for _, r := range view.Roles {
+		if r.Role == "worker_flash" && r.Source != "default" {
+			t.Fatalf("cleared worker_flash = %+v, want source default", r)
+		}
+	}
+	waitFor(t, "pinned default restored", 5*time.Second, func() bool {
+		return resolvedFlash() == models.WorkerFlash
+	})
+	if st := s.do("POST", "/v1/jobs", "", map[string]any{"task": "e2e settings panel cleared", "foreman": foremanInbox}, &created); st != http.StatusCreated {
+		t.Fatalf("POST /v1/jobs (cleared) status = %d, want 201", st)
+	}
+	waitFor(t, "foreman spawned the cleared-defaults job", 5*time.Second, func() bool {
+		return s.harnessModel(created.JobID) != ""
+	})
+	if got := s.harnessModel(created.JobID); got != models.WorkerFlash {
+		t.Errorf("cleared-default job harness model = %q, want the pinned default %q", got, models.WorkerFlash)
 	}
 }

@@ -63,6 +63,27 @@ func TestModelTieringDefaults(t *testing.T) {
 			}
 		})
 	}
+
+	// Explicit model pass-through (spec §5.1, 2026-11-15 amendment): a
+	// job's model overrides the tier mapping, whatever the tier says -
+	// the operator's UI/MCP pick is exactly what runs.
+	for _, tc := range []struct {
+		tier  string
+		model string
+	}{
+		{"", "ollama/qwen3:8b"},
+		{wire.TierFlash, "ollama/gemma3:4b"},
+		{wire.TierDefault, "openrouter/z-ai/glm-5.3-flash#max"},
+		{wire.TierHardest, "openrouter/z-ai/glm-5.3"},
+	} {
+		spec := wire.NewJobSpec("do the thing", "test")
+		spec.Tier = tc.tier
+		spec.Model = tc.model
+		cfg := a.BuildHarnessConfig(spec, "bearer")
+		if cfg.Model != tc.model {
+			t.Errorf("tier %q model %q: harness model = %q, want the explicit %q", tc.tier, tc.model, cfg.Model, tc.model)
+		}
+	}
 }
 
 // TestModelTieringClaudeOverride: a claude-* model override rides the

@@ -34,6 +34,20 @@ func TestUIShell(t *testing.T) {
 			t.Errorf("UI page missing %q (got %d bytes)", want, len(body))
 		}
 	}
+	// The create-job form's model picker (spec §6.9): the select the UI
+	// populates from GET /v1/models, plus its free-text custom escape.
+	for _, want := range []string{`id="job-model"`, `id="job-model-custom"`} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("UI page missing the model picker markup %q", want)
+		}
+	}
+	// The settings panel (spec §6.9, 2026-11-15 amendment): the tab, the
+	// save form, and the datalist feeding its inputs.
+	for _, want := range []string{`id="tab-settings"`, `id="settingsform"`, `id="model-list"`} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("UI page missing the settings panel markup %q", want)
+		}
+	}
 }
 
 // inboxSummary mirrors the GET /v1/inboxes row (spec §4.1).

@@ -67,6 +67,10 @@ type Config struct {
 	// WorkerHardestModel is the model for `tier: "hardest"` jobs (spec
 	// §5.1, §6.5); "" -> the pinned GLM 5.3 default.
 	WorkerHardestModel string
+	// SettingsRefresh is the role-model settings pull interval (spec
+	// §6.5, 2026-11-15 amendment, settings.go); 0/negative -> 60s. A
+	// test seam.
+	SettingsRefresh time.Duration
 	// Now is the clock; nil -> real UTC time.
 	Now func() time.Time
 	// ProcRoot is the process table the startup orphan probe reads (spec
@@ -100,6 +104,9 @@ type App struct {
 	brain  *BrainRunner
 	poster *Poster
 	client *notify.Client
+	// modelCfg is the settings-synced role-model resolution (spec §6.5,
+	// settings.go): brain + worker tiers.
+	modelCfg *modelConfig
 	// brainInboxID is the foreman's local durable brain queue (spec §3.3,
 	// 2026-11-15 amendment): the sub-inbox "<inboxID>:brain" on the same
 	// inbox store. Brain-delegated envelopes are enqueued here and acked
@@ -285,8 +292,20 @@ func New(cfg Config) (*App, error) {
 	// project config discovered from the working dir, so it must not sit
 	// in DataDir itself, which is an ancestor of every worker job dir
 	// (ancestor configs would leak into worker sessions).
+	// The model config holder (spec §6.5, 2026-11-15 amendment) seeds
+	// from the env-resolved cfg and is updated by the settings pull
+	// (settings.go) - the brain resolves its model per session via
+	// ModelFn and the spawner per job, so panel changes apply without a
+	// restart. Precedence per role: panel > env > pinned default.
+	a.modelCfg = newModelConfig(modelValues{
+		brain:    cfg.BrainModel,
+		flash:    cfg.WorkerFlashModel,
+		standard: cfg.WorkerModel,
+		hardest:  cfg.WorkerHardestModel,
+	})
 	a.brain = &BrainRunner{
 		Model:   cfg.BrainModel,
+		ModelFn: a.modelCfg.Brain,
 		MCPURL:  localBaseURL(cfg.Addr) + "/v1/mcp/foreman",
 		Bearer:  a.brainToken,
 		WorkDir: filepath.Join(cfg.DataDir, "brain"),
@@ -298,7 +317,7 @@ func New(cfg Config) (*App, error) {
 			CacheCreate: u.CacheCreate, CacheRead: u.CacheRead, CostUSD: u.CostUSD, SessionID: u.SessionID, Limit: u.Limit, RateLimit: u.RateLimit,
 		}
 		if ev.Model == "" {
-			ev.Model = cfg.BrainModel
+			ev.Model = a.modelCfg.Brain()
 		}
 		payload, err := json.Marshal(ev)
 		if err != nil {
@@ -417,7 +436,8 @@ func (a *App) BrainInboxID() string { return a.brainInboxID }
 
 // Run runs the background loops: the remote inbox client, the local inbox
 // consumer, the brain queue drain, the parent forwarder, and the
-// capabilities refresh (startup push + 60s ticker). It blocks until ctx is
+// capabilities refresh (startup push + 60s ticker), and the role-model
+// settings pull (startup + 60s, settings.go). It blocks until ctx is
 // done. v1 fails fast: a definitive remote-loop error is logged and the
 // loop ends.
 func (a *App) Run(ctx context.Context) error {
@@ -433,7 +453,7 @@ func (a *App) Run(ctx context.Context) error {
 		log.Printf("foremanapp: initial capabilities push: %v", err)
 	}
 	var wg sync.WaitGroup
-	wg.Add(6)
+	wg.Add(7)
 	go func() {
 		defer wg.Done()
 		a.updater.Run(ctx)
@@ -459,6 +479,10 @@ func (a *App) Run(ctx context.Context) error {
 	go func() {
 		defer wg.Done()
 		a.parentLoop(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		a.settingsLoop(ctx)
 	}()
 	wg.Wait()
 	return nil
