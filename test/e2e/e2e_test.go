@@ -43,6 +43,7 @@ func TestE2E(t *testing.T) {
 	t.Run("DeadLetter", func(t *testing.T) { testDeadLetter(t, s) })
 	t.Run("CancelAPI", func(t *testing.T) { testCancelAPI(t, s) })
 	t.Run("SummaryView", func(t *testing.T) { testSummaryView(t, s) })
+	t.Run("MergeQueue", func(t *testing.T) { testMergeQueue(t, s) })
 }
 
 // testHappyPath: create a job via the planner MCP create_job, let the real

@@ -46,6 +46,9 @@ type Config struct {
 	// and returns a func that withdraws the mark if the cancel fails; the
 	// factory uses it so the planner's own cancels do not wake it.
 	MarkSelfCancel func(jobID string) (undo func())
+	// MergeQueued, when set, is called after request_merge queues a merge
+	// request (the factory kicks its merge-queue loop, spec §6.11).
+	MergeQueued func()
 }
 
 // Handler builds the factory planner MCP endpoint (spec §9.4): the five-tool
@@ -102,6 +105,7 @@ func Handler(cfg Config) (http.Handler, error) {
 	addTaskTools(srv, cfg) // spec §9.5.2 (tasks_tools.go)
 
 	addRaiseAlertTool(srv, cfg)
+	addRequestMergeTool(srv, cfg) // spec §6.11 merge queue (merge_tool.go)
 
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})

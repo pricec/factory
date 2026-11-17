@@ -180,7 +180,7 @@ const closedByOperatorReason = "planner: the operator closed this task (see the 
 const (
 	reasonChat   = "planner: new chat from the operator on this task needs a reply"
 	reasonReport = "planner: foreman reports arrived on this task; tell the operator what they need and act on them"
-	reasonJob    = "planner: a job on this task reached a terminal state (done/failed/dead/cancelled): tell the operator the outcome in plain words, then take the next step (e.g. dispatch the follow-up, or ask for approval to merge/deploy)"
+	reasonJob    = "planner: a job on this task reached a terminal state (done/failed/dead/cancelled): tell the operator the outcome in plain words, then take the next step (e.g. dispatch the follow-up, or ask for approval to merge/deploy - an approved merge is a request_merge call, never a prose job)"
 )
 
 // wakeReason names why a task session wakes, from the batch's envelope types.

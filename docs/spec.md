@@ -413,6 +413,11 @@ payload and `GET /v1/jobs/{id}`.
 - Retries re-dispatch the SAME job id - never a new one.
 - Dead-letter API: `GET /v1/deadletter` (job + `last_error` + results);
   `POST /v1/deadletter/{id}/requeue` (resets attempts, state `pending`).
+  A merge job (§6.11) is refused `409 merge_job`: it is never re-run
+  outside the merge queue (2026-11-17 amendment).
+- Merge jobs (§6.11, 2026-11-17 amendment) never retry: a failed merge job
+  goes straight to `dead`, whatever its `error.kind` - a re-run could merge
+  or deploy twice.
 
 ### 6.5 Budget enforcement & spend breaker (#13)
 
@@ -614,6 +619,10 @@ factory planner's list view carries summaries only (#7, #19).
 | `GET /v1/jobs/{id}` | (#9) the job record; plus `task_id` when the job is directly linked to a task (§9.5.2; 2026-11-16 deploy-18 follow-up - omitted when unlinked, a read never writes lineage links) |
 | `POST /v1/jobs/{id}/cancel` | Cancel/supersede a job (2026-11-15 amendment, §6.1): optional body `{reason?, terminal_state?}` with `terminal_state` = `cancelled` (default) \| `superseded`; an empty body is a plain cancel. Every non-terminal state moves to that terminal state; every terminal job is rejected `409 already_terminal`; unknown job `404`; malformed body `400`. `200` + the refreshed job record. UI twin of the MCP `cancel_job` tool (§9.4) |
 | `GET /v1/foremen` | returns `id, online, capabilities` (#9) |
+| `POST /v1/merge-requests` | Queue a merge (2026-11-17 amendment, §6.11): body `{branch, head, repo?, note?}`; `201` + the request in state `queued`, `requested_by` `operator`. `400 bad_request` on invalid input; `409 duplicate_request` when the same repo+branch already has a queued or merging request |
+| `GET /v1/merge-requests?limit=` | `200 {paused, paused_changed_at?, requests: [...]}`: the persisted pause flag plus the newest `limit` (default 200, 1-1000) requests ordered **oldest first** (§6.11) |
+| `POST /v1/merge-requests/{id}/cancel` | optional body `{reason?}`; queued or merging -> `cancelled` (a merging request's merge job is cancelled first, §6.11); `200` + the request; `404 not_found`; `409 already_terminal` |
+| `POST /v1/merge-requests/pause`, `POST /v1/merge-requests/resume` | set / clear the persisted pause flag (§6.11); `200` + the `GET` view |
 | `GET /v1/deadletter` | job + `last_error` + results (#10) |
 | `POST /v1/deadletter/{id}/requeue` | resets attempts, state `pending` (#10) |
 | `POST /v1/schedules` | (#8) |
@@ -635,6 +644,76 @@ factory planner's list view carries summaries only (#7, #19).
 | `POST /v1/pairing-tokens` | planner-credential auth (v1: the planner token doubles as the operator credential); issues a one-time pairing token, `200 {pairing_token, expires_at}` (#23) |
 
 Request/response shapes and status codes beyond those shown are not pinned.
+
+### 6.11 Merge queue (2026-11-17 amendment)
+
+(§6.10 is reserved: code cites it for the token-throttle dispatch gate,
+which this document does not transcribe yet.)
+
+Merges into `master` (and the deploy that follows) go through ONE
+factory-tracked queue, one merge at a time. Ad-hoc "merge and deploy" prose
+jobs are retired: the planner files `request_merge` (§9.4), the operator
+uses the UI or `POST /v1/merge-requests` (§6.9).
+
+- **Resource** (`jobs.db`): `merge_requests(id 'mr_<ulid>' PK, repo
+  (gh OWNER/REPO, default pricec/factory), branch, head, note,
+  requested_by (operator | planner), job_id ('' until merging), state,
+  result ('' until terminal), created_at, updated_at)`, plus the one-row
+  `merge_queue(paused, updated_at)` pause flag. JSON:
+  `{id, repo, branch, head, note, requested_by, job_id?, state, result?,
+  created_at, updated_at}`.
+- **Validation.** `branch` is required, made of `[A-Za-z0-9._/-]`, starts
+  alphanumeric, has no `..`, and is not `master`, `main` or `HEAD`. `head`
+  is a 7-40 char hex commit sha (lowercased). `note` is at most 2000 bytes.
+  A second queued or merging request for the same repo+branch is refused.
+- **State machine** (illegal transitions are logged and ignored, the §6.1
+  model):
+
+  | from | to |
+  |---|---|
+  | `queued` | `merging` (dispatch), `cancelled` |
+  | `merging` | `landed`, `needs_attention`, `cancelled` |
+  | `landed`, `needs_attention`, `cancelled` | - (terminal) |
+
+- **Serialization** (factory loop; 5s tick plus an immediate pass after
+  every API/tool mutation and every merge-job terminal transition; passes
+  are serialized). A pass first reconciles: a `merging` request whose job is
+  missing goes `needs_attention`, and one whose job is already terminal is
+  closed as below. Then, when the queue is **not paused**, **no request is
+  `merging`**, and **no merge job is non-terminal**, the pass dispatches the
+  **oldest** `queued` request. It claims the request (`queued -> merging`,
+  `job_id` set) and only then creates the merge job. A unique index admits
+  at most one `merging` row, so there is never more than one merge in
+  flight.
+- **The merge job** is built by code (`jobs.MergeJobSpec`), never by
+  planner prose. Its task text (`jobs.MergeTask`) names the request
+  fields and points at **`docs/merging.md`, which is normative for
+  merge-job behavior** (it is not inlined, so it cannot drift). It also
+  states the reporting contract and quotes the note as data. Payload
+  `{merge_request_id, repo, branch, head, note, procedure}`; tier
+  `hardest`; `timeout_s` 7200; `idle_timeout_s` 1800; priority 3;
+  `created_by` `factory:merge_queue`. It is **pinned** (§6.7 foreman pin) to
+  the integration foreman: `foreman:server`, overridable with
+  `FACTORY_MERGE_FOREMAN`. It goes through the token-throttle dispatch gate
+  like every job (it may be `held`). An offline pin pends, and the long-pending alert covers it.
+- **Closing.** The merge job's terminal transition (the §6.1 terminal hook)
+  closes the request: `done -> landed`; `failed | timed_out | dead ->
+  needs_attention`; `cancelled -> cancelled`; `superseded ->
+  needs_attention` (the queue cannot know whether a hand-made replacement
+  merged). `result` = `job <id> <state>: <last summary> (error: <last
+  error>)`, capped at 1000 B. The next request then dispatches.
+- **Pause** is persisted. While paused, nothing new dispatches; an
+  in-flight merge still runs to its terminal state and closes its request.
+  Resume releases the oldest queued request on the next pass.
+- **Cancel.** Cancelling a `merging` request cancels its merge job (§6.1
+  cancel, terminal hook fires), then the request is `cancelled`. As with
+  every cancel, there is no foreman-side kill in v1, so a worker already
+  running keeps running until it exits. A cancel that races the dispatch
+  (between claim and job creation) cancels the fresh job.
+- **Alert.** Every `-> needs_attention` raises a **P1** alert (never
+  expires) through the §9.5.3 alerts surface, with source
+  `factory:merge_queue`. The title names the request and branch; the body
+  carries repo/branch/head, the job id and `result`.
 
 ## 7. Pairing & scoped auth
 
@@ -1127,7 +1206,9 @@ orphaned, live, and local job ids.
   section (#17, #15).
 - Tool descriptions stay tiny (per-turn token cost for every LLM caller,
   #6); byte budgets asserted by test: worker surface < 1KB total (#17);
-  foreman surface < 1.5KB (#18; 2KB since the 2026-11-16 `raise_alert` tool); factory surface < 4KB (2026-11-16
+  foreman surface < 1.5KB (#18; 2KB since the 2026-11-16 `raise_alert` tool); factory surface < 4.5KB (2026-11-17 merge
+  queue: raised from 4KB for `request_merge`, §6.11 - 4093 B were in use;
+  earlier: < 4KB since the 2026-11-16
   inbox redesign: raised from 2KB for the task tools of §9.5.2 and
   the `task_id` arguments, with headroom for the alert tool, which S3 added as `raise_alert` (§9.5.3); 2026-11-15
   amendments: raised from 1.5KB for the incident-driven `cancel_job` tool,
@@ -1352,6 +1433,12 @@ Tools (exact):
   a tool error naming the state; an unknown id is a tool error
   (`unknown job`). The planner's alternative to direct `jobs.db` writes
   (2026-11-15 amendment).
+- `request_merge(branch, head, note?)` - queues a merge request
+  (§6.11; `requested_by` `planner`, repo the default) and returns
+  `{id, state}`. Invalid input and a duplicate active branch are tool
+  errors. The description tells the planner that EVERY "merge (and
+  deploy) X" request is a `request_merge` call, never a `create_job` prose
+  job (2026-11-17 amendment).
 - `message_foreman(foreman_id, type, payload)` - envelope to that
   foreman's inbox; `foreman_id` accepts the bare id or the full
   `foreman:{id}` form (normalized - never double-prefixed); `payload`
@@ -1739,6 +1826,8 @@ task_id|null}`; `priority` is an integer, 0 = most urgent.
   `factory:main`; the consumer turns it into an alert with source
   `foreman:<id>`. A malformed or invalid `alert.raise` is never dropped: it
   raises a P2 alert (source `factory:consumer`) describing the rejection.
+  (5) A merge request going `needs_attention` raises a **P1** alert
+  (source `factory:merge_queue`, §6.11; 2026-11-17 amendment).
   Validation: priority >= 0, non-empty title (<= 200 B), body <= 8 KB,
   `ttl_s` > 0 and exclusive with `no_expiry`, `task_id` must exist.
 - **TTL.** Default by priority: P0 and P1 never expire, P2 24h, P3+ 4h.
@@ -1913,9 +2002,10 @@ outside the `result_schema` subset at validation time (#3).
 | Bearer token | 32B random, stored SHA-256 only | #11 |
 | Long-poll window | `wait_seconds` 0-60 | #1 |
 | Inbox fetch limit | default 50, max 500 | #1 |
-| MCP description budgets | worker < 1KB; foreman < 2KB (2026-11-16 raise_alert; was 1.5KB); factory < 4KB (2026-11-16 inbox redesign; was 2KB) | #17, #18, #19 |
+| MCP description budgets | worker < 1KB; foreman < 2KB (2026-11-16 raise_alert; was 1.5KB); factory < 4.5KB (2026-11-17 merge queue; was 4KB, 2KB before 2026-11-16) | #17, #18, #19 |
 | JobSpec defaults | `timeout_s` 14400 (ceiling); `idle_timeout_s` 900; `priority` 5 (1-9, 9 highest); `budget` `{max_prompt_bytes 32768, max_output_tokens 8192, max_cost_usd 20.0}` | #3 |
 | Long-pending alert | `pending` with no matching online foreman for > 30 min -> one `notify.pending` in `planner:main` (dedupe per job per pending episode); check tick 1 min | 2026-11-15 amendment |
+| Merge queue | one `merging` at a time; tick 5s + kicks; merge job tier `hardest`, `timeout_s` 7200, `idle_timeout_s` 1800, priority 3, pinned `foreman:server` (`FACTORY_MERGE_FOREMAN`), never retried; needs_attention alert P1 source `factory:merge_queue` | 2026-11-17 amendment, §6.11 |
 | Foreman orphan recovery | startup pass before any loop; listing 1000 rows per owner spelling; 5 attempts, 2s apart; orphan result kind `crash` | 2026-11-16 orphan-recovery amendment, §8.7 |
 
 ## 12. Foreman auto-update (v1) (2026-11-16 amendment)

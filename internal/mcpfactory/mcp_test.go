@@ -263,14 +263,15 @@ func TestToolsListAndBudget(t *testing.T) {
 	_, out = e.rpc(e.planner, "tools/list", nil)
 	res := resultOf(t, out)
 	tools, ok := res["tools"].([]any)
-	if !ok || len(tools) != 12 {
-		t.Fatalf("tools/list: want 12 tools, got %v", res["tools"])
+	if !ok || len(tools) != 13 {
+		t.Fatalf("tools/list: want 13 tools, got %v", res["tools"])
 	}
 	want := map[string]bool{
 		"list_foremen": false, "list_jobs": false, "create_job": false,
 		"read_result": false, "cancel_job": false, "message_foreman": false,
 		"notify_operator": false, "raise_alert": false,
 		"list_tasks": false, "get_task": false, "update_task": false, "set_priority_criteria": false,
+		"request_merge": false,
 	}
 	var budget int
 	for _, tl := range tools {
@@ -305,8 +306,12 @@ func TestToolsListAndBudget(t *testing.T) {
 	// task tools (list_tasks, get_task, update_task,
 	// set_priority_criteria) plus task_id args, with headroom for S3's
 	// raise_alert.
-	if budget >= 4096 {
-		t.Errorf("description budget = %d bytes, want < 4096", budget)
+	// Raised to 4.5KB by the merge queue (2026-11-17, §6.11): request_merge
+	// (~450 bytes with its schema) must tell the planner that every
+	// "merge and deploy X" ask is a merge request, not a prose job; the
+	// 4KB surface had 3 bytes of headroom left.
+	if budget >= 4608 {
+		t.Errorf("description budget = %d bytes, want < 4608", budget)
 	}
 	t.Logf("description budget: %d bytes", budget)
 }

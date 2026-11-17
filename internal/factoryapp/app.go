@@ -63,6 +63,10 @@ type Config struct {
 	Usage UsageConfig
 	// Throttle configures the S3 dispatch gate (throttle.go).
 	Throttle ThrottleConfig
+	// MergeForeman is the integration foreman merge jobs are pinned to
+	// (spec §6.11, mergequeue.go); empty -> FACTORY_MERGE_FOREMAN, then
+	// foreman:server.
+	MergeForeman string
 }
 
 // App is the wired factory controller.
@@ -108,6 +112,12 @@ type App struct {
 	// loop and test-driven passes may interleave).
 	pendingAlertedJobs map[string]string
 	pendingAlertMu     sync.Mutex
+
+	// Merge queue (spec §6.11, mergequeue.go): mergeMu serializes passes,
+	// mergeKick wakes the loop, mergeForeman is the integration pin.
+	mergeMu      sync.Mutex
+	mergeKick    chan struct{}
+	mergeForeman string
 }
 
 // New opens the three sqlite stores under cfg.DataDir, wires every
@@ -128,6 +138,8 @@ func New(cfg Config) (*App, error) {
 	a := &App{
 		advertise:          cfg.AdvertiseURL,
 		pendingAlertedJobs: map[string]string{},
+		mergeKick:          make(chan struct{}, 1),
+		mergeForeman:       mergeForemanFrom(cfg.MergeForeman, os.Getenv(EnvMergeForeman)),
 	}
 	if a.advertise == "" {
 		a.advertise = defaultAdvertiseURL(cfg.Addr)
@@ -217,6 +229,8 @@ func New(cfg Config) (*App, error) {
 		RaiseAlert: a.RaisePlannerAlert,
 		// cancel_job marks its own cancels so they do not wake the planner.
 		MarkSelfCancel: a.markSelfCancel,
+		// request_merge kicks the merge queue (spec §6.11).
+		MergeQueued: a.kickMergeQueue,
 	})
 	if err != nil {
 		_ = a.Close()
@@ -281,8 +295,8 @@ func (a *App) Inbox() *inbox.Service { return a.inbox }
 func (a *App) Auth() *auth.Store     { return a.auth }
 
 // Run runs the background loops: sweeper, scheduler, retry picker, the
-// factory:main consumer, the dispatch notifier, and the long-pending
-// alert. It blocks until ctx is done.
+// factory:main consumer, the dispatch notifier, the long-pending alert,
+// and the merge queue. It blocks until ctx is done.
 func (a *App) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	run := func(name string, fn func() error) {
@@ -303,6 +317,7 @@ func (a *App) Run(ctx context.Context) error {
 	run("dispatch notifier", func() error { a.notifyLoop(ctx); return nil })
 	run("alert expiry", func() error { a.alertExpiryLoop(ctx); return nil })
 	run("pending alert", func() error { a.pendingAlertLoop(ctx); return nil })
+	run("merge queue", func() error { a.mergeQueueLoop(ctx); return nil })
 	if a.usagePoll != nil {
 		run("usage poller", func() error { a.usagePoll.Run(ctx); return nil })
 	}
@@ -331,11 +346,14 @@ func (a *App) Close() error {
 // onTerminal fires on every terminal job transition: revoke the job's
 // worker tokens (spec §7.4), flag over-budget jobs (spec §6.5 proxy 4),
 // and bring the terminal state to the operator's attention (spec §9.5).
-func (a *App) onTerminal(jobID, _ string) {
+func (a *App) onTerminal(jobID, finalState string) {
 	ctx := context.Background()
 	if err := a.auth.InvalidateJob(ctx, jobID); err != nil {
 		log.Printf("factoryapp: invalidate credentials for %s: %v", jobID, err)
 	}
+	// A merge job's terminal transition closes its merge request and
+	// releases the queue (spec §6.11).
+	a.finishMerge(ctx, jobID, finalState)
 	a.notifyOperatorJob(ctx, jobID)
 	job, ok, err := a.jobs.Get(ctx, jobID)
 	if err != nil || !ok {
@@ -397,6 +415,10 @@ func buildMux(a *App, mcpH http.Handler) http.Handler {
 	mux.Handle("/v1/foremen", a.jobs.APIHandler())
 	mux.Handle("/v1/schedules", a.jobs.SchedulesHandler())
 	mux.Handle("/v1/schedules/", a.jobs.SchedulesHandler())
+	// Merge queue (spec §6.11): every mutation kicks the dispatch loop.
+	mergeH := a.jobs.MergeRequestsHandler(a.kickMergeQueue)
+	mux.Handle("/v1/merge-requests", mergeH)
+	mux.Handle("/v1/merge-requests/", mergeH)
 	mux.Handle("/v1/deadletter", a.jobs.DeadLetterHandler())
 	mux.Handle("/v1/deadletter/", a.jobs.DeadLetterHandler())
 	mux.Handle("/v1/spend", a.jobs.SpendHandler())

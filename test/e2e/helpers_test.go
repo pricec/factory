@@ -33,6 +33,9 @@ const (
 	// fakeSummary is the fake opencode's scripted stdout; the harness
 	// fallback turns it into the job result summary (spec §8.5).
 	fakeSummary = "e2e: all systems nominal"
+	// fakeDriftBranch makes the fake opencode fail (merge-queue e2e).
+	fakeDriftBranch  = "feat/e2e-drift"
+	fakeDriftSummary = "head drift: requested 0badc0de, origin is 1234567"
 )
 
 // stack is the booted stack: real factory + real foreman + fake opencode,
@@ -75,6 +78,9 @@ func boot(t *testing.T) *stack {
 		Addr:         "127.0.0.1:0",
 		AdvertiseURL: "http://factory.test",
 		Budget:       budgets.DefaultConfig(),
+		// The e2e foreman is the integration foreman merge jobs pin to
+		// (spec §6.11).
+		MergeForeman: foremanID,
 	})
 	if err != nil {
 		t.Fatalf("factoryapp.New: %v", err)
@@ -86,7 +92,10 @@ func boot(t *testing.T) *stack {
 	// calls report_result, so the harness posts the fallback result
 	// (spec §8.5); stdout becomes the summary verbatim.
 	s.fakeOpencode = filepath.Join(t.TempDir(), "opencode")
-	script := "#!/bin/sh\nprintf '" + fakeSummary + "'\n"
+	// A prompt naming fakeDriftBranch fails like a merge job that found
+	// head drift (spec §6.11, docs/merging.md step 3): exit 1, reason on
+	// stdout - the harness posts a failed result of kind crash.
+	script := "#!/bin/sh\ncase \"$*\" in *" + fakeDriftBranch + "*) printf '" + fakeDriftSummary + "'; exit 1;; esac\nprintf '" + fakeSummary + "'\n"
 	if err := os.WriteFile(s.fakeOpencode, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake opencode: %v", err)
 	}
