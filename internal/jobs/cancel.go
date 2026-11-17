@@ -57,7 +57,7 @@ func (s *Store) Cancel(ctx context.Context, id, to, reason string) (Job, error) 
 			return Job{}, fmt.Errorf("%w: %s is %s", ErrTerminal, id, state)
 		}
 		res, err := s.db.ExecContext(ctx,
-			`UPDATE jobs SET state = ?, last_error = ?, next_attempt_at = NULL, updated_at = ?
+			`UPDATE jobs SET state = ?, last_error = ?, next_attempt_at = NULL, held_reason = NULL, updated_at = ?
 			 WHERE id = ? AND state = ?`,
 			to, msg, s.now(), id, state)
 		if err != nil {

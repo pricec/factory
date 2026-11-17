@@ -30,6 +30,7 @@ import (
 	"github.com/pricec/factory/internal/notify"
 	"github.com/pricec/factory/internal/registry"
 	"github.com/pricec/factory/internal/tasks"
+	"github.com/pricec/factory/internal/throttle"
 	"github.com/pricec/factory/internal/wire"
 )
 
@@ -60,30 +61,39 @@ type Config struct {
 	Now func() time.Time
 	// Usage configures the S2 usage-window tracker (observe-only).
 	Usage UsageConfig
+	// Throttle configures the S3 dispatch gate (throttle.go).
+	Throttle ThrottleConfig
 }
 
 // App is the wired factory controller.
 type App struct {
-	jobs       *jobs.Store
-	inbox      *inbox.Service
-	tasks      *tasks.Store // shares inbox.db (spec §9.5.1); New runs the legacy backfill; inbox.Close closes it
-	auth       *auth.Store
-	authn      *auth.Authenticator
-	hub        *notify.Hub
-	sweeper    *jobs.Sweeper
-	scheduler  *jobs.Scheduler
-	picker     *jobs.RetryPicker
-	pending    *jobs.PendingPicker
-	matcher    *registry.CapabilityMatcher
-	budget     budgets.Config
-	planner    *PlannerBrain
-	wakes      *wakeDispatcher // per-task planner wakes (spec §9.5.2, tasks_wake.go)
-	reaper     *taskReaper     // idle-24h task auto-close (spec §9.5.2, tasks_reaper.go)
-	handler    http.Handler
-	usage      *usagewin.Tracker
-	usagePoll  *usagewin.Poller // nil unless Usage.Poll
-	advertise  string
-	plannerTok string
+	jobs      *jobs.Store
+	inbox     *inbox.Service
+	tasks     *tasks.Store // shares inbox.db (spec §9.5.1); New runs the legacy backfill; inbox.Close closes it
+	auth      *auth.Store
+	authn     *auth.Authenticator
+	hub       *notify.Hub
+	sweeper   *jobs.Sweeper
+	scheduler *jobs.Scheduler
+	picker    *jobs.RetryPicker
+	pending   *jobs.PendingPicker
+	matcher   *registry.CapabilityMatcher
+	budget    budgets.Config
+	planner   *PlannerBrain
+	wakes     *wakeDispatcher // per-task planner wakes (spec §9.5.2, tasks_wake.go)
+	reaper    *taskReaper     // idle-24h task auto-close (spec §9.5.2, tasks_reaper.go)
+	handler   http.Handler
+	usage     *usagewin.Tracker
+	usagePoll *usagewin.Poller // nil unless Usage.Poll
+	gate      *throttle.Gate   // S3 dispatch gate (throttle.go)
+	// S5 pause (pause.go): jobs that hit the limit (job id -> true), and
+	// test seams for the re-probe, jitter and wake poll interval.
+	limitHit    sync.Map
+	probe       func(ctx context.Context) error
+	pauseJitter func() time.Duration
+	wakePoll    time.Duration
+	advertise   string
+	plannerTok  string
 	// downloadsDir backs GET /download/foreman/{platform} (#24).
 	downloadsDir string
 
@@ -239,6 +249,7 @@ func New(cfg Config) (*App, error) {
 	}
 	a.initUsage(cfg)
 	a.initTasks()
+	a.initThrottle(cfg)
 	a.handler = buildMux(a, mcpH)
 	return a, nil
 }
@@ -290,6 +301,8 @@ func (a *App) Run(ctx context.Context) error {
 	if a.usagePoll != nil {
 		run("usage poller", func() error { a.usagePoll.Run(ctx); return nil })
 	}
+	run("throttle releaser", func() error { a.releaserLoop(ctx); return nil })
+	run("usage pause", func() error { a.pauseLoop(ctx); return nil })
 	run("task reaper", func() error { a.reaper.Run(ctx, taskReapInterval); return nil })
 	wg.Wait()
 	return nil
@@ -382,7 +395,9 @@ func buildMux(a *App, mcpH http.Handler) http.Handler {
 	mux.Handle("/v1/deadletter", a.jobs.DeadLetterHandler())
 	mux.Handle("/v1/deadletter/", a.jobs.DeadLetterHandler())
 	mux.Handle("/v1/spend", a.jobs.SpendHandler())
-	mux.HandleFunc("GET /v1/usage", a.handleUsage) // S2: window state (usage.go)
+	mux.HandleFunc("GET /v1/usage", a.handleUsage)            // S2: window state (usage.go)
+	mux.HandleFunc("GET /v1/throttle", a.handleGetThrottle)   // S3: gate (throttle.go)
+	mux.HandleFunc("POST /v1/throttle", a.handlePostThrottle) // S3: operator override
 	mux.Handle("/v1/mcp/factory", mcpH)
 	return mux
 }

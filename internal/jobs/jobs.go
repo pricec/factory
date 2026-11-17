@@ -31,11 +31,17 @@ const (
 	StateDead       = "dead"
 	StateCancelled  = "cancelled"
 	StateSuperseded = "superseded"
+	// StateHeld is the token-throttle dispatch gate's queue (S3): a job
+	// created while usage was ORANGE/RED (or spaced/capped) waits here
+	// until the releaser moves it to pending. Non-terminal and persisted,
+	// so held jobs survive a factory restart.
+	StateHeld = "held"
 )
 
 // legal transitions (spec §6.1, with #10's retry/dead edges and the
 // cancel/supersede edges from every non-terminal state).
 var legal = map[string]map[string]bool{
+	StateHeld:       {StatePending: true, StateCancelled: true, StateSuperseded: true},
 	StatePending:    {StateDispatched: true, StateCancelled: true, StateSuperseded: true},
 	StateDispatched: {StateRunning: true, StateCancelled: true, StateSuperseded: true},
 	StateRunning:    {StateDone: true, StateFailed: true, StateTimedOut: true, StateCancelled: true, StateSuperseded: true},
@@ -51,7 +57,7 @@ func Terminal(state string) bool {
 // AllStates is every state, for validation and tests.
 var AllStates = []string{
 	StatePending, StateDispatched, StateRunning, StateDone, StateFailed,
-	StateTimedOut, StateDead, StateCancelled, StateSuperseded,
+	StateTimedOut, StateDead, StateCancelled, StateSuperseded, StateHeld,
 }
 
 const (
@@ -74,6 +80,9 @@ type Store struct {
 	// (spec §6.1; #11 registers InvalidateJob, #10 registers retry
 	// scheduling via it).
 	onTerminal func(jobID, finalState string)
+	// admission, if set, is the dispatch gate consulted by every create
+	// path (S3 token throttle; see Admit).
+	admission Admission
 }
 
 const dsnSuffix = "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
@@ -120,7 +129,24 @@ CREATE TABLE IF NOT EXISTS foremen (
 	if _, err := db.Exec(ddl); err != nil {
 		return err
 	}
+	if err := addColumnIfMissing(db, "jobs", "held_reason", "TEXT"); err != nil {
+		return err
+	}
 	_, err := db.Exec(usageDDL)
+	return err
+}
+
+// addColumnIfMissing runs ALTER TABLE ... ADD COLUMN unless the column is
+// already present (SQLite has no ADD COLUMN IF NOT EXISTS).
+func addColumnIfMissing(db *sql.DB, table, column, decl string) error {
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	_, err := db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + decl)
 	return err
 }
 
@@ -143,9 +169,12 @@ type Job struct {
 	Usage       json.RawMessage `json:"usage,omitempty"`
 	Results     json.RawMessage `json:"results"`
 	OverBudget  bool            `json:"over_budget"`
-	CreatedAt   string          `json:"created_at"`
-	UpdatedAt   string          `json:"updated_at"`
-	Spec        wire.JobSpec    `json:"spec"`
+	// HeldReason explains why a held job waits (S3 dispatch gate), e.g.
+	// "usage ORANGE: 5h 88%, resets 23:30Z". Empty outside StateHeld.
+	HeldReason string       `json:"held_reason,omitempty"`
+	CreatedAt  string       `json:"created_at"`
+	UpdatedAt  string       `json:"updated_at"`
+	Spec       wire.JobSpec `json:"spec"`
 }
 
 // Create stores spec as a pending job (spec §6.1).
@@ -351,7 +380,8 @@ func (s *Store) fireTerminal(jobID, finalState string) {
 // Get returns the full job record; ok is false when absent.
 func (s *Store) Get(ctx context.Context, id string) (Job, bool, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT id, spec, state, foreman_id, attempts,
-		IFNULL(next_attempt_at, ''), IFNULL(last_error, ''), usage, results, over_budget, created_at, updated_at
+		IFNULL(next_attempt_at, ''), IFNULL(last_error, ''), usage, results, over_budget, created_at, updated_at,
+		IFNULL(held_reason, '')
 		FROM jobs WHERE id = ?`, id)
 	return scanJob(row)
 }
@@ -363,7 +393,8 @@ func (s *Store) List(ctx context.Context, state, foremanID string, limit int) ([
 		limit = 200
 	}
 	q := `SELECT id, spec, state, foreman_id, attempts,
-		IFNULL(next_attempt_at, ''), IFNULL(last_error, ''), usage, results, over_budget, created_at, updated_at
+		IFNULL(next_attempt_at, ''), IFNULL(last_error, ''), usage, results, over_budget, created_at, updated_at,
+		IFNULL(held_reason, '')
 		FROM jobs`
 	var conds []string
 	var args []any
@@ -405,7 +436,7 @@ func scanJob(row rowScanner) (Job, bool, error) {
 	var overBudget int
 	var usagePtr sql.NullString
 	if err := row.Scan(&j.ID, &specJSON, &j.State, &j.ForemanID, &j.Attempts,
-		&nextAttempt, &lastErr, &usagePtr, &resultsJSON, &overBudget, &j.CreatedAt, &j.UpdatedAt); err != nil {
+		&nextAttempt, &lastErr, &usagePtr, &resultsJSON, &overBudget, &j.CreatedAt, &j.UpdatedAt, &j.HeldReason); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Job{}, false, nil
 		}

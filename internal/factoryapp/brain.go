@@ -138,7 +138,15 @@ func (a *App) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 			foreman, state = f.ID, "dispatched"
 		}
 	}
-	if err := a.jobs.Create(r.Context(), spec); err != nil {
+	// Dispatch gate (S3 token throttle, spec §6.10): same as create_job.
+	hold, heldReason := a.jobs.Admit(r.Context(), spec, in.TaskID)
+	if hold {
+		state, foreman = jobs.StateHeld, ""
+		if err := a.jobs.CreateHeld(r.Context(), spec, heldReason); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+	} else if err := a.jobs.Create(r.Context(), spec); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
@@ -177,6 +185,9 @@ func (a *App) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.TaskID != "" {
 		body["task_id"] = in.TaskID
+	}
+	if hold {
+		body["held_reason"] = heldReason
 	}
 	// Loud, non-fatal warnings (spec §6.7): e.g. requires could not be
 	// validated because no foremen are registered yet.

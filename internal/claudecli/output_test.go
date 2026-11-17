@@ -90,3 +90,23 @@ func TestParseOutputStreamJSON(t *testing.T) {
 		t.Fatalf("array: %q", o.Usage.RateLimit)
 	}
 }
+
+func TestParseOutputKeepsRejectedEvent(t *testing.T) {
+	raw := `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour","resetsAt":1794871800}}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}
+{"type":"result","subtype":"success","is_error":true,"result":"limit reached","session_id":"s"}`
+	o := ParseOutput(raw)
+	if !strings.Contains(o.Usage.RateLimit, `"rejected"`) {
+		t.Fatalf("rejected event overwritten: %q", o.Usage.RateLimit)
+	}
+	// No result object at all: the rejection is still surfaced.
+	o = ParseOutput(`{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}` + "\n" + `{"type":"system"}`)
+	if !strings.Contains(o.Usage.RateLimit, `"rejected"`) || o.Parsed {
+		t.Fatalf("no-result rejection: %+v", o)
+	}
+	// stderr-only limit text is captured.
+	u := UsageWithStderr(Usage{}, "Claude AI usage limit reached|1794871800")
+	if u.Limit == "" {
+		t.Fatal("stderr limit text not captured")
+	}
+}

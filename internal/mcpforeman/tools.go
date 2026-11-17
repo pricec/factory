@@ -35,6 +35,9 @@ type postToFactoryArgs struct {
 	Payload any    `json:"payload,omitempty"`
 	JobID   string `json:"job_id,omitempty"`
 	To      string `json:"to,omitempty"`
+	// TaskID threads a foreman.report into an existing task (spec
+	// §9.5.2): the tool sets payload.task_id. Optional.
+	TaskID string `json:"task_id,omitempty"`
 }
 
 // TypeForemanReport is the envelope type a foreman uses to report to
@@ -144,6 +147,13 @@ func postToFactoryTool(cfg Config) mcp.ToolHandlerFor[postToFactoryArgs, any] {
 			}
 			env.Payload = b
 		}
+		if in.TaskID != "" {
+			b, err := withTaskID(env.Payload, in.TaskID)
+			if err != nil {
+				return nil, nil, err
+			}
+			env.Payload = b
+		}
 		if err := env.Validate(); err != nil {
 			return nil, nil, err
 		}
@@ -225,4 +235,27 @@ func answerWorkerTool(cfg Config) mcp.ToolHandlerFor[answerWorkerArgs, any] {
 // Package-local twin of mcpworker's (unexported there).
 func structuredResult(v any) *mcp.CallToolResult {
 	return &mcp.CallToolResult{StructuredContent: v}
+}
+
+// withTaskID sets task_id on an object payload (an empty payload becomes
+// {"task_id":...}). A string or other non-object payload is wrapped as
+// {"text": <it>, "task_id": ...} so the report text is not lost. An
+// explicit task_id argument overrides one already inside the payload.
+func withTaskID(payload json.RawMessage, taskID string) (json.RawMessage, error) {
+	obj := map[string]any{}
+	if len(payload) > 0 && string(payload) != "null" {
+		if err := json.Unmarshal(payload, &obj); err != nil {
+			var v any
+			if err := json.Unmarshal(payload, &v); err != nil {
+				return nil, fmt.Errorf("payload: %w", err)
+			}
+			obj = map[string]any{"text": v}
+		}
+	}
+	obj["task_id"] = taskID
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return nil, fmt.Errorf("payload: %w", err)
+	}
+	return b, nil
 }

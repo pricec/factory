@@ -70,6 +70,9 @@ type wakeDispatcher struct {
 	run     func(ctx context.Context, taskID string, envs []wire.MessageEnvelope) error
 	fail    func(ctx context.Context, taskID string, err error)
 	persist func(inflight map[string][]string)
+	// defer_ (S5): after a non-chat session fails, reports true when the
+	// usage-limit pause explains it and has now ended - run it again.
+	defer_ func(ctx context.Context, err error) bool
 
 	mu    sync.Mutex
 	tasks map[string]*taskWakeState
@@ -164,24 +167,36 @@ func (d *wakeDispatcher) session(ctx context.Context, taskID string, envs []wire
 			d.fail(ctx, taskID, fmt.Errorf("planner session panicked: %v", r))
 		}
 	}()
-	d.mu.Lock()
-	limiter := d.limiter
-	d.mu.Unlock()
-	if limiter == nil {
-		limiter = unlimitedWakes{}
-	}
-	release, err := limiter.Acquire(ctx)
-	if err != nil {
-		if ctx.Err() == nil {
-			d.fail(ctx, taskID, fmt.Errorf("planner wake limiter: %w", err))
+	chat := wakeIsChat(envs)
+	ctx = context.WithValue(ctx, wakeKey{}, chat)
+	for {
+		d.mu.Lock()
+		limiter := d.limiter
+		d.mu.Unlock()
+		if limiter == nil {
+			limiter = unlimitedWakes{}
 		}
-		return
-	}
-	if release != nil {
-		defer release()
-	}
-	if err := d.run(ctx, taskID, envs); err != nil && ctx.Err() == nil {
+		release, err := limiter.Acquire(ctx)
+		if err != nil {
+			if ctx.Err() == nil {
+				d.fail(ctx, taskID, fmt.Errorf("planner wake limiter: %w", err))
+			}
+			return
+		}
+		err = func() error {
+			if release != nil {
+				defer release() // also on panic: never leak a limiter slot
+			}
+			return d.run(ctx, taskID, envs)
+		}()
+		if err == nil || ctx.Err() != nil {
+			return
+		}
+		if !chat && d.defer_ != nil && d.defer_(ctx, err) {
+			continue // the usage limit paused us mid-wake: run again after the resume
+		}
 		d.fail(ctx, taskID, err)
+		return
 	}
 }
 
