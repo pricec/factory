@@ -2160,6 +2160,47 @@ cannot read).
 | Max download / download timeout | 512 MiB / 5 min |
 | Exit codes | 0 after a swap; 1 after a rollback |
 
+## 13. Credentials (2026-11-17 amendment)
+
+The factory keeps operator-managed named secrets: generic values with an
+env-var mapping, not tied to any provider. This amendment covers storage
+and management only; handing a value to a job is a follow-up amendment
+(piece 2) with its own job-scoped endpoint.
+
+**Storage posture.** Plaintext at rest - NO encryption - in one file,
+`secrets.json`, in the factory data dir, mode `0600` (enforced on create,
+on every rewrite, and re-tightened on open). Writes are atomic (0600 temp
+file + rename). Auth is host-trust: like the rest of the control plane
+(§7.5) these endpoints carry no bearer or token gate; the trust boundary
+is the host and its network exposure.
+
+**Rules.** `name` matches `[a-z0-9][a-z0-9-]{0,63}`. `env_var` is optional,
+characters `[A-Z_0-9]+` only; default `SECRET_<UPPER_SNAKE(name)>` (`-` ->
+`_`, upper-cased). `value` is non-empty and at most 64 KiB (65536 bytes).
+
+**Endpoints** (errors use the §10 model; validation failures are 400
+`bad_request`):
+
+| Endpoint | Request | Response |
+|---|---|---|
+| `POST /v1/secrets/{name}` | `{"value": "...", "env_var": "GH_TOKEN"?}` | `200 {"name","env_var","updated_at"}` (upsert) |
+| `GET /v1/secrets` | - | `200 {"secrets":[{"name","env_var","updated_at"}]}` sorted by name |
+| `DELETE /v1/secrets/{name}` | - | `200 {"name","deleted":"true"}`; unknown name -> `404 unknown_secret` |
+
+```
+POST /v1/secrets/gh-token   {"value":"ghp_...","env_var":"GH_TOKEN"}
+-> 200 {"name":"gh-token","env_var":"GH_TOKEN","updated_at":"2026-11-17T10:00:00Z"}
+```
+
+**No value echo.** No response on this surface ever contains a secret's
+value - not the upsert response, not the list, not any error. There is
+deliberately NO endpoint that returns a value. Values are never logged;
+errors and logs carry names only. The operator UI Credentials section is
+write-only for values (the input clears on submit).
+
+**Follow-up.** Job handout (exposing a secret to a job as its mapped env
+var) is a separate amendment (piece 2).
+
 ---
 
 Future tickets: reference this document; do not re-pin contracts (#16).

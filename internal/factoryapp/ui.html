@@ -258,6 +258,16 @@
   #usagepanel .usec tr.uheldrow { cursor: pointer; }
   #usagepanel .usec tr.uheldrow:hover { background: var(--bg); }
   #usagepanel .ualert { padding: 2px 0; color: var(--text); }
+  #credpanel { max-width: 1100px; margin: 12px auto 0; padding: 10px 20px; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 6px; font-family: var(--mono); }
+  #credpanel .chead { color: var(--dim); }
+  #credpanel .chead b { color: var(--text); text-transform: uppercase; letter-spacing: .05em; font-size: 11px; }
+  #credpanel table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+  #credpanel td, #credpanel th { padding: 2px 6px; border-top: 1px solid var(--border); text-align: left; color: var(--text); }
+  #credpanel form { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+  #credpanel input { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px; font-family: var(--mono); }
+  #credpanel button { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 3px 8px; cursor: pointer; }
+  #credpanel .cerr { color: var(--bad); }
   #usagepanel .ualert .ucrit { color: var(--bad); }
 
   /* ---------- phone UI (html.phone; desktop never matches these) ---------- */
@@ -266,7 +276,7 @@
     --sal: env(safe-area-inset-left, 0px); --sar: env(safe-area-inset-right, 0px);
     --tabh: 56px; --kb: 0px; --composer-h: 62px; -webkit-text-size-adjust: 100%; }
   html.phone body { font-size: 16px; -webkit-tap-highlight-color: transparent; }
-  html.phone body > header, html.phone #usagepanel, html.phone body > main { display: none !important; }
+  html.phone body > header, html.phone #usagepanel, html.phone #credpanel, html.phone body > main { display: none !important; }
   html.phone #phone { display: block; overflow-x: clip; min-height: 100vh; }
   #phone button { font-family: inherit; cursor: pointer; }
   #phone .p-sys { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
@@ -472,6 +482,16 @@
   <div class="uctl" id="u-ctl"></div>
   <div class="usec" id="u-held"></div>
   <div class="usec" id="u-alerts"></div>
+</section>
+<section id="credpanel" aria-label="Credentials">
+  <div class="chead"><b>Credentials</b> <span id="c-note"></span> <span id="c-err" class="cerr"></span></div>
+  <div id="c-list"></div>
+  <form id="c-form" autocomplete="off">
+    <input id="c-name" placeholder="name (a-z0-9-)" required maxlength="64">
+    <input id="c-value" type="password" placeholder="value (write-only)" required autocomplete="new-password">
+    <input id="c-env" placeholder="ENV_VAR (optional)">
+    <button type="submit">save credential</button>
+  </form>
 </section>
 <main>
   <div id="chatview">
@@ -1678,11 +1698,50 @@ for (const id of ["chat", "foremen", "jobs", "merges", "inboxes"]) {
 }
 $("state-filter").onchange = () => loadJobs();
 
+// Credentials (spec §13): values are write-only - the server never returns
+// them, and the value input is cleared on submit, success or not.
+async function loadSecrets() {
+  try {
+    const d = await getJSON("/v1/secrets");
+    const rows = (d.secrets || []).map(c =>
+      "<tr><td>" + esc(c.name) + "</td><td>" + esc(c.env_var) + "</td><td>" + esc(c.updated_at) + "</td>" +
+      '<td><button class="c-del" data-name="' + esc(c.name) + '">delete</button></td></tr>').join("");
+    $("c-list").innerHTML = rows
+      ? "<table><tr><th>name</th><th>env_var</th><th>updated</th><th></th></tr>" + rows + "</table>"
+      : '<span class="chead">no credentials stored</span>';
+    for (const b of $("c-list").querySelectorAll(".c-del")) b.onclick = () => deleteSecret(b.dataset.name);
+    $("c-note").textContent = "";
+  } catch (e) { $("c-note").textContent = "(unavailable: " + e.message + ")"; }
+}
+async function deleteSecret(name) {
+  if (!window.confirm("Delete credential " + name + "?")) return;
+  try {
+    const r = await fetch("/v1/secrets/" + encodeURIComponent(name), { method: "DELETE" });
+    if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error((d.error && d.error.message) || ("HTTP " + r.status)); }
+    $("c-err").textContent = "";
+  } catch (e) { $("c-err").textContent = "delete failed: " + e.message; }
+  loadSecrets();
+}
+$("c-form").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const name = $("c-name").value.trim(), value = $("c-value").value, env = $("c-env").value.trim();
+  $("c-value").value = ""; // never keep the value in the DOM after submit
+  const body = { value: value };
+  if (env) body.env_var = env;
+  try {
+    await postJSON("/v1/secrets/" + encodeURIComponent(name), body);
+    $("c-err").textContent = "";
+    $("c-name").value = ""; $("c-env").value = "";
+  } catch (e) { $("c-err").textContent = "save failed: " + e.message; }
+  loadSecrets();
+};
+
 // Start once the phone script below has loaded too: html.phone shows the
 // phone UI (#phone, pInit/pRoute), otherwise the desktop tabs run as before.
 document.addEventListener("DOMContentLoaded", async () => {
   $("adv").textContent = location.host;
   document.querySelector("main").classList.add("wide");
+  loadSecrets();
   loadUsage();
   setInterval(loadUsage, USAGE_POLL_MS);
   setInterval(renderUsage, 30000); // keep countdowns moving between polls
