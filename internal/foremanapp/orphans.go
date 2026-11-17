@@ -264,6 +264,31 @@ func (a *App) markSpawned(jobID string) {
 	a.spawned[jobID] = true
 }
 
+// workerLive reports whether jobID's harness goroutine is still running.
+func (a *App) workerLive(jobID string) bool {
+	a.spawnedMu.Lock()
+	defer a.spawnedMu.Unlock()
+	return a.live[jobID]
+}
+
+func (a *App) setWorkerLive(jobID string, live bool) {
+	a.spawnedMu.Lock()
+	defer a.spawnedMu.Unlock()
+	if live {
+		a.live[jobID] = true
+	} else {
+		delete(a.live, jobID)
+	}
+}
+
+// revokeJobCredential revokes every credential minted for jobID (spec
+// §7.4); failures are logged only.
+func (a *App) revokeJobCredential(ctx context.Context, jobID string) {
+	if err := a.auth.InvalidateJob(ctx, jobID); err != nil {
+		log.Printf("foremanapp: revoke worker credential for %s: %v", jobID, err)
+	}
+}
+
 func (a *App) spawnedHere(jobID string) bool {
 	a.spawnedMu.Lock()
 	defer a.spawnedMu.Unlock()

@@ -63,6 +63,7 @@ func (a *App) SpawnWorker(ctx context.Context, spec wire.JobSpec) error {
 	// per-job inbox can never race the spawn.
 	a.recordSpawnState(spec)
 	a.markSpawned(spec.ID)
+	a.setWorkerLive(spec.ID, true)
 
 	// Registry visibility (spec §6.2, 2026-11-15 spawn-visibility
 	// amendment): foreman-local spawns mint their JobSpec here, so the
@@ -103,6 +104,13 @@ func (a *App) SpawnWorker(ctx context.Context, spec wire.JobSpec) error {
 // the foreman itself is stopping (a.workerCtx done): the App is going away.
 func (a *App) runWorker(spec wire.JobSpec, hcfg workerharness.Config) {
 	defer a.gate.workerDone()
+	// Revoke after the harness has posted everything (result fallback and
+	// post-exit usage). Also covers a result forwarded while live (the
+	// consumer skipped its revoke) and harness failures.
+	defer func() {
+		a.setWorkerLive(spec.ID, false)
+		a.revokeJobCredential(context.Background(), spec.ID)
+	}()
 	if err := workerharness.Run(a.workerCtx, hcfg); err != nil {
 		if a.workerCtx.Err() != nil {
 			log.Printf("foremanapp: worker %s: %v (foreman stopping)", spec.ID, err)
