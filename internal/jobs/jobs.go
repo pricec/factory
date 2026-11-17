@@ -132,6 +132,9 @@ CREATE TABLE IF NOT EXISTS foremen (
 	if err := addColumnIfMissing(db, "jobs", "held_reason", "TEXT"); err != nil {
 		return err
 	}
+	if _, err := db.Exec(mergeDDL); err != nil {
+		return err
+	}
 	_, err := db.Exec(usageDDL)
 	return err
 }

@@ -271,6 +271,16 @@ func (s *Store) handleDeadLetterRequeue(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusNotFound, "not_found", "no such job", false)
 		return
 	}
+	// A merge job is never re-run outside the merge queue (spec §6.11):
+	// its request is already needs_attention; re-request instead.
+	if mr, ok, err := s.MergeRequestForJob(r.Context(), id); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error(), true)
+		return
+	} else if ok {
+		writeError(w, http.StatusConflict, "merge_job",
+			"job "+id+" is the merge job of "+mr.ID+"; re-request the merge with POST /v1/merge-requests instead", false)
+		return
+	}
 	if err := s.Requeue(r.Context(), id); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error(), true)
 		return
