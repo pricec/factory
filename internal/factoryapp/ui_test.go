@@ -250,7 +250,7 @@ func TestUIInboxRedesignShell(t *testing.T) {
 	for _, want := range []string{
 		// panes and controls
 		`id="alerts"`, `id="tasklist"`, `id="chatlog"`, `id="newtaskform"`,
-		`id="only-active"`, `id="task-search"`, `id="show-internal"`, `id="chatform"`,
+		`id="only-active"`, `id="needs-input"`, `id="tp-toggle"`, `id="modetoggle"`, `id="waiting-count"`, `id="kbhelp"`, `Nothing needs your input`, `id="task-search"`, `id="show-internal"`, `id="chatform"`,
 		// tabs stay
 		`id="tab-foremen"`, `id="tab-jobs"`, `id="tab-inboxes"`,
 		// contract endpoints

@@ -37,6 +37,11 @@ const (
 type taskView struct {
 	tasks.Task
 	Preview string `json:"preview"`
+	// Awaiting is "operator" or "factory" (tasks.Awaiting): who the task
+	// is waiting on. AwaitingSince is the ts of the unanswered brain reply
+	// (set only when Awaiting == "operator").
+	Awaiting      string `json:"awaiting"`
+	AwaitingSince string `json:"awaiting_since,omitempty"`
 }
 
 // taskTitle derives a fallback task title from free text: whitespace runs
@@ -203,29 +208,35 @@ func (a *App) reopenTask(ctx context.Context, id string) (tasks.Task, error) {
 
 // taskView builds the I3 Task JSON for one task.
 func (a *App) taskView(ctx context.Context, t tasks.Task) taskView {
-	return taskView{Task: t, Preview: a.taskPreview(ctx, t.ID)}
+	preview, typ, ts := a.taskLastVisible(ctx, t.ID)
+	v := taskView{Task: t, Preview: preview, Awaiting: tasks.Awaiting(t.Status, typ)}
+	if v.Awaiting == tasks.AwaitingOperator {
+		v.AwaitingSince = ts
+	}
+	return v
 }
 
-// taskPreview returns the last operator-visible message of the task's
-// thread (chat.message or brain.reply), whitespace-collapsed and cut to
-// taskPreviewMax runes; "" when there is none.
-func (a *App) taskPreview(ctx context.Context, taskID string) string {
+// taskLastVisible returns the newest operator-visible message of the
+// task's thread (chat.message or brain.reply; internal rows never count):
+// its whitespace-collapsed preview text cut to taskPreviewMax runes, its
+// type and its ts. All "" when the thread has none.
+func (a *App) taskLastVisible(ctx context.Context, taskID string) (preview, typ, ts string) {
 	var payload string
 	err := a.inbox.DB().QueryRowContext(ctx,
-		`SELECT payload FROM messages WHERE thread_id = ? AND type IN (?, ?)
+		`SELECT payload, type, ts FROM messages WHERE thread_id = ? AND type IN (?, ?)
 		 ORDER BY seq DESC LIMIT 1`,
-		taskID, tasks.TypeChatMessage, tasks.TypeBrainReply).Scan(&payload)
+		taskID, tasks.TypeChatMessage, tasks.TypeBrainReply).Scan(&payload, &typ, &ts)
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
 			log.Printf("factoryapp: tasks: preview %s: %v", taskID, err)
 		}
-		return ""
+		return "", "", ""
 	}
 	text := strings.Join(strings.FieldsFunc(payloadText(json.RawMessage(payload)), unicode.IsSpace), " ")
 	if r := []rune(text); len(r) > taskPreviewMax {
 		text = string(r[:taskPreviewMax])
 	}
-	return text
+	return text, typ, ts
 }
 
 // publishTaskChanged publishes a synthetic, non-persisted task.changed

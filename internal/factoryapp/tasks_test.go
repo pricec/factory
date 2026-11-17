@@ -39,6 +39,8 @@ type taskJSON struct {
 	JobIDs         []string `json:"job_ids"`
 	LastActivityAt string   `json:"last_activity_at"`
 	Preview        *string  `json:"preview"`
+	Awaiting       string   `json:"awaiting"`
+	AwaitingSince  string   `json:"awaiting_since"`
 }
 
 type threadJSON struct {
@@ -622,5 +624,109 @@ func TestTaskChangedSSE(t *testing.T) {
 		if env.Type == "task.changed" {
 			t.Fatal("task.changed was persisted")
 		}
+	}
+}
+
+// TestTaskAwaitingAndQueueOrder: awaiting=operator iff open and the newest
+// operator-visible message is a brain.reply (internal rows ignored); the
+// awaiting=operator list is in triage order (priority ASC, oldest first).
+func TestTaskAwaitingAndQueueOrder(t *testing.T) {
+	e := newEnv(t)
+	e.a.SetPlannerExec((&wakeLog{}).exec)
+	post := func(task, typ, from, text string) {
+		t.Helper()
+		if _, err := e.a.Inbox().Post(e.ctx, "planner:main", wire.MessageEnvelope{
+			Type: typ, From: from, ThreadID: task, Payload: json.RawMessage(text),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	brain := func(task string) { post(task, "brain.reply", "factory:brain", `{"text":"question?"}`) }
+	prio := func(task string, p int) {
+		t.Helper()
+		if _, err := e.a.Tasks().UpdateTask(e.ctx, task, tasks.TaskUpdate{Priority: &p}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	opSpoke := e.chat("operator spoke last", "")
+	// Message ts has 1s resolution, so same-second waits tie-break by task
+	// id (creation order): create early before late.
+	early := e.chat("p2 waiting older", "")
+	late := e.chat("p2 waiting newer", "")
+	urgent := e.chat("p0 waiting", "")
+	closedT := e.chat("closed but brain last", "")
+	internalLast := e.chat("brain then internal", "")
+
+	brain(early.TaskID)
+	brain(late.TaskID)
+	brain(urgent.TaskID)
+	prio(urgent.TaskID, 0)
+	brain(closedT.TaskID)
+	closed := tasks.StatusClosed
+	if _, err := e.a.Tasks().UpdateTask(e.ctx, closedT.TaskID, tasks.TaskUpdate{Status: &closed}); err != nil {
+		t.Fatal(err)
+	}
+	brain(internalLast.TaskID)
+	post(internalLast.TaskID, "foreman.report", "foreman:server", `{"text":"done"}`)
+	// opSpoke: brain replied, then the operator answered.
+	brain(opSpoke.TaskID)
+	e.chat("my answer", opSpoke.TaskID)
+
+	var all struct {
+		Tasks []taskJSON `json:"tasks"`
+	}
+	if status := e.do("GET", "/v1/tasks", "", nil, &all); status != http.StatusOK {
+		t.Fatalf("list = %d", status)
+	}
+	got := map[string]string{}
+	for _, tk := range all.Tasks {
+		got[tk.ID] = tk.Awaiting
+		if (tk.Awaiting == "operator") != (tk.AwaitingSince != "") {
+			t.Errorf("%s: awaiting=%q awaiting_since=%q", tk.ID, tk.Awaiting, tk.AwaitingSince)
+		}
+	}
+	want := map[string]string{
+		opSpoke.TaskID: "factory", late.TaskID: "operator", early.TaskID: "operator",
+		urgent.TaskID: "operator", closedT.TaskID: "factory", internalLast.TaskID: "operator",
+	}
+	for id, w := range want {
+		if got[id] != w {
+			t.Errorf("task %s awaiting = %q, want %q", id, got[id], w)
+		}
+	}
+
+	var q struct {
+		Tasks []taskJSON `json:"tasks"`
+	}
+	if status := e.do("GET", "/v1/tasks?awaiting=operator", "", nil, &q); status != http.StatusOK {
+		t.Fatalf("awaiting list = %d", status)
+	}
+	var ids []string
+	for _, tk := range q.Tasks {
+		ids = append(ids, tk.ID)
+	}
+	// P0 first; then the P2s oldest-waiting first (early, late, internalLast).
+	wantIDs := []string{urgent.TaskID, early.TaskID, late.TaskID, internalLast.TaskID}
+	if strings.Join(ids, ",") != strings.Join(wantIDs, ",") {
+		t.Errorf("queue order = %v, want %v", ids, wantIDs)
+	}
+	var lim struct {
+		Tasks []taskJSON `json:"tasks"`
+	}
+	e.do("GET", "/v1/tasks?awaiting=operator&limit=2", "", nil, &lim)
+	if len(lim.Tasks) != 2 || lim.Tasks[0].ID != urgent.TaskID {
+		t.Errorf("limited queue = %+v", lim.Tasks)
+	}
+	var fac struct {
+		Tasks []taskJSON `json:"tasks"`
+	}
+	e.do("GET", "/v1/tasks?awaiting=factory", "", nil, &fac)
+	if len(fac.Tasks) != 2 {
+		t.Errorf("awaiting=factory = %d tasks, want 2", len(fac.Tasks))
+	}
+	var bad map[string]any
+	if status := e.do("GET", "/v1/tasks?awaiting=nobody", "", nil, &bad); status != http.StatusBadRequest {
+		t.Errorf("bad awaiting = %d, want 400", status)
 	}
 }
