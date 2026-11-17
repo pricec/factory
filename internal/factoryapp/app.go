@@ -29,6 +29,7 @@ import (
 	"github.com/pricec/factory/internal/models"
 	"github.com/pricec/factory/internal/notify"
 	"github.com/pricec/factory/internal/registry"
+	"github.com/pricec/factory/internal/secrets"
 	"github.com/pricec/factory/internal/tasks"
 	"github.com/pricec/factory/internal/throttle"
 	"github.com/pricec/factory/internal/wire"
@@ -71,6 +72,7 @@ type App struct {
 	inbox     *inbox.Service
 	tasks     *tasks.Store // shares inbox.db (spec §9.5.1); New runs the legacy backfill; inbox.Close closes it
 	auth      *auth.Store
+	secrets   *secrets.Store // credentials store (spec §13)
 	authn     *auth.Authenticator
 	hub       *notify.Hub
 	sweeper   *jobs.Sweeper
@@ -158,6 +160,12 @@ func New(cfg Config) (*App, error) {
 		_ = a.Close()
 		return nil, fmt.Errorf("factoryapp: open auth: %w", err)
 	}
+	a.secrets, err = secrets.Open(filepath.Join(cfg.DataDir, secrets.FileName))
+	if err != nil {
+		_ = a.Close()
+		return nil, fmt.Errorf("factoryapp: open secrets: %w", err)
+	}
+	a.secrets.Now = now
 	a.jobs.Now = now
 	a.auth.Now = now
 	a.tasks.Now = now
@@ -400,9 +408,12 @@ func buildMux(a *App, mcpH http.Handler) http.Handler {
 	mux.Handle("/v1/deadletter", a.jobs.DeadLetterHandler())
 	mux.Handle("/v1/deadletter/", a.jobs.DeadLetterHandler())
 	mux.Handle("/v1/spend", a.jobs.SpendHandler())
-	mux.HandleFunc("GET /v1/usage", a.handleUsage)            // S2: window state (usage.go)
-	mux.HandleFunc("GET /v1/throttle", a.handleGetThrottle)   // S3: gate (throttle.go)
-	mux.HandleFunc("POST /v1/throttle", a.handlePostThrottle) // S3: operator override
+	mux.HandleFunc("GET /v1/secrets", a.handleListSecrets)            // credentials (spec §13): metadata only
+	mux.HandleFunc("POST /v1/secrets/{name}", a.handlePutSecret)      // upsert; never echoes the value
+	mux.HandleFunc("DELETE /v1/secrets/{name}", a.handleDeleteSecret) // no value-returning route exists
+	mux.HandleFunc("GET /v1/usage", a.handleUsage)                    // S2: window state (usage.go)
+	mux.HandleFunc("GET /v1/throttle", a.handleGetThrottle)           // S3: gate (throttle.go)
+	mux.HandleFunc("POST /v1/throttle", a.handlePostThrottle)         // S3: operator override
 	mux.Handle("/v1/mcp/factory", mcpH)
 	return mux
 }
