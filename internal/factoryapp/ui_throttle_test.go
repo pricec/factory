@@ -79,9 +79,9 @@ func TestUIThrottleControls(t *testing.T) {
 		t.Fatalf("POST off: %d %s", rec.Code, rec.Body)
 	}
 	var g struct {
-		M                string `json:"mode"`
-		S                string `json:"mode_source"`
-		U                string `json:"override_until"`
+		M string `json:"mode"`
+		S string `json:"mode_source"`
+		U string `json:"override_until"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &g); err != nil {
 		t.Fatal(err)
