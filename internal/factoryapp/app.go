@@ -31,6 +31,7 @@ import (
 	"github.com/pricec/factory/internal/notify"
 	"github.com/pricec/factory/internal/registry"
 	"github.com/pricec/factory/internal/secrets"
+	"github.com/pricec/factory/internal/summarize"
 	"github.com/pricec/factory/internal/tasks"
 	"github.com/pricec/factory/internal/throttle"
 	"github.com/pricec/factory/internal/wire"
@@ -71,6 +72,10 @@ type Config struct {
 	// nil disables it (cmd/factory passes auditor.LoadConfig of the
 	// FACTORY_AUDIT_* env).
 	Audit *auditor.Config
+	// Summarizer configures the local-model result digests (spec §6.13,
+	// digester.go); the zero value (no URL) disables them. cmd/factory
+	// passes summarize.LoadConfig of the FACTORY_SUMMARIZER_* env.
+	Summarizer summarize.Config
 }
 
 // App is the wired factory controller.
@@ -125,6 +130,10 @@ type App struct {
 
 	// audit is the factory auditor (spec §6.12, auditor.go).
 	audit *auditRuntime
+
+	// digest is the local-model summarisation pre-pass (spec §6.13,
+	// digester.go); nil when disabled.
+	digest *digester
 }
 
 // New opens the three sqlite stores under cfg.DataDir, wires every
@@ -186,6 +195,7 @@ func New(cfg Config) (*App, error) {
 	a.jobs.Now = now
 	a.auth.Now = now
 	a.tasks.Now = now
+	a.digest = newDigester(cfg.Summarizer, a.jobs)
 
 	// Liveness: any authed request or SSE connect bumps last_seen (spec
 	// §6.3); the SSE hub reports connect/disconnect.
@@ -244,6 +254,8 @@ func New(cfg Config) (*App, error) {
 		MarkSelfCancel: a.markSelfCancel,
 		// request_merge kicks the merge queue (spec §6.11).
 		MergeQueued: a.kickMergeQueue,
+		// read_result serves the local-model digest (spec §6.13).
+		ResultDigest: a.resultDigest,
 	})
 	if err != nil {
 		_ = a.Close()
@@ -341,6 +353,9 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	run("throttle releaser", func() error { a.releaserLoop(ctx); return nil })
 	run("usage pause", func() error { a.pauseLoop(ctx); return nil })
+	if a.digest != nil {
+		run("summarizer", func() error { a.digest.run(ctx); return nil })
+	}
 	run("task reaper", func() error { a.reaper.Run(ctx, taskReapInterval); return nil })
 	wg.Wait()
 	return nil

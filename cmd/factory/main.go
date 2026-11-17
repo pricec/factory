@@ -18,9 +18,17 @@ import (
 	"github.com/pricec/factory/internal/auditor"
 	"github.com/pricec/factory/internal/budgets"
 	"github.com/pricec/factory/internal/factoryapp"
+	"github.com/pricec/factory/internal/summarize"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "summarize-eval" {
+		if err := runSummarizeEval(os.Args[2:], os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "audit" {
 		if err := runAudit(os.Args[2:], os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -39,7 +47,15 @@ func main() {
 	for _, w := range warns {
 		log.Printf("factory: auditor config: %s", w)
 	}
+	sum, swarns := summarize.LoadConfig(os.Getenv)
+	for _, w := range swarns {
+		log.Printf("factory: summarizer config: %s", w)
+	}
+	if sum.Enabled() {
+		log.Printf("factory: summarizer: on (%s, model %s, min %d bytes, timeout %s)", sum.URL, sum.Model, sum.MinBytes, sum.Timeout)
+	}
 	app, err := factoryapp.New(factoryapp.Config{
+		Summarizer:   sum,
 		Audit:        &audit,
 		DataDir:      *dataDir,
 		Addr:         *addr,

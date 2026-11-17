@@ -54,6 +54,9 @@ type (
 	}
 	readResultArgs struct {
 		JobID string `json:"job_id"`
+		// Full forces the verbatim results even when a local-model
+		// digest exists (spec §6.13).
+		Full bool `json:"full,omitempty"`
 	}
 	cancelJobArgs struct {
 		JobID     string `json:"job_id"`
@@ -329,13 +332,61 @@ func readResultTool(cfg Config) mcp.ToolHandlerFor[readResultArgs, any] {
 		}
 		// The ONLY path by which full payloads enter LLM context (spec
 		// §9.4, §6.6): full results array plus spec.
-		return structuredResult(map[string]any{
+		out := map[string]any{
 			"job_id":  job.ID,
 			"state":   job.State,
 			"results": job.Results,
 			"spec":    job.Spec,
-		}), nil, nil
+		}
+		// Local-model digest (spec §6.13): the last result's `result`
+		// is swapped for its digest unless full=true. The stored results
+		// are never modified; full=true returns them verbatim.
+		if !in.Full && cfg.ResultDigest != nil {
+			if results, info, ok := digestResults(ctx, cfg, job); ok {
+				out["results"] = results
+				out["result_digest"] = info
+			}
+		}
+		return structuredResult(out), nil, nil
 	}
+}
+
+// digestNote is the marker read_result adds when it serves a digest.
+const digestNote = "results[-1].result was condensed by a local model; call read_result with full=true for the verbatim original"
+
+// digestResults returns job's results with the last entry's `result`
+// replaced by its stored digest (spec §6.13), plus the marker block; ok
+// is false when there is no current digest.
+func digestResults(ctx context.Context, cfg Config, job jobs.Job) ([]map[string]json.RawMessage, map[string]any, bool) {
+	var results []map[string]json.RawMessage
+	if err := json.Unmarshal(job.Results, &results); err != nil || len(results) == 0 {
+		return nil, nil, false
+	}
+	last := len(results) - 1
+	dg, ok := cfg.ResultDigest(ctx, job.ID, last)
+	if !ok {
+		return nil, nil, false
+	}
+	original := len(results[last]["result"])
+	text, err := json.Marshal(dg.Text)
+	if err != nil {
+		return nil, nil, false
+	}
+	entry := make(map[string]json.RawMessage, len(results[last])+1)
+	for k, v := range results[last] {
+		if k != "result" {
+			entry[k] = v
+		}
+	}
+	entry["result_digest"] = text
+	results[last] = entry
+	return results, map[string]any{
+		"note":           digestNote,
+		"model":          dg.Model,
+		"original_bytes": original,
+		"digest_bytes":   len(dg.Text),
+		"truncated":      dg.Truncated,
+	}, true
 }
 
 // cancelJobTool serves the cancel_job tool (spec §9.4, 2026-11-15
