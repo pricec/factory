@@ -188,6 +188,7 @@ func New(cfg Config) (*App, error) {
 	// Terminal hook (spec §6.5 proxy 4, §7.4): revoke the job's worker
 	// credentials, then flag over-budget jobs post-hoc.
 	a.jobs.SetOnTerminal(a.onTerminal)
+	a.jobs.SetOnCancelled(a.notifyCancelled)
 
 	// Planner credential: pre-arranged env bearer or freshly minted.
 	ctx := context.Background()

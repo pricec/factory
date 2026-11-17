@@ -3,6 +3,7 @@ package foremanapp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -55,6 +56,7 @@ func (a *App) SpawnWorker(ctx context.Context, spec wire.JobSpec) error {
 	}
 
 	hcfg := a.BuildHarnessConfig(spec, bearer)
+	hcfg.Cancel = a.registerCancel(spec.ID)
 	log.Printf("foremanapp: spawning worker for %s (model %q, runner %s)", spec.ID, hcfg.Model, workerharness.RunnerFor(hcfg.Model))
 
 	// Child-spawn state (spec §9.2, 2026-11-15 sub-spawning amendment):
@@ -109,12 +111,19 @@ func (a *App) runWorker(spec wire.JobSpec, hcfg workerharness.Config) {
 	// consumer skipped its revoke) and harness failures.
 	defer func() {
 		a.setWorkerLive(spec.ID, false)
+		a.clearCancel(spec.ID)
 		a.revokeJobCredential(context.Background(), spec.ID)
 	}()
 	// Credentials (spec §13.2): fetched before the child starts; a job
 	// promised secrets never runs without them. Values stay in hcfg
 	// (process memory) and are dropped when this function returns; Go
 	// strings are not zeroed - best effort only (spec §13.2).
+	select {
+	case <-hcfg.Cancel:
+		log.Printf("foremanapp: worker %s: cancelled before start", spec.ID)
+		return
+	default:
+	}
 	if len(spec.Secrets) > 0 {
 		env, err := a.fetchJobSecrets(a.workerCtx, spec)
 		if err != nil {
@@ -130,6 +139,12 @@ func (a *App) runWorker(spec wire.JobSpec, hcfg workerharness.Config) {
 		defer func() { hcfg.SecretEnv = nil }()
 	}
 	if err := workerharness.Run(a.workerCtx, hcfg); err != nil {
+		if errors.Is(err, workerharness.ErrCancelled) {
+			// Cancelled/superseded at the factory: stopped on purpose, so
+			// no failed result (it would only be ignored, never retried).
+			log.Printf("foremanapp: worker %s: stopped by job.cancel", spec.ID)
+			return
+		}
 		if a.workerCtx.Err() != nil {
 			log.Printf("foremanapp: worker %s: %v (foreman stopping)", spec.ID, err)
 			return

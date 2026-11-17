@@ -2,6 +2,7 @@ package workerharness
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -252,4 +253,57 @@ func TestBudgetKillReapsSIGTERMIgnoringGrandchild(t *testing.T) {
 	}
 	_ = syscall.Kill(pid, syscall.SIGKILL)
 	t.Fatalf("grandchild %d ignoring SIGTERM survived the budget kill", pid)
+}
+
+// TestCancelKillsWorkerAndPostsNothing: closing Config.Cancel SIGTERMs the
+// child's process group, SIGKILLs a SIGTERM-ignoring grandchild after the
+// grace, returns ErrCancelled and posts NO result (so nothing is retried).
+func TestCancelKillsWorkerAndPostsNothing(t *testing.T) {
+	t.Parallel()
+	pidFile := filepath.Join(t.TempDir(), "gc.pid")
+	body := "sh -c 'trap \"\" TERM; echo $$ > " + pidFile + "; while :; do sleep 0.2; done' >/dev/null 2>&1 &\nsleep 60"
+	dir := t.TempDir()
+	_, specPath := writeSpec(t, dir, nil)
+	rec := &recordingPost{}
+	cfg := testConfig(t, specPath, fakeOpencode(t, body), rec.post)
+	cfg.PostUsage = noUsage
+	cfg.IdleTimeout = time.Minute
+	cfg.Timeout = time.Minute
+	cfg.CancelGrace = 500 * time.Millisecond
+	cancel := make(chan struct{})
+	cfg.Cancel = cancel
+	go func() {
+		for range 100 { // wait for the grandchild to exist
+			if _, err := os.Stat(pidFile); err == nil {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		close(cancel)
+	}()
+	start := time.Now()
+	err := Run(context.Background(), cfg)
+	if !errors.Is(err, ErrCancelled) {
+		t.Fatalf("Run error = %v, want ErrCancelled", err)
+	}
+	if time.Since(start) > 20*time.Second {
+		t.Errorf("cancel took %s", time.Since(start))
+	}
+	if rec.calls() != 0 {
+		t.Errorf("posted %d results after cancel, want 0", rec.calls())
+	}
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("grandchild never started: %v", err)
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if syscall.Kill(pid, 0) != nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	t.Fatalf("grandchild %d survived cancel", pid)
 }

@@ -85,6 +85,12 @@ type Config struct {
 	// for the run; they are never written to job.json, config files, logs
 	// or posted envelopes (child output is redacted of them).
 	SecretEnv map[string]string
+	// Cancel, when closed, stops the worker: SIGTERM to the child's process
+	// group, SIGKILL after CancelGrace. Run then returns ErrCancelled and
+	// posts NO result (the job is already terminal at the factory).
+	Cancel <-chan struct{}
+	// CancelGrace is the SIGTERM->SIGKILL grace for Cancel; zero means 10s.
+	CancelGrace time.Duration
 	// Post delivers the fallback JobResult; nil means HTTP with Bearer
 	// auth. Retried at-least-once (§8.5).
 	Post PostFunc
@@ -221,6 +227,11 @@ func Run(ctx context.Context, cfg Config) error {
 			usage = claudecli.Usage{CostUSD: kill.costUSD, Model: cfg.Model}
 		}
 		recordUsage(ctx, cfg, spec, usage)
+	}
+
+	if kill.reason == reasonCancelled {
+		log.Printf("worker harness: job %s: cancelled by the factory; no result posted", spec.ID)
+		return ErrCancelled
 	}
 
 	if _, err := os.Stat(filepath.Join(jobDir, flagFileName)); err == nil {
@@ -439,12 +450,18 @@ func execChild(ctx context.Context, cfg Config, lim limits, jobDir, prompt strin
 		}
 		var waitErr error
 		exited := false
-		if k.reason == wire.ReasonBudget || k.reason == wire.ReasonLoop {
+		if k.reason == wire.ReasonBudget || k.reason == wire.ReasonLoop || k.reason == reasonCancelled {
 			// Clean stop: let the CLI flush its result object first.
 			killGroup(syscall.SIGTERM)
 			grace := cfg.TermGrace
 			if grace <= 0 {
 				grace = 5 * time.Second
+			}
+			if k.reason == reasonCancelled {
+				grace = cfg.CancelGrace
+				if grace <= 0 {
+					grace = 10 * time.Second
+				}
 			}
 			select {
 			case waitErr = <-done:
@@ -474,6 +491,8 @@ func execChild(ctx context.Context, cfg Config, lim limits, jobDir, prompt strin
 			killGroup(syscall.SIGKILL)
 			err := <-done
 			return err, killInfo{}, ctx.Err()
+		case <-cfg.Cancel: // nil channel never fires
+			return finish(killInfo{reason: reasonCancelled})
 		case <-tick.C:
 		}
 		now := time.Now()
@@ -502,6 +521,14 @@ type limits struct {
 	maxCostUSD float64       // live spend cap; 0 disables
 	loopLimit  int           // identical tool calls in a row; <=0 disables
 }
+
+// reasonCancelled marks a kill requested via Config.Cancel. It is internal:
+// it never reaches a posted result.
+const reasonCancelled = "cancelled"
+
+// ErrCancelled is returned by Run when the worker was stopped through
+// Config.Cancel. Callers must not report a failure for it.
+var ErrCancelled = errors.New("workerharness: worker cancelled")
 
 // killInfo records why the harness terminated the child ("" = it did not).
 type killInfo struct {

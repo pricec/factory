@@ -14,8 +14,10 @@ import (
 // Cancel/supersede (2026-11-15 amendment, spec §6.1, §6.9): a job in any
 // non-terminal state moves to the cancelled or superseded terminal state
 // through the transition machinery - never a direct DB write. A late
-// job.result for a cancelled job is ignored (terminal-idempotent, §6.4);
-// v1 has no foreman-side kill, so in-flight worker work is not force-stopped.
+// job.result for a cancelled job is ignored (terminal-idempotent, §6.4).
+// A job cancelled while dispatched or running also fires the onCancelled
+// hook so the factory can tell the owning foreman to kill the worker
+// (job.cancel envelope, spec §3.2).
 
 // Cancel outcomes: no such job, or the job sits in a terminal state and
 // rejects the transition (the HTTP handler surfaces these as 404 / 409,
@@ -74,6 +76,9 @@ func (s *Store) Cancel(ctx context.Context, id, to, reason string) (Job, error) 
 		job, _, err := s.Get(ctx, id)
 		if err != nil {
 			return Job{}, err
+		}
+		if (state == StateDispatched || state == StateRunning) && s.onCancelled != nil {
+			s.onCancelled(job)
 		}
 		return job, nil
 	}

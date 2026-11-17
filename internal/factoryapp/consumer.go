@@ -255,6 +255,35 @@ func (a *App) notifyDispatched(ctx context.Context, job jobs.Job) error {
 	return nil
 }
 
+// notifyCancelled posts a job.cancel envelope to the foreman that owns a
+// job cancelled/superseded while dispatched or running, so it kills the
+// worker (spec §3.2). The foreman inbox is durable: if the foreman is
+// offline the envelope waits and is delivered on reconnect, so no
+// separate offline path exists. Failures are logged; the job is already
+// terminal and any late result is ignored.
+func (a *App) notifyCancelled(job jobs.Job) {
+	if job.ForemanID == "" {
+		return
+	}
+	payload, _ := json.Marshal(map[string]string{"job_id": job.ID, "state": job.State})
+	env := wire.MessageEnvelope{
+		Type:    wire.TypeJobCancel,
+		JobID:   job.ID,
+		From:    FactoryMainInbox,
+		Payload: payload,
+	}
+	if err := env.Validate(); err != nil {
+		log.Printf("factoryapp: job.cancel for %s: %v", job.ID, err)
+		return
+	}
+	target := registry.InboxID(job.ForemanID)
+	if _, err := a.inbox.Post(context.Background(), target, env); err != nil {
+		log.Printf("factoryapp: job.cancel for %s -> %s: %v", job.ID, target, err)
+		return
+	}
+	log.Printf("factoryapp: job.cancel for %s (%s) -> %s", job.ID, job.State, target)
+}
+
 // taskHint is the outcome of reading payload.task_id for relay routing.
 type taskHint struct {
 	taskID string // the payload task to thread into; "" when unusable or unneeded

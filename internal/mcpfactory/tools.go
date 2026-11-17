@@ -194,6 +194,11 @@ func createJobTool(cfg Config) mcp.ToolHandlerFor[createJobArgs, any] {
 		if err := spec.Validate(); err != nil {
 			return nil, nil, err
 		}
+		// Factory-repo work must be pinned to foreman:server (factory_repo.go).
+		routeWarning, err := cfg.checkFactoryRouting(in.Task, spec.Foreman)
+		if err != nil {
+			return nil, nil, err
+		}
 		// Fail at create, never at dispatch (spec §13.2).
 		if len(spec.Secrets) > 0 {
 			if cfg.Secrets == nil {
@@ -210,6 +215,9 @@ func createJobTool(cfg Config) mcp.ToolHandlerFor[createJobArgs, any] {
 		// rules would reject a job whose routing never consults them.
 		state, foreman := "pending", ""
 		var warnings []string
+		if routeWarning != "" {
+			warnings = append(warnings, routeWarning)
+		}
 		if spec.Foreman != "" {
 			pin, found, err := jobs.FindForeman(ctx, cfg.Store, spec.Foreman)
 			if err != nil {
@@ -231,11 +239,11 @@ func createJobTool(cfg Config) mcp.ToolHandlerFor[createJobArgs, any] {
 			// amendment): entries must be tag names - bare or name:value -
 			// never capability values; an entry naming no registered tag key
 			// can never match, and the job would park pending silently.
-			var err error
-			warnings, err = cfg.Store.ValidateRequires(ctx, spec.Requires)
+			w, err := cfg.Store.ValidateRequires(ctx, spec.Requires)
 			if err != nil {
 				return nil, nil, err
 			}
+			warnings = append(warnings, w...)
 			// Ad hoc dispatch via the Matcher (spec §6.7): no matching foreman
 			// leaves the job pending.
 			if cfg.Matcher != nil {

@@ -46,6 +46,12 @@ type Config struct {
 	// and returns a func that withdraws the mark if the cancel fails; the
 	// factory uses it so the planner's own cancels do not wake it.
 	MarkSelfCancel func(jobID string) (undo func())
+	// FactoryForeman is the foreman factory-repo work must be pinned to;
+	// empty means DefaultFactoryForeman. FactoryRepoMarkers are the task
+	// substrings that identify factory-repo work; nil means
+	// DefaultFactoryRepoMarkers, an empty non-nil slice disables the guard.
+	FactoryForeman     string
+	FactoryRepoMarkers []string
 	// MergeQueued, when set, is called after request_merge queues a merge
 	// request (the factory kicks its merge-queue loop, spec §6.11).
 	MergeQueued func()
@@ -82,6 +88,8 @@ func Handler(cfg Config) (http.Handler, error) {
 			"secrets: optional credential NAMES (must exist in the store); reach the worker as env vars. " +
 			"foreman: optional explicit pin (bare or foreman:-prefixed id) - wins over requires " +
 			"matching; unknown foreman errors; offline pin pends until it returns. " +
+			"Work on the factory repo (pricec/factory or its worktrees) MUST pin foreman=foreman:server; " +
+			"an unpinned job that mentions it is rejected (factory_repo_needs_pin). " +
 			"tier: flash (cheapest, default), default (Flash max-thinking), hardest (strongest); " +
 			"pick the cheapest that works. " +
 			"When subscription usage is high the job may come back state=held with held_reason: " +
