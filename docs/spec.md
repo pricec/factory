@@ -1221,6 +1221,13 @@ sentence stay byte-identical across runners.
   CLIs so spawned workers can use either; the visibility check is
   PATH-aware (systemd's default service PATH, not the service user's
   interactive PATH).
+- `/install.sh` also writes the installer-owned systemd drop-in
+  `factory-foreman.service.d/05-claude-models.conf` with
+  FACTORY_WORKER_FLASH_MODEL=claude-haiku-5-5, FACTORY_WORKER_MODEL=claude-sonnet-5-5,
+  FACTORY_WORKER_HARDEST_MODEL=claude-opus-5-5 and
+  FACTORY_FOREMAN_BRAIN_MODEL=claude-opus-5-5. It sorts before an operator's
+  override.conf, so hand-set values win. The foreman logs a startup warning
+  when a claude-* model is configured but no Claude credentials are visible.
 
 ### 8.5 Reporting: primary & fallback (#5, #17, #1)
 
