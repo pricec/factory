@@ -20,6 +20,7 @@ import (
 
 	"github.com/pricec/factory/internal/factoryapp"
 	"github.com/pricec/factory/internal/foremanapp"
+	"github.com/pricec/factory/internal/ocusage"
 	"github.com/pricec/factory/internal/wire"
 	"github.com/pricec/factory/internal/workerharness"
 )
@@ -51,8 +52,12 @@ type stack struct {
 	// onBuild, when set, runs inside the BuildHarnessConfig seam (the
 	// spawner calls it before the secrets fetch): a deterministic hook.
 	onBuild func(spec wire.JobSpec)
-	ctx     context.Context
-	cancel  func()
+	// readOpencodeUsage, when set, stands in for the opencode-database
+	// usage reader on worker runs (nil: no capture; the fake binary must
+	// never be re-invoked for database discovery).
+	readOpencodeUsage ocusage.Reader
+	ctx               context.Context
+	cancel            func()
 
 	// workerBearers records the per-job worker token the spawner minted
 	// (captured via the BuildHarnessConfig override seam), for the
@@ -143,6 +148,7 @@ func boot(t *testing.T) *stack {
 		}
 		c := orig(spec, bearer)
 		c.OpenCODEBin = s.fakeOpencode
+		c.ReadUsage = s.readOpencodeUsage
 		c.ResultURL = s.foremanSrv.URL + "/v1/inboxes/" + foremanInbox + "/messages"
 		c.MCPURL = s.foremanSrv.URL + "/v1/mcp/worker"
 		c.Timeout = 10 * time.Second

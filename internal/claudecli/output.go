@@ -24,6 +24,10 @@ type Usage struct {
 	// RateLimit is the raw rate_limit_event.rate_limit_info JSON from a
 	// stream-json run ("" when none).
 	RateLimit string `json:"rate_limit,omitempty"`
+	// DurationMs is the run's wall-clock duration in ms (the result
+	// object's duration_ms; the measured child runtime for opencode
+	// runs, internal/ocusage); 0 when unknown.
+	DurationMs int64 `json:"duration_ms,omitempty"`
 }
 
 // IsZero reports whether nothing was parsed.
@@ -48,6 +52,7 @@ type resultObj struct {
 	Result       *string `json:"result"`
 	SessionID    string  `json:"session_id"`
 	TotalCostUSD float64 `json:"total_cost_usd"`
+	DurationMs   int64   `json:"duration_ms"`
 	Usage        *struct {
 		Input       int `json:"input_tokens"`
 		Output      int `json:"output_tokens"`
@@ -130,7 +135,7 @@ func ParseOutput(raw string) Output {
 	if obj.Result != nil {
 		out.Text = *obj.Result
 	}
-	u := Usage{CostUSD: obj.TotalCostUSD, SessionID: obj.SessionID}
+	u := Usage{CostUSD: obj.TotalCostUSD, SessionID: obj.SessionID, DurationMs: obj.DurationMs}
 	if obj.Usage != nil {
 		u.Input, u.Output = obj.Usage.Input, obj.Usage.Output
 		u.CacheCreate, u.CacheRead = obj.Usage.CacheCreate, obj.Usage.CacheRead

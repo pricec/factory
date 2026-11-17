@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 
+	"github.com/pricec/factory/internal/ocusage"
 	"github.com/pricec/factory/internal/workerharness"
 )
 
@@ -27,6 +28,7 @@ func main() {
 		MCPURL:    os.Getenv("WORKER_MCP_URL"),
 		Token:     os.Getenv("WORKER_TOKEN"),
 		WorkDir:   os.Getenv("WORKER_DIR"),
+		ReadUsage: ocusage.ReaderFor(""),
 	}
 	if err := workerharness.Run(context.Background(), cfg); err != nil {
 		log.Fatal(err)

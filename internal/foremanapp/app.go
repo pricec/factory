@@ -296,6 +296,7 @@ func New(cfg Config) (*App, error) {
 		ev := wire.UsageEvent{
 			Kind: wire.UsageKindBrain, ForemanID: cfg.ID, Model: u.Model, Input: u.Input, Output: u.Output,
 			CacheCreate: u.CacheCreate, CacheRead: u.CacheRead, CostUSD: u.CostUSD, SessionID: u.SessionID, Limit: u.Limit, RateLimit: u.RateLimit,
+			DurationMs: u.DurationMs,
 		}
 		if ev.Model == "" {
 			ev.Model = cfg.BrainModel
