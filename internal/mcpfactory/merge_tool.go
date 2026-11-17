@@ -13,12 +13,17 @@ type requestMergeArgs struct {
 	Branch string `json:"branch"`
 	Head   string `json:"head"`
 	Note   string `json:"note,omitempty"`
+	// After: branches that must land first (spec §6.11 dependency gate).
+	After []string `json:"after,omitempty"`
 }
 
 // requestMergeDescription tells the planner that merge-and-deploy asks are
-// merge requests, never prose jobs (the 2026-11-17 merge queue amendment).
-const requestMergeDescription = "Queue a merge of branch at commit head (sha) into master; note = PR title. " +
-	"The factory runs one merge at a time via the fixed procedure (PR, green CI, merge, deploy). " +
+// merge requests, never prose jobs (the 2026-11-17 merge queue amendment),
+// and that routine queuing is no longer its job: code-change jobs file
+// their own requests (job-owned merges, spec §6.11).
+const requestMergeDescription = "Queue a merge of branch at commit head (sha) into master; note = PR title; after = branches that must land first. " +
+	"Jobs queue their OWN merges (the factory tracks them): use this only for a branch no job queued. " +
+	"One merge at a time via the fixed procedure (PR, green CI, merge, deploy). " +
 	"Every \"merge (and deploy) X\" request MUST be request_merge, never a create_job prose job."
 
 func addRequestMergeTool(srv *mcp.Server, cfg Config) {
@@ -28,7 +33,7 @@ func addRequestMergeTool(srv *mcp.Server, cfg Config) {
 func requestMergeTool(cfg Config) mcp.ToolHandlerFor[requestMergeArgs, any] {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, in requestMergeArgs) (*mcp.CallToolResult, any, error) {
 		mr, err := cfg.Store.CreateMergeRequest(ctx, jobs.NewMergeRequest{
-			Branch: in.Branch, Head: in.Head, Note: in.Note, RequestedBy: "planner",
+			Branch: in.Branch, Head: in.Head, Note: in.Note, After: in.After, RequestedBy: "planner",
 		})
 		if err != nil {
 			return nil, nil, fmt.Errorf("request_merge: %w", err)
@@ -36,6 +41,10 @@ func requestMergeTool(cfg Config) mcp.ToolHandlerFor[requestMergeArgs, any] {
 		if cfg.MergeQueued != nil {
 			cfg.MergeQueued()
 		}
-		return structuredResult(map[string]any{"id": mr.ID, "state": mr.State}), nil, nil
+		out := map[string]any{"id": mr.ID, "state": mr.State}
+		if len(mr.WaitingOn) > 0 {
+			out["waiting_on"] = mr.WaitingOn
+		}
+		return structuredResult(out), nil, nil
 	}
 }

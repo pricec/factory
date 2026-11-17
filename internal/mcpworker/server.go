@@ -1,6 +1,7 @@
 // Package mcpworker exposes the worker's MCP tool surface (spec §9.2):
-// report_result, ask_parent, and - 2026-11-15 sub-spawning amendment -
-// spawn_child and collect_children: a streamable-HTTP MCP server authed by
+// report_result, ask_parent, - 2026-11-15 sub-spawning amendment -
+// spawn_child and collect_children, and - 2026-11-17 job-owned merges -
+// request_merge: a streamable-HTTP MCP server authed by
 // per-job worker tokens (spec §7.3), mounted on the foreman at
 // /v1/mcp/worker.
 package mcpworker
@@ -63,6 +64,11 @@ type Config struct {
 	// current attempt - the spawn state lives foreman-side, next to the
 	// spawner; collect_children filters the per-job inbox to these.
 	ChildJobs func(parentJobID string) []string
+	// RequestMerge relays a worker's request_merge to the factory's merge
+	// queue as a job-owned request for jobID (spec §9.2, §6.11); the
+	// integration wires foremanapp's POST /v1/merge-requests relay.
+	// Optional: when nil the tool answers with a clear tool error.
+	RequestMerge func(ctx context.Context, jobID string, in MergeRequestArgs) (MergeRequestResult, error)
 }
 
 func (c *Config) now() time.Time {
@@ -72,7 +78,7 @@ func (c *Config) now() time.Time {
 	return time.Now()
 }
 
-// Handler builds the worker MCP endpoint (spec §9.2): the four-tool MCP
+// Handler builds the worker MCP endpoint (spec §9.2): the five-tool MCP
 // server behind bearer auth that resolves the per-job worker token to a
 // job_id and rejects tokens without a job scope.
 func Handler(cfg Config) (http.Handler, error) {
@@ -111,6 +117,10 @@ func Handler(cfg Config) (http.Handler, error) {
 		Name:        "collect_children",
 		Description: "Long-poll this job's inbox for child job results; returns the pending ones.",
 	}, collectChildrenTool(cfg))
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "request_merge",
+		Description: requestMergeDescription,
+	}, requestMergeTool(cfg))
 
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})

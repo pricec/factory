@@ -45,8 +45,10 @@ func MergeTask(mr MergeRequest) string {
 		"Never work in the operator checkout /home/price/temp/factory.\n\n")
 	b.WriteString("Report with report_result exactly as the procedure's Reporting section says: " +
 		"status done only when the branch is merged AND the deploy is verified healthy; " +
-		"otherwise status failed with the reason (head drift, red checks after the one CI rerun, conflicts, deploy failure) - " +
-		"the merge request then goes needs_attention for the operator.\n")
+		"otherwise status failed with the reason (head drift, red checks after the one CI rerun, conflicts, deploy failure) " +
+		"and result.stage set as the Reporting section says - " +
+		"the merge request then goes needs_attention: the factory routes a fixable failure back to the branch's own job " +
+		"and everything else to the operator. You never fix beyond what step 5 allows.\n")
 	return b.String()
 }
 

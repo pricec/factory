@@ -103,6 +103,22 @@ var (
 	ErrMergeDuplicate = errors.New("jobs: an active merge request for this branch already exists")
 )
 
+// RequestedByJob is requested_by for a request a job filed for its own
+// branch (job-owned merges, spec §6.11); source_job_id names the job.
+const RequestedByJob = "job"
+
+// maxMergeAfter caps the after list (spec §6.11 dependency gate).
+const maxMergeAfter = 8
+
+// mergeColumns are the job-owned-merge columns added after the first
+// release of the table (addColumnIfMissing, see migrate).
+var mergeColumns = [][2]string{
+	{"source_job_id", "TEXT NOT NULL DEFAULT ''"},
+	{"after_branches", "TEXT NOT NULL DEFAULT ''"},
+	{"fix_round", "INTEGER NOT NULL DEFAULT 0"},
+	{"failure", "TEXT NOT NULL DEFAULT ''"},
+}
+
 // errBadMerge marks 400-level merge request failures.
 type errBadMerge struct{ msg string }
 
@@ -153,7 +169,24 @@ type MergeRequest struct {
 	JobID string `json:"job_id,omitempty"`
 	State string `json:"state"`
 	// Result summarizes the outcome; set on the terminal transition.
-	Result    string `json:"result,omitempty"`
+	Result string `json:"result,omitempty"`
+	// SourceJobID is the job that filed the request for its own branch
+	// (job-owned merges, spec §6.11); "" for operator/planner/auditor
+	// requests. The outcome is tracked against this job's task.
+	SourceJobID string `json:"source_job_id,omitempty"`
+	// After lists branches (same repo) that must have a landed merge
+	// request before this one dispatches (the dependency gate).
+	After []string `json:"after,omitempty"`
+	// WaitingOn is the subset of After not landed yet; computed on read
+	// for queued requests, never stored.
+	WaitingOn []string `json:"waiting_on,omitempty"`
+	// FixRound counts the automatic fix rounds behind this request: 0 for
+	// a first request, n when the requesting job is the n-th merge-fix
+	// job of the chain (bounded by MaxMergeFixRounds).
+	FixRound int `json:"fix_round,omitempty"`
+	// Failure is the classified failure kind of a needs_attention request
+	// (MergeFailure* constants); "" otherwise.
+	Failure   string `json:"failure,omitempty"`
 	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at"`
 }
@@ -174,12 +207,21 @@ type NewMergeRequest struct {
 	Head        string `json:"head"`
 	Note        string `json:"note"`
 	RequestedBy string `json:"-"`
+	// JobID is the requesting job for a job-owned merge ("" otherwise);
+	// stored as source_job_id.
+	JobID string `json:"job_id"`
+	// After: branches that must land first (the dependency gate).
+	After []string `json:"after"`
 }
 
 func newMergeRequestID() string { return "mr_" + ulid.Make().String() }
 
 // validate normalizes (trim, default repo, lowercase head) and checks in.
 func (in *NewMergeRequest) validate() error {
+	in.JobID = strings.TrimSpace(in.JobID)
+	if len(in.JobID) > 100 || strings.ContainsAny(in.JobID, " \t\r\n\"'`$;") {
+		return &errBadMerge{"job_id: not a job id"}
+	}
 	in.Repo = strings.TrimSpace(in.Repo)
 	in.Branch = strings.TrimSpace(in.Branch)
 	in.Head = strings.ToLower(strings.TrimSpace(in.Head))
@@ -192,8 +234,7 @@ func (in *NewMergeRequest) validate() error {
 		return &errBadMerge{"branch: required"}
 	case len(in.Branch) > maxMergeBranchBytes:
 		return &errBadMerge{fmt.Sprintf("branch: max %d bytes", maxMergeBranchBytes)}
-	case !branchRe.MatchString(in.Branch) || strings.Contains(in.Branch, "..") ||
-		strings.HasSuffix(in.Branch, "/") || strings.HasSuffix(in.Branch, ".lock"):
+	case !validBranchName(in.Branch):
 		return &errBadMerge{fmt.Sprintf("branch: %q is not an acceptable branch name ([A-Za-z0-9._/-], no ..)", in.Branch)}
 	case in.Branch == "master" || in.Branch == "main" || in.Branch == "HEAD":
 		return &errBadMerge{fmt.Sprintf("branch: %q is the integration branch itself", in.Branch)}
@@ -208,23 +249,73 @@ func (in *NewMergeRequest) validate() error {
 	case !utf8.ValidString(in.Note):
 		return &errBadMerge{"note: must be valid UTF-8"}
 	}
+	var after []string
+	for _, dep := range in.After {
+		dep = strings.TrimSpace(dep)
+		switch {
+		case dep == "":
+			continue
+		case len(dep) > maxMergeBranchBytes || !validBranchName(dep):
+			return &errBadMerge{fmt.Sprintf("after: %q is not an acceptable branch name", dep)}
+		case dep == in.Branch:
+			return &errBadMerge{fmt.Sprintf("after: %q is the branch being merged", dep)}
+		}
+		if !containsString(after, dep) {
+			after = append(after, dep)
+		}
+	}
+	if len(after) > maxMergeAfter {
+		return &errBadMerge{fmt.Sprintf("after: max %d branches", maxMergeAfter)}
+	}
+	in.After = after
 	return nil
+}
+
+// validBranchName is the §6.11 branch rule shared by branch and after.
+func validBranchName(b string) bool {
+	return branchRe.MatchString(b) && !strings.Contains(b, "..") &&
+		!strings.HasSuffix(b, "/") && !strings.HasSuffix(b, ".lock")
+}
+
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 // CreateMergeRequest validates in and stores it queued (spec §6.11). A
 // second active (queued or merging) request for the same repo+branch is
-// ErrMergeDuplicate: cancel the first to re-request at a new head.
+// ErrMergeDuplicate: cancel the first to re-request at a new head. One
+// exception keeps job-owned work moving: a job (JobID set) re-requesting
+// its branch while the earlier request is still only queued replaces it
+// (the old one is cancelled, "superseded by ..."), so a job that pushed
+// one more commit is never stuck behind its own stale request. A merging
+// request is never replaced.
+//
+// A request filed by a merge-fix job (MergeFixCreatedBy) inherits that
+// job's fix round, which is what bounds the automatic fix loop.
 func (s *Store) CreateMergeRequest(ctx context.Context, in NewMergeRequest) (MergeRequest, error) {
 	if err := in.validate(); err != nil {
 		return MergeRequest{}, err
 	}
-	var dup string
+	var dup, dupState string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id FROM merge_requests WHERE repo = ? AND branch = ? AND state IN (?, ?) LIMIT 1`,
-		in.Repo, in.Branch, MergeQueued, MergeMerging).Scan(&dup)
+		`SELECT id, state FROM merge_requests WHERE repo = ? AND branch = ? AND state IN (?, ?) LIMIT 1`,
+		in.Repo, in.Branch, MergeQueued, MergeMerging).Scan(&dup, &dupState)
 	switch {
 	case err == nil:
-		return MergeRequest{}, fmt.Errorf("%w: %s (%s)", ErrMergeDuplicate, dup, in.Branch)
+		if in.JobID == "" || dupState != MergeQueued {
+			return MergeRequest{}, fmt.Errorf("%w: %s is %s (%s)", ErrMergeDuplicate, dup, dupState, in.Branch)
+		}
+		if _, applied, err := s.TransitionMerge(ctx, dup, MergeCancelled,
+			"superseded by a newer request for "+in.Branch+" @ "+in.Head+" from job "+in.JobID); err != nil {
+			return MergeRequest{}, err
+		} else if !applied {
+			return MergeRequest{}, fmt.Errorf("%w: %s (%s)", ErrMergeDuplicate, dup, in.Branch)
+		}
 	case !errors.Is(err, sql.ErrNoRows):
 		return MergeRequest{}, err
 	}
@@ -232,23 +323,126 @@ func (s *Store) CreateMergeRequest(ctx context.Context, in NewMergeRequest) (Mer
 	mr := MergeRequest{
 		ID: newMergeRequestID(), Repo: in.Repo, Branch: in.Branch, Head: in.Head, Note: in.Note,
 		RequestedBy: in.RequestedBy, State: MergeQueued, CreatedAt: now, UpdatedAt: now,
+		SourceJobID: in.JobID, After: in.After,
+	}
+	if in.JobID != "" {
+		mr.RequestedBy = RequestedByJob
+		if job, ok, err := s.Get(ctx, in.JobID); err != nil {
+			return MergeRequest{}, err
+		} else if ok {
+			mr.FixRound = MergeFixRoundOf(job.Spec)
+		}
 	}
 	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO merge_requests (id, repo, branch, head, note, requested_by, state, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		mr.ID, mr.Repo, mr.Branch, mr.Head, mr.Note, mr.RequestedBy, mr.State, mr.CreatedAt, mr.UpdatedAt); err != nil {
+		`INSERT INTO merge_requests (id, repo, branch, head, note, requested_by, state, created_at, updated_at,
+		   source_job_id, after_branches, fix_round)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		mr.ID, mr.Repo, mr.Branch, mr.Head, mr.Note, mr.RequestedBy, mr.State, mr.CreatedAt, mr.UpdatedAt,
+		mr.SourceJobID, strings.Join(mr.After, "\n"), mr.FixRound); err != nil {
+		return MergeRequest{}, err
+	}
+	if mr.WaitingOn, err = s.mergeWaitingOn(ctx, mr); err != nil {
 		return MergeRequest{}, err
 	}
 	return mr, nil
 }
 
-const mergeCols = `id, repo, branch, head, note, requested_by, job_id, state, result, created_at, updated_at`
+const mergeCols = `id, repo, branch, head, note, requested_by, job_id, state, result, created_at, updated_at,
+	source_job_id, after_branches, fix_round, failure`
 
 func scanMerge(row rowScanner) (MergeRequest, error) {
 	var m MergeRequest
+	var after string
 	err := row.Scan(&m.ID, &m.Repo, &m.Branch, &m.Head, &m.Note, &m.RequestedBy, &m.JobID,
-		&m.State, &m.Result, &m.CreatedAt, &m.UpdatedAt)
+		&m.State, &m.Result, &m.CreatedAt, &m.UpdatedAt,
+		&m.SourceJobID, &after, &m.FixRound, &m.Failure)
+	if after != "" {
+		m.After = strings.Split(after, "\n")
+	}
 	return m, err
+}
+
+// mergeWaitingOn returns the branches of mr.After that have no landed
+// merge request in mr.Repo yet (spec §6.11 dependency gate). Only a
+// queued request waits; every other state returns nil.
+func (s *Store) mergeWaitingOn(ctx context.Context, mr MergeRequest) ([]string, error) {
+	if mr.State != MergeQueued {
+		return nil, nil
+	}
+	var waiting []string
+	for _, dep := range mr.After {
+		var one int
+		err := s.db.QueryRowContext(ctx,
+			`SELECT 1 FROM merge_requests WHERE repo = ? AND branch = ? AND state = ? LIMIT 1`,
+			mr.Repo, dep, MergeLanded).Scan(&one)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			waiting = append(waiting, dep)
+		case err != nil:
+			return nil, err
+		}
+	}
+	return waiting, nil
+}
+
+// queryMerges runs a merge_requests query and fills WaitingOn.
+func (s *Store) queryMerges(ctx context.Context, query string, args ...any) ([]MergeRequest, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	out := []MergeRequest{}
+	for rows.Next() {
+		m, err := scanMerge(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		if out[i].WaitingOn, err = s.mergeWaitingOn(ctx, out[i]); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// QueuedMerges returns every queued request, oldest first, with
+// WaitingOn filled.
+func (s *Store) QueuedMerges(ctx context.Context) ([]MergeRequest, error) {
+	return s.queryMerges(ctx, `SELECT `+mergeCols+` FROM merge_requests WHERE state = ? ORDER BY id ASC`, MergeQueued)
+}
+
+// ActiveMergeForBranch returns the queued or merging request for
+// repo+branch; ok is false when there is none.
+func (s *Store) ActiveMergeForBranch(ctx context.Context, repo, branch string) (MergeRequest, bool, error) {
+	list, err := s.queryMerges(ctx,
+		`SELECT `+mergeCols+` FROM merge_requests WHERE repo = ? AND branch = ? AND state IN (?, ?) ORDER BY id DESC LIMIT 1`,
+		repo, branch, MergeQueued, MergeMerging)
+	if err != nil || len(list) == 0 {
+		return MergeRequest{}, false, err
+	}
+	return list[0], true, nil
+}
+
+// MergeRequestsBySourceJob returns the requests job jobID filed for its
+// own work, oldest first.
+func (s *Store) MergeRequestsBySourceJob(ctx context.Context, jobID string) ([]MergeRequest, error) {
+	if jobID == "" {
+		return nil, nil
+	}
+	return s.queryMerges(ctx, `SELECT `+mergeCols+` FROM merge_requests WHERE source_job_id = ? ORDER BY id ASC`, jobID)
+}
+
+// SetMergeFailure records the classified failure kind of request id.
+func (s *Store) SetMergeFailure(ctx context.Context, id, kind string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE merge_requests SET failure = ? WHERE id = ?`, kind, id)
+	return err
 }
 
 // MergeRequests returns the newest limit requests (default 200), ordered
@@ -257,21 +451,8 @@ func (s *Store) MergeRequests(ctx context.Context, limit int) ([]MergeRequest, e
 	if limit <= 0 {
 		limit = 200
 	}
-	rows, err := s.db.QueryContext(ctx,
+	return s.queryMerges(ctx,
 		`SELECT `+mergeCols+` FROM (SELECT `+mergeCols+` FROM merge_requests ORDER BY id DESC LIMIT ?) ORDER BY id ASC`, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []MergeRequest{}
-	for rows.Next() {
-		m, err := scanMerge(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, m)
-	}
-	return out, rows.Err()
 }
 
 // GetMergeRequest returns one request; ok is false when absent.
@@ -297,15 +478,21 @@ func (s *Store) MergeRequestForJob(ctx context.Context, jobID string) (MergeRequ
 	return m, err == nil, err
 }
 
-// OldestQueuedMerge returns the oldest queued request; ok is false when
-// the queue is empty.
+// OldestQueuedMerge returns the oldest DISPATCHABLE queued request: the
+// oldest one whose after branches have all landed (spec §6.11). A request
+// still waiting on a dependency is skipped, so it never blocks the queue.
+// ok is false when nothing is dispatchable.
 func (s *Store) OldestQueuedMerge(ctx context.Context) (MergeRequest, bool, error) {
-	m, err := scanMerge(s.db.QueryRowContext(ctx,
-		`SELECT `+mergeCols+` FROM merge_requests WHERE state = ? ORDER BY id ASC LIMIT 1`, MergeQueued))
-	if errors.Is(err, sql.ErrNoRows) {
-		return MergeRequest{}, false, nil
+	queued, err := s.QueuedMerges(ctx)
+	if err != nil {
+		return MergeRequest{}, false, err
 	}
-	return m, err == nil, err
+	for _, m := range queued {
+		if len(m.WaitingOn) == 0 {
+			return m, true, nil
+		}
+	}
+	return MergeRequest{}, false, nil
 }
 
 // MergingRequests returns the requests currently merging (at most one by
@@ -532,6 +719,9 @@ func (s *Store) MergeRequestsHandler(onChange func()) http.Handler {
 			writeError(w, http.StatusBadRequest, "bad_request", "malformed body: "+err.Error(), false)
 			return
 		}
+		// job_id marks a job-owned request (a foreman relays its worker's
+		// request_merge here, spec §9.2); CreateMergeRequest then records
+		// requested_by "job".
 		in.RequestedBy = "operator"
 		mr, err := s.CreateMergeRequest(r.Context(), in)
 		if err != nil {

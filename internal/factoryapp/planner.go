@@ -93,6 +93,10 @@ func wakesPlanner(env wire.MessageEnvelope) bool {
 		return true
 	case notifyJobType:
 		return env.ThreadID != "" && !selfInitiatedJob(env)
+	case notifyMergeType:
+		// Job-owned merge outcomes (spec §6.11): only the ones that
+		// leave something to say or coordinate wake (mergeowner.go).
+		return env.ThreadID != "" && wakingMerge(env)
 	}
 	return false
 }
@@ -180,12 +184,20 @@ const closedByOperatorReason = "planner: the operator closed this task (see the 
 const (
 	reasonChat   = "planner: new chat from the operator on this task needs a reply"
 	reasonReport = "planner: foreman reports arrived on this task; tell the operator what they need and act on them"
-	reasonJob    = "planner: a job on this task reached a terminal state (done/failed/dead/cancelled): tell the operator the outcome in plain words, then take the next step (e.g. dispatch the follow-up, or ask for approval to merge/deploy - an approved merge is a request_merge call, never a prose job)"
+	reasonJob    = "planner: a job on this task reached a terminal state (done/failed/dead/cancelled): tell the operator the outcome in plain words. " +
+		"Code-change jobs own their work through to the merge: a done job normally queued its own merge (merge_requests in the notify.job payload), " +
+		"and the factory tracks that request, dispatches fix jobs when it fails, and sends you a notify.merge with the outcome - " +
+		"so do NOT call request_merge for it and do NOT dispatch a merge or fix follow-up; just say the merge is queued. " +
+		"Act only where coordination is needed: the job failed, it asks for a decision, or it finished code work without queuing a merge (then call request_merge yourself, never a prose job)"
+	reasonMerge = "planner: a job-owned merge request on this task changed state (notify.merge; its text says what happened). " +
+		"landed: tell the operator the work is merged and deployed, and close the task if nothing else is open. " +
+		"escalated, dependency_failed or dependency_stalled: the automatic fix path is exhausted or branches of different jobs need sequencing - " +
+		"this is your coordination job: decide the next step (a job, a re-request, or the operator's decision), do it, and tell the operator"
 )
 
 // wakeReason names why a task session wakes, from the batch's envelope types.
 func wakeReason(wakers []wire.MessageEnvelope) string {
-	var chat, job, report, closed bool
+	var chat, job, merge, report, closed bool
 	for _, env := range wakers {
 		switch env.Type {
 		case taskClosedByOperatorType:
@@ -194,6 +206,8 @@ func wakeReason(wakers []wire.MessageEnvelope) string {
 			chat = true
 		case notifyJobType:
 			job = true
+		case notifyMergeType:
+			merge = true
 		default:
 			report = true
 		}
@@ -207,6 +221,9 @@ func wakeReason(wakers []wire.MessageEnvelope) string {
 	}
 	if job {
 		parts = append(parts, reasonJob)
+	}
+	if merge {
+		parts = append(parts, reasonMerge)
 	}
 	if report || len(parts) == 0 {
 		parts = append(parts, reasonReport)
@@ -305,7 +322,7 @@ func (a *App) notifyOperatorJob(ctx context.Context, jobID string) {
 	if job.State == "cancelled" || job.State == "superseded" {
 		_, self = a.selfCancels.LoadAndDelete(job.ID)
 	}
-	a.notifyOperatorThreaded(ctx, a.jobThread(ctx, job.ID), job.ID, notifyJobType, map[string]any{
+	payload := map[string]any{
 		"self_initiated": self,
 		"job_id":         job.ID,
 		"state":          job.State,
@@ -315,7 +332,13 @@ func (a *App) notifyOperatorJob(ctx context.Context, jobID string) {
 		"summary":        lastJobSummary(job.Results),
 		"created_at":     job.CreatedAt,
 		"updated_at":     job.UpdatedAt,
-	})
+	}
+	// Merges the job queued for its own work (spec §6.11): the planner
+	// must not queue or chase them again.
+	if reqs := a.jobMergeSummaries(ctx, job.ID); len(reqs) > 0 {
+		payload["merge_requests"] = reqs
+	}
+	a.notifyOperatorThreaded(ctx, a.jobThread(ctx, job.ID), job.ID, notifyJobType, payload)
 }
 
 // lastJobSummary extracts the last result summary, mirroring the MCP

@@ -748,7 +748,7 @@ factory planner's list view carries summaries only (#7, #19).
 | `GET /v1/jobs/{id}` | (#9) the job record; plus `granted_secrets` (names only, §13.2; omitted when none); plus `task_id` when the job is directly linked to a task (§9.5.2; 2026-11-16 deploy-18 follow-up - omitted when unlinked, a read never writes lineage links) |
 | `POST /v1/jobs/{id}/cancel` | Cancel/supersede a job (2026-11-15 amendment, §6.1): optional body `{reason?, terminal_state?}` with `terminal_state` = `cancelled` (default) \| `superseded`; an empty body is a plain cancel. Every non-terminal state moves to that terminal state; every terminal job is rejected `409 already_terminal`; unknown job `404`; malformed body `400`. `200` + the refreshed job record. UI twin of the MCP `cancel_job` tool (§9.4) |
 | `GET /v1/foremen` | returns `id, online, capabilities` (#9) |
-| `POST /v1/merge-requests` | Queue a merge (2026-11-17 amendment, §6.11): body `{branch, head, repo?, note?}`; `201` + the request in state `queued`, `requested_by` `operator`. `400 bad_request` on invalid input; `409 duplicate_request` when the same repo+branch already has a queued or merging request |
+| `POST /v1/merge-requests` | Queue a merge (2026-11-17 amendment, §6.11): body `{branch, head, repo?, note?, after?, job_id?}`; `201` + the request in state `queued`, `requested_by` `operator`. `after` is the dependency gate and `job_id` marks a job-owned request (`requested_by` `job`, `source_job_id` = the job; this is what a foreman's `request_merge` relay sends, §9.2), both per §6.11 "Job-owned merges". `400 bad_request` on invalid input; `409 duplicate_request` when the same repo+branch already has a queued or merging request (a job-owned re-request replaces its own still-queued request instead, §6.11) |
 | `GET /v1/merge-requests?limit=` | `200 {paused, paused_changed_at?, requests: [...]}`: the persisted pause flag plus the newest `limit` (default 200, 1-1000) requests ordered **oldest first** (§6.11) |
 | `POST /v1/merge-requests/{id}/cancel` | optional body `{reason?}`; queued or merging -> `cancelled` (a merging request's merge job is cancelled first, §6.11); `200` + the request; `404 not_found`; `409 already_terminal` |
 | `POST /v1/merge-requests/pause`, `POST /v1/merge-requests/resume` | set / clear the persisted pause flag (§6.11); `200` + the `GET` view |
@@ -781,16 +781,22 @@ which this document does not transcribe yet.)
 
 Merges into `master` (and the deploy that follows) go through ONE
 factory-tracked queue, one merge at a time. Ad-hoc "merge and deploy" prose
-jobs are retired: the planner files `request_merge` (§9.4), the operator
-uses the UI or `POST /v1/merge-requests` (§6.9).
+jobs are retired. **The job that wrote a branch files its own merge
+request** with the worker tool `request_merge` (§9.2; "Job-owned merges"
+below); the operator uses the UI or `POST /v1/merge-requests` (§6.9), and
+the planner has `request_merge` (§9.4) for a branch no job queued.
 
 - **Resource** (`jobs.db`): `merge_requests(id 'mr_<ulid>' PK, repo
   (gh OWNER/REPO, default pricec/factory), branch, head, note,
-  requested_by (operator | planner | auditor, §6.12), job_id ('' until merging), state,
-  result ('' until terminal), created_at, updated_at)`, plus the one-row
+  requested_by (operator | planner | job | auditor, §6.12), job_id ('' until merging), state,
+  result ('' until terminal), created_at, updated_at, source_job_id,
+  after_branches, fix_round, failure)`, plus the one-row
   `merge_queue(paused, updated_at)` pause flag. JSON:
   `{id, repo, branch, head, note, requested_by, job_id?, state, result?,
-  created_at, updated_at}`.
+  source_job_id?, after?, waiting_on?, fix_round?, failure?,
+  created_at, updated_at}`. `job_id` is the **merge job**; `source_job_id`
+  is the job that **filed** the request (job-owned merges). `waiting_on`
+  is computed on read, never stored.
 - **Validation.** `branch` is required, made of `[A-Za-z0-9._/-]`, starts
   alphanumeric, has no `..`, and is not `master`, `main` or `HEAD`. `head`
   is a 7-40 char hex commit sha (lowercased). `note` is at most 2000 bytes.
@@ -810,7 +816,9 @@ uses the UI or `POST /v1/merge-requests` (§6.9).
   missing goes `needs_attention`, and one whose job is already terminal is
   closed as below. Then, when the queue is **not paused**, **no request is
   `merging`**, and **no merge job is non-terminal**, the pass dispatches the
-  **oldest** `queued` request. It claims the request (`queued -> merging`,
+  **oldest dispatchable** `queued` request (one whose `after` branches
+  have all landed; a request still waiting is skipped and never blocks
+  the queue). It claims the request (`queued -> merging`,
   `job_id` set) and only then creates the merge job. A unique index admits
   at most one `merging` row, so there is never more than one merge in
   flight.
@@ -839,10 +847,89 @@ uses the UI or `POST /v1/merge-requests` (§6.9).
   every cancel, there is no foreman-side kill in v1, so a worker already
   running keeps running until it exits. A cancel that races the dispatch
   (between claim and job creation) cancels the fresh job.
-- **Alert.** Every `-> needs_attention` raises a **P1** alert (never
+- **Alert.** A `-> needs_attention` raises a **P1** alert (never
   expires) through the §9.5.3 alerts surface, with source
   `factory:merge_queue`. The title names the request and branch; the body
-  carries repo/branch/head, the job id and `result`.
+  carries repo/branch/head, the job id and `result`. The one exception is
+  a job-owned request whose failure is routed to a merge-fix job (below):
+  that raises no alert.
+
+**Job-owned merges (2026-11-17 amendment).** A job owns its work through
+to the merge; no planner session has to remember a follow-up step. (The
+motivating failure: a finished branch sat un-queued for ~1.5h because the
+planner did not come back to it.)
+
+- **Request.** A code-change job calls the worker tool
+  `request_merge(branch, head, note?, after?, repo?)` (§9.2) when its
+  branch is pushed and green, before it reports done. The foreman relays
+  it as `POST /v1/merge-requests` with `job_id`; the request gets
+  `requested_by` `job` and `source_job_id`. An unknown `job_id` is still
+  recorded; one that is not a plain id is `400`.
+- **Re-request.** A request with `job_id` for a repo+branch whose active
+  request is still `queued` replaces it: the old one goes `cancelled`
+  (`result` "superseded by ...") and the new one is queued, so a job that
+  pushed one more commit is not stuck behind its own stale head. A
+  `merging` request is never replaced (`409`). Requests without `job_id`
+  keep the plain duplicate refusal.
+- **Dependency gate (`after`).** Up to 8 branch names (same validation as
+  `branch`, not the branch itself, deduplicated). The request does not
+  dispatch until every named branch has a `landed` request in the same
+  repo; until then `waiting_on` lists the missing ones. A dependency
+  whose merge fails or is cancelled does not release the dependent. Any
+  requester may set `after`.
+- **Failure classification.** On `-> needs_attention` the factory stores
+  `failure`, from the merge job's last report: `result.stage` when it is
+  one of `preflight | head_drift | nothing_to_merge | ci | conflict |
+  merge | deploy` (docs/merging.md § Reporting), else the pinned
+  summary / error-message prefix (`head drift`, `checks red`, `conflict`,
+  `nothing to merge`, `preflight`, `deploy`, `merge`), else `other` (also
+  for a merge job that never reported, and for a request closed by
+  reconciliation).
+- **Routing of a job-owned outcome** (requests with `source_job_id`; the
+  outcome is tracked against the task the source job resolves to, §9.5.2):
+
+  | outcome | action |
+  |---|---|
+  | `landed` | `notify.merge` (`action: landed`) on the task, waking the planner so the operator is told |
+  | `needs_attention`, `failure` one of `ci`, `conflict`, `head_drift`, `fix_round` < 2, task not closed | a **merge-fix job** is created and dispatched; `notify.merge` (`fix_dispatched`, not waking); no alert |
+  | any other `needs_attention` | the P1 alert, linked to the task and saying why no fix job ran, and `notify.merge` (`escalated`, waking) |
+  | `cancelled` | `notify.merge` (`cancelled`, not waking) |
+
+  A waking note never reopens a closed task (it is recorded, not waking).
+  Requests without a source job keep the alert-only behavior; auditor
+  requests keep §6.12.
+- **The merge-fix job** is built by code (`jobs.MergeFixJobSpec`):
+  `created_by` `factory:merge_fix`; tier, model, timeouts, priority,
+  budget, requires and secrets of the source job; pinned to the source
+  job's pin, else to the foreman it ran on; linked to the source job's
+  task before dispatch; created through the usual dispatch gate (it may be
+  `held`). Payload `{kind: "merge_fix", merge_request_id, repo, branch,
+  head, failure, fix_round, origin_job_id}`. Its task text names the
+  failed request and the failure (as data), quotes the **origin** job's
+  task (the first job of the chain, capped at 6000 B) for scope, and
+  tells the job to fix on the same branch (merge master in, never rebase,
+  never force-push, never weaken tests), run CI, push and call
+  `request_merge` again; a failure outside the branch's scope is reported
+  `failed` (`error.kind` `validation`), which reaches the planner as an
+  ordinary terminal job.
+- **Bound.** A request filed by a merge-fix job inherits that job's
+  `fix_round` (whatever branch it names). Round 1 follows the first
+  failure, round 2 the second; a failure at `fix_round` 2 escalates. There
+  are never more than 2 merge-fix jobs per chain.
+- **Dependents.** When a request reaches `needs_attention` without a fix
+  job, or `cancelled`, every queued job-owned request waiting on its
+  branch gets `notify.merge` (`dependency_failed`, waking) on its own
+  task. A queued request that has waited 1h on a branch with no queued or
+  merging request raises one P1 alert and `notify.merge`
+  (`dependency_stalled`, waking); deduplicated per process. Sequencing the
+  branches of different jobs is the planner's coordination job; the
+  dependent stays queued until it is released or cancelled.
+- **`notify.merge`** (to `planner:main`, threaded on the task, internal):
+  `{wake, action, merge_request_id, repo, branch, head, state, failure?,
+  result?, source_job_id?, fix_round?, fix_job_id?, waiting_on?, text}`.
+  `text` says what happened and what, if anything, is left to do.
+- The merge job, its procedure (docs/merging.md), the head pin, the one
+  CI rerun and the deploy check are the same for every requester.
 
 ### 6.12 Factory auditor (2026-11-17 amendment)
 
@@ -1165,7 +1252,7 @@ no shared state.
 ### 8.3 Prompt construction (#5, #28)
 
 ```
-{task}\n\nMachine input:\n{payload JSON}\n\nReport with the inbox_report_result tool. If you cannot, your final stdout is used as fallback.\nIf this job is a duplicate of, or superseded by, another job, report status=failed with error.kind=superseded (it is never retried). Use error.kind=validation for failures that will fail the same way again (permissions, auth, configuration).
+{task}\n\nMachine input:\n{payload JSON}{ownership note}\n\nReport with the inbox_report_result tool. If you cannot, your final stdout is used as fallback.\nIf this job is a duplicate of, or superseded by, another job, report status=failed with error.kind=superseded (it is never retried). Use error.kind=validation for failures that will fail the same way again (permissions, auth, configuration).
 ```
 
 The tool name is `inbox_report_result` (#28): the generated config mounts
@@ -1175,6 +1262,18 @@ the agent actually sees. The Claude Code runner (§8.4) exposes the same
 server's tools as `mcp__inbox__report_result`, so a claude-routed job's
 prompt uses that spelling; task, machine-input block, and the fallback
 sentence stay byte-identical across runners.
+
+Ownership note (2026-11-17 amendment, job-owned merges, §6.11). Every job
+except a merge job (`created_by` `factory:merge_queue`), an auditor job
+(`factory:auditor`; the factory queues those merges, §6.12) and a
+`spawn_child` child (`parent_job_id` set; its parent owns the branch)
+gets, between the machine input and the reporting instruction:
+
+```
+\n\nOwn this job to the end; no one follows up for you. If it changes code in a repository: work on a branch, get CI green (`make ci`), push, then call the inbox_request_merge tool yourself (branch, head sha; after = branches of other jobs that must merge first) and put the merge request id in your report. The factory merges, deploys, and dispatches a fix job if the merge fails. Decide details yourself; use inbox_ask_parent or a failed report only when you need coordination with other jobs or a decision only the operator can make.
+```
+
+The two tool names follow the runner spelling like `report_result`.
 
 ### 8.4 Child CLI invocation & generated config (#5, #13, #28, #31; claude amendment 2026-11-16)
 
@@ -1443,7 +1542,7 @@ orphaned, live, and local job ids.
   a minimal jsonrpc-over-HTTP MCP (2 tools) and record the decision in this
   section (#17, #15).
 - Tool descriptions stay tiny (per-turn token cost for every LLM caller,
-  #6); byte budgets asserted by test: worker surface < 1.5KB total (#17; 2026-11-17 typed report_result input schema, was 1KB);
+  #6); byte budgets asserted by test: worker surface < 2KB total (#17; 2026-11-17 job-owned merges: raised from 1.5KB for `request_merge`, §9.2; earlier 2026-11-17 typed report_result input schema, was 1KB);
   foreman surface < 1.5KB (#18; 2KB since the 2026-11-16 `raise_alert` tool); factory surface < 5KB (2026-11-17 job secrets; was 4.5KB, merge
   queue: raised from 4KB for `request_merge`, §6.11 - 4093 B were in use;
   earlier: < 4KB since the 2026-11-16
@@ -1474,8 +1573,8 @@ orphaned, live, and local job ids.
 
 Tools (exact; opencode exposes each as `<server>_<tool>` - with the server
 named `inbox`, the agent sees `inbox_report_result`, `inbox_ask_parent`,
-`inbox_spawn_child`, and `inbox_collect_children` (#28), and §8.3's prompt
-wording matches):
+`inbox_spawn_child`, `inbox_collect_children`, and `inbox_request_merge`
+(#28), and §8.3's prompt wording matches):
 
 - `report_result(status, summary, result?, error?, usage?)` - validate via
   `internal/wire`; post the JobResult to the result inbox (409 dedupe
@@ -1542,6 +1641,18 @@ collecting:
   current attempt) is foreman-side state next to the spawner: a restarted
   foreman - which kills its whole worker tree anyway - collects nothing
   rather than a previous attempt's stale results.
+
+Job-owned merges (2026-11-17 amendment, §6.11):
+
+- `request_merge(branch, head, note?, after?, repo?)` - files the calling
+  job's own merge request. The foreman relays it synchronously to the
+  factory, `POST {FactoryURL}/v1/merge-requests` with the paired bearer
+  and `job_id` = the caller's job (taken from the worker token, never
+  from an argument), and returns `{id, state, waiting_on?}`. `branch` and
+  `head` are required. A factory refusal (validation, an active request
+  that is already merging) or an unreachable factory is a tool error
+  carrying the factory's `code: message`. The tool is on every worker's
+  surface; which jobs are told to use it is §8.3.
 
 The depth cap and the inheritance caps read the caller's persisted JobSpec
 (the spawner's `jobs/{id}/job.json`) through a foreman-provided seam; the
@@ -1692,12 +1803,14 @@ Tools (exact):
   a tool error naming the state; an unknown id is a tool error
   (`unknown job`). The planner's alternative to direct `jobs.db` writes
   (2026-11-15 amendment).
-- `request_merge(branch, head, note?)` - queues a merge request
+- `request_merge(branch, head, note?, after?)` - queues a merge request
   (§6.11; `requested_by` `planner`, repo the default) and returns
-  `{id, state}`. Invalid input and a duplicate active branch are tool
-  errors. The description tells the planner that EVERY "merge (and
+  `{id, state, waiting_on?}`. Invalid input and a duplicate active branch
+  are tool errors. The description tells the planner that EVERY "merge (and
   deploy) X" request is a `request_merge` call, never a `create_job` prose
-  job (2026-11-17 amendment).
+  job (2026-11-17 amendment), and that jobs queue their own merges: the
+  planner uses this only for a branch no job queued (job-owned merges,
+  §6.11).
 - `message_foreman(foreman_id, type, payload)` - envelope to that
   foreman's inbox; `foreman_id` accepts the bare id or the full
   `foreman:{id}` form (normalized - never double-prefixed); `payload`
@@ -1819,21 +1932,30 @@ never stored: only `chat.message` and `brain.reply` are operator-visible,
 | `brain.reply` | `factory:brain` or `factory`, `{text}` | no | no | the planner's `notify_operator` (§9.4), the planner-failure note, and the alert seed of §9.5.3 |
 | `foreman.report` | `foreman:{id}`, free-form (typically `{text}`) | yes | yes | relayed verbatim from `factory:main`, stamped with its task (§9.5.2 relay stamping) |
 | `brain.failed` | `foreman:{id}`, `{envelope_id, envelope_type, error}` | yes | yes | a foreman brain session failed on a delegated envelope (§3.3); relayed exactly like `foreman.report`, so a failed delegation is never silent |
-| `notify.job` | `factory`, `{id, state, foreman, last_error, over_budget, summary}` and `job_id`, plus `self_initiated` | yes | **yes, when threaded** (2026-11-16 wake-on-terminal) | terminal job transition (done/failed/timed_out/dead/cancelled/superseded); stamped with its task when attributable, else unthreaded; hidden by default, no chips (operator DECISION 2). Wakes the planner on its task so the operator hears the outcome unasked. NO wake when unthreaded (never opens a task) or when `self_initiated` is true (the planner's own `cancel_job`, §9.4: it already knows) |
+| `notify.job` | `factory`, `{id, state, foreman, last_error, over_budget, summary}` and `job_id`, plus `self_initiated`, plus `merge_requests: [{id, branch, head, state, waiting_on?}]` when the job filed its own merge requests (§6.11) | yes | **yes, when threaded** (2026-11-16 wake-on-terminal) | terminal job transition (done/failed/timed_out/dead/cancelled/superseded); stamped with its task when attributable, else unthreaded; hidden by default, no chips (operator DECISION 2). Wakes the planner on its task so the operator hears the outcome unasked. NO wake when unthreaded (never opens a task) or when `self_initiated` is true (the planner's own `cancel_job`, §9.4: it already knows) |
+| `notify.merge` | `factory`, the §6.11 `notify.merge` payload, and `job_id` = the source job | yes | **yes, when threaded and `wake` is true** | outcome of a job-owned merge request (§6.11): `landed`, `escalated`, `dependency_failed`, `dependency_stalled` wake; `fix_dispatched` and `cancelled` are a record only. Never posted without a task |
 | `task.changed`, `alert.changed` | synthetic, payload = Task / Alert | n/a | no | SSE hints only, NOT persisted (§9.5.2, §9.5.3) |
 | `notify.pending`, `notify.unhandled` | `factory` | yes | no | **legacy**: no longer produced; since the redesign they are P1 and P2 alerts (§9.5.3). Old rows stay readable (backfilled into the legacy task) |
 
 Planner loop (internal/factoryapp, twin of the consumer loop): drains
-`planner:main`; `chat.message`, `foreman.report`, `brain.failed` and a
-threaded, not self-initiated terminal `notify.job` wake the planner, ONE session per touched task with that task's thread as context
+`planner:main`; `chat.message`, `foreman.report`, `brain.failed`, a
+threaded, not self-initiated terminal `notify.job` and a threaded waking
+`notify.merge` wake the planner, ONE session per touched task with that task's thread as context
 (§9.5.2). A session is the §9.4 surface with the planner bearer and the model
 from the settings panel > `FACTORY_PLANNER_MODEL` (default per §6.5; the child CLI routes on the
 model: the Claude Code CLI for claude-* ids, opencode otherwise, §9.4).
 Per-payload 2KB caps apply (§6.6). The wake reason names the trigger:
 operator chat needs a reply; a foreman report must be relayed to the operator
 and acted on; a terminal job (done/failed/dead/cancelled) must be reported in
-plain words and followed up (dispatch the next job, or ask approval to
-merge/deploy). A batch mixing kinds joins the reasons (chat first), so every
+plain words. Since the job-owned-merge amendment (§6.11) the job wake reason
+tells the planner that code-change jobs queue their own merge and the
+factory tracks it: the planner does not call `request_merge` for it and
+does not dispatch merge or fix follow-ups; it acts only where coordination
+is needed (the job failed, it asks for a decision, or it finished code
+work without queuing a merge). A waking `notify.merge` has its own reason:
+`landed` is told to the operator (and the task closed when nothing else is
+open); `escalated`, `dependency_failed` and `dependency_stalled` are the
+planner's coordination job. A batch mixing kinds joins the reasons (chat first), so every
 trigger is covered. Terminal jobs finishing together coalesce into ONE session
 per task (§9.5.2). Wakes are never throttled by the token gate. `notify.pending`
 and long-pending alerts do NOT wake (a pending job raises the §9.5.3 P1 alert,

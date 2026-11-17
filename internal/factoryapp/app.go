@@ -131,6 +131,9 @@ type App struct {
 	mergeMu      sync.Mutex
 	mergeKick    chan struct{}
 	mergeForeman string
+	// mergeStallAlerted dedupes the stalled-dependency alert per request
+	// (mergeowner.go); guarded by mergeMu.
+	mergeStallAlerted map[string]bool
 
 	// audit is the factory auditor (spec §6.12, auditor.go).
 	audit *auditRuntime
@@ -155,6 +158,7 @@ func New(cfg Config) (*App, error) {
 		advertise:          cfg.AdvertiseURL,
 		pendingAlertedJobs: map[string]string{},
 		mergeKick:          make(chan struct{}, 1),
+		mergeStallAlerted:  map[string]bool{},
 		mergeForeman:       mergeForemanFrom(cfg.MergeForeman, os.Getenv(EnvMergeForeman)),
 	}
 	if a.advertise == "" {

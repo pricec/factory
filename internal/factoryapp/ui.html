@@ -1885,7 +1885,11 @@ async function loadMerges() {
     "<td>" + esc(m.branch) + "</td><td>" + esc((m.head || "").slice(0, 12)) + "</td>" +
     "<td>" + esc(mqAge(m.created_at)) + "</td>" +
     "<td>" + (m.job_id ? '<a class="mq-job" data-job="' + esc(m.job_id) + '">' + esc(m.job_id) + "</a>" : "-") + "</td>" +
-    "<td>" + esc(m.note || "") + (m.result ? '<div class="sub">' + esc(m.result) + "</div>" : "") + "</td>" +
+    "<td>" + esc(m.note || "") +
+      ((m.waiting_on || []).length ? '<div class="sub">waiting on: ' + esc(m.waiting_on.join(", ")) + "</div>" : "") +
+      (m.source_job_id ? '<div class="sub">requested by job <a class="mq-job" data-job="' + esc(m.source_job_id) + '">' + esc(m.source_job_id) + "</a>" +
+        (m.fix_round ? " · fix round " + esc(String(m.fix_round)) : "") + (m.failure ? " · failure: " + esc(m.failure) : "") + "</div>" : "") +
+      (m.result ? '<div class="sub">' + esc(m.result) + "</div>" : "") + "</td>" +
     "<td>" + (m.state === "queued" || m.state === "merging"
       ? '<button class="mq-cancel" data-id="' + esc(m.id) + '">cancel</button>' : "") + "</td></tr>");
   setHTML($("list"), table(["state", "branch", "head", "age", "job", "note / result", ""], rows));
