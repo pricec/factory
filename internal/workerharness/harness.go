@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/pricec/factory/internal/claudecli"
+	"github.com/pricec/factory/internal/ocusage"
 
 	"github.com/pricec/factory/internal/wire"
 )
@@ -74,6 +75,11 @@ type Config struct {
 
 	// OpenCODEBin is the opencode binary; "" means "opencode" on PATH.
 	OpenCODEBin string
+	// ReadUsage reads the sessions opencode recorded for a dir since a
+	// ms timestamp: the opencode-runner usage capture (opencode prints no
+	// usage). Production wires ocusage.ReaderFor; nil skips the capture
+	// (tests whose fake OpenCODEBin must not be re-invoked for discovery).
+	ReadUsage ocusage.Reader
 	// ClaudeBin is the Claude Code CLI binary; "" means "claude" on
 	// PATH. Used only by runs routed to the claude runner (§8.4).
 	ClaudeBin string
@@ -202,6 +208,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if lim.loopLimit == 0 {
 		lim.loopLimit = wire.DefaultLoopLimit
 	}
+	started := time.Now()
 	runErr, kill, harnessErr := execChild(ctx, cfg, lim, jobDir, buildPrompt(spec, runnerFor(cfg.Model)), stdout, stderr)
 	if harnessErr != nil {
 		return harnessErr
@@ -227,6 +234,17 @@ func Run(ctx context.Context, cfg Config) error {
 			usage = claudecli.Usage{CostUSD: kill.costUSD, Model: cfg.Model}
 		}
 		recordUsage(ctx, cfg, spec, usage)
+	} else {
+		// opencode prints no usage: read the sessions it recorded for
+		// this job dir since the child started and post each as a
+		// job.usage event. Synchronous on purpose: the per-job bearer is
+		// revoked when the harness returns (spec §7.4 usage-401), so a
+		// background post would race the revocation. Bounded by
+		// ocusage.UsageReadTimeout; failures log, never fail the job.
+		durationMs := time.Since(started).Milliseconds()
+		for _, s := range readRunUsage(cfg, jobDir, started.UnixMilli()) {
+			recordUsage(ctx, cfg, spec, s.Usage(cfg.Model, durationMs))
+		}
 	}
 
 	if kill.reason == reasonCancelled {
@@ -265,6 +283,7 @@ func recordUsage(ctx context.Context, cfg Config, spec wire.JobSpec, u claudecli
 		Kind: wire.UsageKindWorker, JobID: spec.ID, Model: u.Model, Tier: spec.Tier,
 		Input: u.Input, Output: u.Output, CacheCreate: u.CacheCreate, CacheRead: u.CacheRead,
 		CostUSD: u.CostUSD, SessionID: u.SessionID, Limit: u.Limit, RateLimit: u.RateLimit,
+		DurationMs: u.DurationMs,
 	}
 	if ev.Model == "" {
 		ev.Model = cfg.Model
@@ -272,6 +291,21 @@ func recordUsage(ctx context.Context, cfg Config, spec wire.JobSpec, u claudecli
 	if err := cfg.PostUsage(ctx, cfg.ResultURL, cfg.Token, ev); err != nil {
 		log.Printf("worker harness: job %s: post usage: %v", spec.ID, err)
 	}
+}
+
+// readRunUsage reads the opencode sessions recorded for the run's dir
+// since sinceMs via cfg.ReadUsage (nil: none). Errors log and degrade to
+// none.
+func readRunUsage(cfg Config, dir string, sinceMs int64) []ocusage.Session {
+	if cfg.ReadUsage == nil {
+		return nil
+	}
+	sessions, err := cfg.ReadUsage(dir, sinceMs)
+	if err != nil {
+		log.Printf("worker harness: opencode usage read for %s: %v", filepath.Base(dir), err)
+		return nil
+	}
+	return sessions
 }
 
 // loadSpec reads the job JSON, applies the pinned defaults, and validates

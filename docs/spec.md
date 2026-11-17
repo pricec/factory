@@ -467,6 +467,27 @@ created that day). The per-job `budget.max_cost_usd` harness kill and
 `over_budget` flag are unchanged. The two env vars are deprecated: if set
 they are ignored and a one-line deprecation warning is logged at startup.
 
+Usage capture for opencode runs (2026-11-17 amendment, salvaged from the
+2026-11-16 session.usage ledger): every captured CLI run lands in the one
+append-only `usage_events` store (`wire.UsageEvent`; envelopes `job.usage`
+from workers, `usage.record` from foreman brains; planner rows in-process).
+Claude runs parse usage from the CLI's result object; opencode prints none,
+so after an opencode child exits (worker, foreman brain, planner) the runner
+reads the sessions opencode recorded for the child's working directory
+since spawn from the host's opencode database (`internal/ocusage`:
+`opencode debug paths db`, read-only `session_v2`, bounded 10s) and records
+one event per session (session_id = the opencode session id; reasoning
+tokens fold into `output`, cache writes are `cache_create`). Best effort: a
+read failure logs and records nothing. The worker read is synchronous,
+before the harness returns, so the `job.usage` post precedes the per-job
+bearer revocation (§7.4 usage-401). Events carry `duration_ms` (the claude
+result's `duration_ms`; measured child wall clock for opencode; 0 =
+unknown). Job-less events (planner, brain) dedupe on kind + session_id like
+job-tied ones. Reporting: `GET /v1/usage/events?day=YYYY-MM-DD|all&kind=
+worker|planner|brain&limit=N` (default today, 200, max 500; newest first)
+lists the per-run rows, and each `/v1/usage` `factory_spend` window carries
+`by_kind: {worker|planner|brain: {runs, tokens, cost_usd}}`.
+
 Model tiering (#13, #28, #29, #30, #31, #32): the factory standardizes on GLM via
 OpenRouter (one provider, one credential) and optimizes for cost -
 `internal/models` pins the per-role defaults, every role is

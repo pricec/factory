@@ -16,6 +16,7 @@ import (
 
 	"github.com/pricec/factory/internal/claudecli"
 	"github.com/pricec/factory/internal/llmctx"
+	"github.com/pricec/factory/internal/ocusage"
 	"github.com/pricec/factory/internal/tasks"
 	"github.com/pricec/factory/internal/wire"
 )
@@ -72,8 +73,13 @@ type PlannerBrain struct {
 	// nil means the real child CLI (routed on the session model, §9.4).
 	// Tests replace it with a recorder; no test ever invokes a real CLI.
 	Exec func(ctx context.Context, prompt string) (string, error)
-	// OnUsage, when set, receives the usage parsed from each claude run.
+	// OnUsage, when set, receives the usage of each run: parsed from the
+	// claude CLI's output, or read per session from the opencode database
+	// after an opencode run (internal/ocusage).
 	OnUsage func(ctx context.Context, taskID string, u claudecli.Usage)
+	// ReadUsage reads the sessions opencode recorded for a dir since a ms
+	// timestamp; nil means the host's opencode database. Test seam.
+	ReadUsage ocusage.Reader
 	// taskID is set by forTask for per-task sessions.
 	taskID string
 }
@@ -291,13 +297,43 @@ func (b *PlannerBrain) runOpencode(ctx context.Context, prompt string) (string, 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	started := time.Now()
+	err := cmd.Run()
+	b.recordOpencodeUsage(ctx, started)
+	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return stdout.String(), fmt.Errorf("planner session exceeded %s", plannerBrainTimeout)
 		}
 		return stdout.String(), fmt.Errorf("opencode run: %w; stderr: %s", err, snippet(stderr.String()))
 	}
 	return stdout.String(), nil
+}
+
+// recordOpencodeUsage reports the sessions opencode recorded for WorkDir
+// since started through OnUsage - opencode prints no usage, so this is the
+// opencode route's capture (the claude route parses stdout). It runs on
+// success and failure alike (a failed session still spent tokens), under a
+// detached context bounded by ocusage.UsageReadTimeout so an expired
+// session context cannot drop the report. Read errors log.
+func (b *PlannerBrain) recordOpencodeUsage(ctx context.Context, started time.Time) {
+	if b.OnUsage == nil {
+		return
+	}
+	durationMs := time.Since(started).Milliseconds()
+	read := b.ReadUsage
+	if read == nil {
+		read = ocusage.ReaderFor("")
+	}
+	sessions, err := read(b.WorkDir, started.UnixMilli())
+	if err != nil {
+		log.Printf("factoryapp: planner opencode usage read: %v", err)
+		return
+	}
+	uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ocusage.UsageReadTimeout)
+	defer cancel()
+	for _, s := range sessions {
+		b.OnUsage(uctx, b.taskID, s.Usage(b.Model, durationMs))
+	}
 }
 
 // isClaudeModel reports whether the planner session model routes to the
