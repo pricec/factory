@@ -660,7 +660,8 @@ function selectionHeld(root, key, replay) {
 document.addEventListener("selectionchange", () => {
   const sel = window.getSelection();
   if (sel && !sel.isCollapsed) return;
-  const pending = Array.from(heldRenders.values());
+  const pending = [];
+  heldRenders.forEach((fn) => pending.push(fn));
   heldRenders.clear();
   for (const fn of pending) { try { fn(); } catch (e) { console.error(e); } }
 });
