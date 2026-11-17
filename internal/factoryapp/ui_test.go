@@ -375,3 +375,35 @@ func TestUIPhoneShell(t *testing.T) {
 		t.Error(`"Mark all read" must not clear the server-side needs_operator section`)
 	}
 }
+
+// TestUICopyPasteHooks pins the copy/paste behaviour (string pins; there is
+// no JS runtime in CI): selection-safe re-rendering, delegated copy buttons
+// on code blocks and bubbles, the execCommand fallback for non-secure
+// contexts, the ~1.5s "Copied" feedback, and no large-element user-select:all.
+func TestUICopyPasteHooks(t *testing.T) {
+	e := newEnv(t)
+	resp, err := http.Get(e.ts.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	body := string(b)
+	for _, want := range []string{
+		`function selectionHeld(`, `selectionHeld(log, "thread", renderThread)`,
+		`selectionHeld(el, "legacy", loadLegacy)`, `selectionHeld($("p-body"), "phone", pRender)`,
+		`"selectionchange"`, `.closest(".copybtn")`, `new MutationObserver`,
+		`document.execCommand("copy")`, `window.isSecureContext`, `pre.textContent`,
+		`}, 1500)`, `"Copied"`, `data-raw=`, `.sid {`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("UI page missing %q", want)
+		}
+	}
+	// user-select:all is only for short ids (.sid), never containers.
+	for _, line := range strings.Split(body, "\n") {
+		if strings.Contains(line, "user-select: all") && !strings.Contains(line, ".sid") {
+			t.Errorf("user-select: all outside .sid: %q", line)
+		}
+	}
+}

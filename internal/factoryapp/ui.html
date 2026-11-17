@@ -80,6 +80,21 @@
     color: var(--dim); margin: 16px 0 6px; }
   pre { background: #0d1117; border: 1px solid var(--border); border-radius: 6px;
     padding: 10px; overflow: auto; font-family: var(--mono); font-size: 12px; margin: 0; }
+  /* copy/paste: text is selectable everywhere except controls; only short ids
+     select on one click (.sid). Copy buttons float over code blocks/bubbles. */
+  #chatlog, #detail, #list, #phone, .bubble, pre { -webkit-user-select: text; user-select: text; }
+  .sid { -webkit-user-select: all; user-select: all; cursor: text; }
+  .codewrap { position: relative; }
+  .copybtn { -webkit-user-select: none; user-select: none; background: var(--panel); color: var(--dim);
+    border: 1px solid var(--border); border-radius: 4px; padding: 1px 7px; font: 11px var(--mono);
+    cursor: pointer; line-height: 1.5; }
+  .copybtn:hover, .copybtn.copied { color: var(--text); border-color: var(--accent); }
+  .codewrap > .copybtn { position: absolute; top: 4px; right: 4px; opacity: .75; }
+  .codewrap:hover > .copybtn, .copybtn.copied { opacity: 1; }
+  .bubble { position: relative; }
+  .bubble > .copybtn { position: absolute; top: 4px; right: 6px; opacity: 0; }
+  .bubble:hover > .copybtn, .bubble > .copybtn:focus, .bubble > .copybtn.copied { opacity: 1; }
+  @media (hover: none) { .bubble > .copybtn { opacity: .7; } }
   .msg { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px;
     margin-bottom: 6px; font-family: var(--mono); font-size: 12px; }
   .msg .meta { color: var(--dim); margin-bottom: 4px; }
@@ -621,6 +636,110 @@
 </div>
 <script>
 "use strict";
+/* ---------- copy/paste helpers ----------
+ * 1. Selection protection: live refreshes re-render by replacing innerHTML,
+ *    which destroys/expands an active text selection (the "selects the whole
+ *    chat" bug). selectionHeld(root) lets renderers skip while the operator
+ *    has a non-collapsed selection inside root; held renders are replayed once
+ *    the selection collapses.
+ * 2. Copy buttons on every <pre> and chat bubble, added by a MutationObserver
+ *    (so dynamic/re-polled content is covered) and handled by one delegated
+ *    click listener. copyText falls back to a hidden textarea + execCommand
+ *    when navigator.clipboard is unavailable (plain http on a LAN IP). */
+const heldRenders = new Map();
+function selectionHeld(root, key, replay) {
+  const sel = window.getSelection && window.getSelection();
+  let held = false;
+  if (root && sel && !sel.isCollapsed && sel.rangeCount) {
+    const r = sel.getRangeAt(0);
+    held = root.contains(r.startContainer) || root.contains(r.endContainer) || root.contains(r.commonAncestorContainer);
+  }
+  if (held && key) heldRenders.set(key, replay);
+  return held;
+}
+document.addEventListener("selectionchange", () => {
+  const sel = window.getSelection();
+  if (sel && !sel.isCollapsed) return;
+  const pending = Array.from(heldRenders.values());
+  heldRenders.clear();
+  for (const fn of pending) { try { fn(); } catch (e) { console.error(e); } }
+});
+
+function copyFallback(text) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;pointer-events:none";
+  const prev = document.activeElement;
+  const sel = window.getSelection(), saved = sel && sel.rangeCount ? sel.getRangeAt(0) : null;
+  document.body.appendChild(ta);
+  ta.select();
+  ta.setSelectionRange(0, text.length);
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+  document.body.removeChild(ta);
+  if (prev && prev.focus) { try { prev.focus(); } catch (e) {} }
+  if (saved && sel) { sel.removeAllRanges(); sel.addRange(saved); }
+  return ok;
+}
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try { await navigator.clipboard.writeText(text); return true; } catch (e) { /* fall through */ }
+  }
+  return copyFallback(text);
+}
+
+function copySource(btn) {
+  const host = btn.parentElement;
+  if (!host) return "";
+  if (host.classList.contains("codewrap")) { const pre = host.querySelector("pre"); return pre ? pre.textContent : ""; }
+  if (host.dataset && host.dataset.raw != null) return host.dataset.raw;
+  const c = host.cloneNode(true);
+  for (const b of c.querySelectorAll(".copybtn")) b.remove();
+  return c.textContent.trim();
+}
+function addCopyButton(host, label) {
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "copybtn"; b.textContent = "Copy";
+  b.setAttribute("aria-label", label);
+  host.appendChild(b);
+}
+function decorateCopy(root) {
+  if (!root || !root.querySelectorAll) return;
+  for (const pre of root.querySelectorAll("pre")) {
+    if (pre.parentElement && pre.parentElement.classList.contains("codewrap")) continue;
+    const w = document.createElement("div");
+    w.className = "codewrap";
+    pre.parentNode.insertBefore(w, pre);
+    w.appendChild(pre);
+    addCopyButton(w, "Copy code to clipboard");
+  }
+  for (const m of root.querySelectorAll(".bubble")) {
+    if (!m.querySelector(":scope > .copybtn")) addCopyButton(m, "Copy message to clipboard");
+  }
+}
+document.addEventListener("mousedown", (e) => {
+  if (e.target.closest && e.target.closest(".copybtn")) e.preventDefault(); // keep any selection
+});
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest && e.target.closest(".copybtn");
+  if (!btn) return;
+  e.preventDefault(); e.stopPropagation();
+  const ok = await copyText(copySource(btn));
+  btn.textContent = ok ? "Copied" : "Copy failed";
+  btn.classList.add("copied");
+  clearTimeout(btn._t);
+  btn._t = setTimeout(() => { btn.textContent = "Copy"; btn.classList.remove("copied"); }, 1500);
+}, true);
+document.addEventListener("DOMContentLoaded", () => {
+  decorateCopy(document.body);
+  new MutationObserver((muts) => {
+    for (const m of muts) for (const n of m.addedNodes) if (n.nodeType === 1) decorateCopy(n);
+  }).observe(document.body, { childList: true, subtree: true });
+});
+</script>
+<script>
+"use strict";
 let selectedForeman = null, selectedInbox = null, selectedJob = null;
 let tab = "chat";
 
@@ -774,11 +893,12 @@ function isInternalEnv(env) {
 function bubble(env) {
   const text = chatPayloadText(env);
   const md = (t) => '<div class="md">' + (t ? renderMarkdown(t) : "") + "</div>";
+  const raw = ' data-raw="' + esc(text) + '"';
   if (env.from === "human:operator" || env.type === "chat.message") {
-    return '<div class="bubble human"><span class="who">you · ' + esc(rel(env.ts)) + '</span>' + md(text) + "</div>";
+    return '<div class="bubble human"' + raw + '><span class="who">you · ' + esc(rel(env.ts)) + '</span>' + md(text) + "</div>";
   }
   if (env.type === "brain.reply") {
-    return '<div class="bubble brain"><span class="who">planner · ' + esc(rel(env.ts)) + '</span>' + md(text) + "</div>";
+    return '<div class="bubble brain"' + raw + '><span class="who">planner · ' + esc(rel(env.ts)) + '</span>' + md(text) + "</div>";
   }
   if (env.type === "notify.job") {
     const p = payloadObj(env);
@@ -1019,6 +1139,7 @@ function renderThread() {
   head.style.display = "flex";
   renderTitle(t);
   $("show-internal").checked = st.showInternal;
+  if (selectionHeld(log, "thread", renderThread)) return; // don't wipe an active selection
   const el = log;
   const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
   const shown = st.showInternal ? msgs : msgs.filter(m => !isInternalEnv(m));
@@ -1106,6 +1227,7 @@ async function loadLegacy() {
   catch (e) { $("chatlog").innerHTML = '<div class="err">' + esc(e.message) + "</div>"; return; }
   envs = (envs || []).filter(e => !isInternalEnv(e) || e.type === "notify.pending");
   const el = $("chatlog");
+  if (selectionHeld(el, "legacy", loadLegacy)) return;
   const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
   $("threadhead").style.display = "none";
   el.innerHTML = envs.length ? envs.map(bubble).join("") : '<div class="empty">no messages yet — say something to the factory</div>';
@@ -1326,7 +1448,7 @@ async function renderJobDetail(id) {
   try { job = await getJSON("/v1/jobs/" + encodeURIComponent(id)); }
   catch (e) { d.innerHTML = '<div class="err">' + esc(e.message) + "</div>"; return; }
   const results = job.results || [];
-  d.innerHTML = "<h2>" + esc(job.id) + " <span class='badge'>" + esc(job.state) + "</span></h2>" +
+  d.innerHTML = '<h2><span class="sid">' + esc(job.id) + "</span> <span class='badge'>" + esc(job.state) + "</span></h2>" +
     '<div class="sub">foreman ' + esc(job.foreman_id || "-") + " · attempts " + job.attempts +
     " · created " + esc(job.created_at) + " · updated " + esc(job.updated_at) +
     (job.last_error ? " · <span style='color:var(--bad)'>last error: " + esc(job.last_error) + "</span>" : "") + "</div>" +
@@ -1755,7 +1877,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   setInterval(() => { if (isPhone()) pLoad(); else if (tab === "chat") loadChat(); }, 10000);
   setInterval(() => {
     if (isPhone()) return;
-    if (tab !== "chat") loaders[tab]();
+    if (tab !== "chat" && !selectionHeld($("list"), "list", () => loaders[tab]()) && !selectionHeld($("detail"))) loaders[tab]();
     $("refreshed").textContent = "refreshed " + new Date().toLocaleTimeString();
   }, 5000);
 });
@@ -1935,6 +2057,7 @@ function pBadge() {
 }
 
 function pRender() {
+  if (selectionHeld($("p-body"), "phone", pRender)) return;
   pBadge();
   switch (P.r.name) {
     case "inbox": if (!P.busy) pRenderInbox(); break;
@@ -2260,7 +2383,7 @@ async function pAct(act, id, el) {
     case "mark-unread": pCloseSheet(); markSeen(pTask(id), false); pBack(); break;
     case "copy-id":
       pCloseSheet();
-      try { await navigator.clipboard.writeText(id); pToast("Copied " + id); } catch { pToast(id); }
+      if (await copyText(id)) pToast("Copied " + id); else pToast(id);
       break;
     case "job-state": P.jobState = id || ""; pRenderJobs(); pLoad(); break;
     case "desktop": setLayoutPref("desktop"); break;
