@@ -389,3 +389,44 @@ func TestUIPhoneShell(t *testing.T) {
 		t.Error(`"Mark all read" must not clear the server-side needs_operator section`)
 	}
 }
+
+// TestUICopyPaste pins the copy/paste behaviour of the operator UI: guarded
+// re-renders (so a live refresh cannot destroy a selection), copy buttons for
+// code blocks and messages, and the plain-http clipboard fallback.
+func TestUICopyPaste(t *testing.T) {
+	e := newEnv(t)
+	resp, err := http.Get(e.ts.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	body := string(b)
+	for _, want := range []string{
+		"function setHTML(",                           // selection-safe render helper
+		"function selectionIn(",                       // non-collapsed selection check
+		`setHTML(log, shown.length`,                   // desktop thread uses it
+		"setHTML(el, envs.length",                     // legacy chat uses it
+		`selectionIn($("p-body"))`,                    // phone thread uses it
+		`setHTML($("list"), table(`,                   // polled tables use it
+		`document.addEventListener("selectionchange"`, // deferred render re-runs
+		"document.execCommand(\"copy\")",              // http/LAN fallback
+		"navigator.clipboard",                         // secure-context path
+		"new MutationObserver",                        // dynamic content gets buttons
+		`"pre:not(.has-copy)"`,                        // every code block
+		"}, 1500)",                                    // "Copied" feedback duration
+		`"Copied"`,
+		"data-raw", // whole-message copy source
+		".sid { -webkit-user-select: all; user-select: all; }",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("UI page missing %q", want)
+		}
+	}
+	// Nothing bigger than a short id may be user-select:all or none.
+	for _, line := range strings.Split(body, "\n") {
+		if strings.Contains(line, "user-select: all") && !strings.Contains(line, ".sid") {
+			t.Errorf("user-select:all on a non-id selector: %s", strings.TrimSpace(line))
+		}
+	}
+}
