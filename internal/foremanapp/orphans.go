@@ -271,6 +271,19 @@ func (a *App) workerLive(jobID string) bool {
 	return a.live[jobID]
 }
 
+// liveJobIDs is the ids this foreman has live workers for, sent on the
+// capabilities push so the factory can reconcile (spec §6.2). Never nil:
+// an empty list is a claim of "nothing running".
+func (a *App) liveJobIDs() []string {
+	a.spawnedMu.Lock()
+	defer a.spawnedMu.Unlock()
+	ids := make([]string, 0, len(a.live))
+	for id := range a.live {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
 func (a *App) setWorkerLive(jobID string, live bool) {
 	a.spawnedMu.Lock()
 	defer a.spawnedMu.Unlock()

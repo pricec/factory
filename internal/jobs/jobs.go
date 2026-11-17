@@ -69,6 +69,13 @@ const (
 	// flickers offline between pushes; a truly dead foreman still goes
 	// offline within 90s.
 	offlineAfter = 90 * time.Second
+	// reconcileGrace is how long a running job must have been quiet
+	// before a foreman that does not claim it is believed (spec §6.2):
+	// covers a result still in flight when the foreman's list was built.
+	reconcileGrace = 2 * time.Minute
+	// offlineGrace is how long a foreman must have been unseen before
+	// the jobs the server still has running on it are reaped (spec §6.2).
+	offlineGrace = 10 * time.Minute
 )
 
 // Store is the jobs + foremen database. Safe for concurrent use.

@@ -126,6 +126,13 @@ func (a *App) upsertCaps(ctx context.Context, identity string, caps map[string]s
 	return a.jobs.UpsertForeman(ctx, identity, capsJSON)
 }
 
+// reconcileForeman reaps identity's running jobs it does not claim (spec
+// §6.2); the reaped jobs' retry and terminal hooks fire as usual.
+func (a *App) reconcileForeman(ctx context.Context, identity string, active []string) error {
+	_, err := a.jobs.ReconcileForeman(ctx, identity, active)
+	return err
+}
+
 func bearerOf(h string) string {
 	const prefix = "Bearer "
 	if len(h) <= len(prefix) || !strings.EqualFold(h[:len(prefix)], prefix) {

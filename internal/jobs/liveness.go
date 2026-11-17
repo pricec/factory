@@ -112,7 +112,10 @@ func NewSweeper(store *Store) *Sweeper {
 //     posts its result by the ceiling, so the sweeper's deadline never
 //     precedes a job the harness still considers alive;
 //  2. foremen online with last_seen 90s or more old -> offline (the 90s
-//     threshold covers the 60s capabilities push cadence; spec §6.3).
+//     threshold covers the 60s capabilities push cadence; spec §6.3);
+//  3. running jobs on a foreman offline for 10 minutes -> reaped (failed,
+//     retry armed, or dead; spec §6.2);
+//  4. failed jobs with no retry armed for 2 minutes -> retry armed or dead.
 func (s *Sweeper) Pump(ctx context.Context) error {
 	now := s.store.Now()
 
@@ -168,7 +171,13 @@ func (s *Sweeper) Pump(ctx context.Context) error {
 	_, err = s.store.db.ExecContext(ctx,
 		`UPDATE foremen SET online = 0 WHERE online = 1 AND last_seen <= ?`,
 		now.Add(-offlineAfter).UTC().Format(time.RFC3339))
-	return err
+	if err != nil {
+		return err
+	}
+	if err := s.store.reapOfflineForemen(ctx); err != nil {
+		return err
+	}
+	return s.store.settleStrandedFailed(ctx)
 }
 
 // Run pumps every Tick until ctx is done.
