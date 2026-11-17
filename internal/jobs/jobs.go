@@ -352,13 +352,21 @@ func (s *Store) ApplyResult(ctx context.Context, res wire.JobResult) error {
 		lastErr = res.Error.Message
 	}
 
-	_, applied, err := s.transition(ctx, res.JobID, to)
-	if err != nil || !applied {
+	if !legal[StateRunning][to] {
+		log.Printf("jobs: ignoring illegal transition %s -> %s for %s", StateRunning, to, res.JobID)
+		return nil
+	}
+	// State and result payload land in ONE statement (compare-and-swap on
+	// running): a reader that sees the terminal state must also see the
+	// results and last_error. Two statements let a poller observe done
+	// with empty results.
+	upd, err := s.db.ExecContext(ctx,
+		`UPDATE jobs SET state = ?, usage = ?, results = ?, last_error = ?, updated_at = ? WHERE id = ? AND state = ?`,
+		to, string(usageJSON), string(mustJSON(results)), lastErr, s.now(), res.JobID, StateRunning)
+	if err != nil {
 		return err
 	}
-	if _, err := s.db.ExecContext(ctx,
-		`UPDATE jobs SET usage = ?, results = ?, last_error = ?, updated_at = ? WHERE id = ?`,
-		string(usageJSON), string(mustJSON(results)), lastErr, s.now(), res.JobID); err != nil {
+	if n, err := upd.RowsAffected(); err != nil || n == 0 { // raced with another writer
 		return err
 	}
 	// A harness kill at the live spend cap flags the job over budget (the
