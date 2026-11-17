@@ -30,6 +30,10 @@ type Task struct {
 	UpdatedAt   time.Time  `json:"updated_at"`
 	ClosedAt    *time.Time `json:"closed_at,omitempty"`
 	CloseReason string     `json:"close_reason,omitempty"`
+	// NeedsOperator is the planner's explicit "waiting on the operator"
+	// flag (spec §9.5.2): set by the planner (update_task), cleared when
+	// the operator posts on the task or the task is closed.
+	NeedsOperator bool `json:"needs_operator"`
 	// JobIDs are the linked jobs (task_jobs), in link order. Never nil on
 	// tasks returned by the store.
 	JobIDs []string `json:"job_ids"`
@@ -59,6 +63,9 @@ type TaskUpdate struct {
 	Status *string
 	// CloseReason is stored as given (typically alongside Status=closed).
 	CloseReason *string
+	// NeedsOperator sets or clears the needs_operator flag. When nil, a
+	// close (Status=closed on an open task) clears it.
+	NeedsOperator *bool
 }
 
 // CreateTask inserts a new open task. Title must be non-empty.
@@ -77,7 +84,7 @@ func (s *Store) CreateTask(ctx context.Context, title string, priority int) (Tas
 }
 
 const taskSelect = `
-SELECT id, title, status, priority, created_at, updated_at, closed_at, close_reason, last_act FROM (
+SELECT id, title, status, priority, created_at, updated_at, closed_at, close_reason, needs_operator, last_act FROM (
 	SELECT t.*, MAX(t.updated_at, IFNULL(
 		(SELECT m.ts FROM messages m WHERE m.thread_id = t.id ORDER BY m.seq DESC LIMIT 1), '')) AS last_act
 	FROM tasks t
@@ -89,7 +96,7 @@ func scanTask(r rowScanner) (Task, error) {
 		created, updated, lastAct string
 		closed                    sql.NullString
 	)
-	if err := r.Scan(&t.ID, &t.Title, &t.Status, &t.Priority, &created, &updated, &closed, &t.CloseReason, &lastAct); err != nil {
+	if err := r.Scan(&t.ID, &t.Title, &t.Status, &t.Priority, &created, &updated, &closed, &t.CloseReason, &t.NeedsOperator, &lastAct); err != nil {
 		return t, err
 	}
 	var err error
@@ -254,6 +261,9 @@ func (s *Store) UpdateTask(ctx context.Context, id string, u TaskUpdate) (Task, 
 		case *u.Status == StatusClosed && status != StatusClosed:
 			sets = append(sets, `status = 'closed'`, `closed_at = ?`)
 			args = append(args, now)
+			if u.NeedsOperator == nil {
+				sets = append(sets, `needs_operator = 0`)
+			}
 		case *u.Status == StatusOpen && status != StatusOpen:
 			sets = append(sets, `status = 'open'`, `closed_at = NULL`, `close_reason = ''`)
 		}
@@ -261,6 +271,10 @@ func (s *Store) UpdateTask(ctx context.Context, id string, u TaskUpdate) (Task, 
 	if u.CloseReason != nil {
 		sets = append(sets, `close_reason = ?`)
 		args = append(args, *u.CloseReason)
+	}
+	if u.NeedsOperator != nil {
+		sets = append(sets, `needs_operator = ?`)
+		args = append(args, *u.NeedsOperator)
 	}
 	args = append(args, id)
 	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...); err != nil {
@@ -270,6 +284,16 @@ func (s *Store) UpdateTask(ctx context.Context, id string, u TaskUpdate) (Task, 
 		return Task{}, err
 	}
 	return s.GetTask(ctx, id)
+}
+
+// ClearNeedsOperator clears the needs_operator flag (the operator
+// answered). It does not bump updated_at. ErrNotFound for an unknown task.
+func (s *Store) ClearNeedsOperator(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE tasks SET needs_operator = 0 WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	return mustAffect(res)
 }
 
 // TouchTask bumps updated_at to now (e.g. on activity that adds no message).

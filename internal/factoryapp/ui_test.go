@@ -333,4 +333,18 @@ func TestUIPhoneShell(t *testing.T) {
 			t.Errorf("UI page missing %q", want)
 		}
 	}
+	// "Needs you" and the Inbox badge come from the server flag only
+	// (spec §9.5.2), not from the old preview_from heuristic.
+	for _, want := range []string{
+		`const needsYou = (t) => t.status === "open" && !!t.needs_operator;`,
+		"P.alerts.length + P.tasks.filter(needsYou).length",
+		`t.status === "open" && t.needs_operator ? ' <span class="badge needs"`, // desktop marker
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("UI page missing %q", want)
+		}
+	}
+	if strings.Contains(body, `data-act="all-read"`) {
+		t.Error(`"Mark all read" must not clear the server-side needs_operator section`)
+	}
 }

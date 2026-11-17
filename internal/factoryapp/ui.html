@@ -99,6 +99,7 @@
   .task { cursor: pointer; } .task:hover { border-color: var(--accent); }
   .task.selected { outline: 1px solid var(--accent); } .task.closed { opacity: .6; }
   .atitle, .ttitle { font-weight: 600; word-break: break-word; }
+  .badge.needs { color: var(--warn); border-color: var(--warn); }
   .abody, .tprev { color: var(--dim); font-size: 12px; margin-top: 3px; word-break: break-word; }
   .ameta, .tmeta { color: var(--dim); font: 10.5px var(--mono); margin-top: 3px; }
   .aactions { margin-top: 5px; display: flex; gap: 6px; }
@@ -776,7 +777,8 @@ function renderTasks() {
   }
   box.innerHTML = st.tasks.map(t =>
     '<div class="task' + (t.id === st.selected ? " selected" : "") + (t.status === "closed" ? " closed" : "") + '" data-id="' + esc(t.id) + '">' +
-    '<div class="thead">' + prioBadge(t.priority) + ' <span class="ttitle">' + esc(t.title) + "</span></div>" +
+    '<div class="thead">' + prioBadge(t.priority) + (t.status === "open" && t.needs_operator ? ' <span class="badge needs" title="the planner is waiting on you">needs you</span>' : "") +
+    ' <span class="ttitle">' + esc(t.title) + "</span></div>" +
     (t.preview ? '<div class="tprev">' + esc(t.preview) + "</div>" : "") +
     '<div class="tmeta">' + esc(t.status) + " · " + esc(rel(t.last_activity_at || t.updated_at)) + " · " + esc(t.id) + "</div></div>").join("");
   for (const el of box.querySelectorAll(".task")) el.onclick = () => selectTask(el.dataset.id);
@@ -1358,8 +1360,11 @@ document.addEventListener("DOMContentLoaded", async () => {
  * #/foremen, #/foreman/<id>, #/more, #/ibx/<id>) so iOS back-swipe works,
  * a bottom tab bar, swipe/one-tap quick actions, bottom sheets for
  * composing, and a reply composer pinned above the iOS keyboard. "Needs
- * you" = an open task whose newest visible message is from the planner
- * (preview_from) and that this device has not opened since (localStorage).
+ * you" (section + Inbox badge) = an open task with the server-side
+ * needs_operator flag, which the planner sets and an operator reply or
+ * close clears, so it agrees on every device. Read/unread is a per-device
+ * visual (bold) only: planner spoke last and not opened here since, or
+ * marked unread by hand (localStorage).
  */
 const PHONE_MQ = "(max-width: 760px), (pointer: coarse) and (max-height: 520px)";
 const isPhone = () => document.documentElement.classList.contains("phone");
@@ -1385,7 +1390,8 @@ const SEEN_KEY = "factory.seen.v1";
 let pSeen = (() => { try { return JSON.parse(localStorage.getItem(SEEN_KEY)) || {}; } catch { return {}; } })();
 function saveSeen() { try { localStorage.setItem(SEEN_KEY, JSON.stringify(pSeen)); } catch {} }
 const actTs = (t) => t.last_activity_at || t.updated_at || "";
-function needsYou(t) {
+const needsYou = (t) => t.status === "open" && !!t.needs_operator;
+function isUnread(t) {
   if (t.status !== "open") return false;
   const s = pSeen[t.id];
   if (s === "!") return true; // marked unread by hand
@@ -1557,7 +1563,7 @@ function pInboxActs() {
 }
 
 function pTaskRow(t) {
-  const unread = needsYou(t), closed = t.status !== "open", id = esc(t.id);
+  const unread = isUnread(t), needs = needsYou(t), closed = t.status !== "open", id = esc(t.id);
   const who = t.preview_from === "planner" ? "Planner: " : t.preview_from === "operator" ? "You: " : "";
   const jobs = (t.job_ids || []).length;
   return '<div class="p-row" data-id="' + id + '">' +
@@ -1567,7 +1573,7 @@ function pTaskRow(t) {
     '<div class="p-item swipe' + (unread ? " unread" : "") + (closed ? " closed" : "") + '" data-go="task/' + id + '" data-w="' + (closed ? 84 : 168) + '">' +
     '<span class="p-dot"></span><div class="p-title">' + esc(t.title) + '</div><span class="p-time">' + esc(pShort(rel(actTs(t)))) + "</span>" +
     (t.preview ? '<div class="p-prev"><span class="who">' + who + "</span>" + esc(t.preview) + "</div>" : "") +
-    '<div class="p-meta">' + prioBadge(t.priority) + (closed ? ' <span class="badge">closed</span>' : "") +
+    '<div class="p-meta">' + prioBadge(t.priority) + (needs ? ' <span class="badge needs">needs you</span>' : "") + (closed ? ' <span class="badge">closed</span>' : "") +
     (jobs ? "<span>· " + jobs + " job" + (jobs === 1 ? "" : "s") + "</span>" : "") + "</div></div></div>";
 }
 function pAlertRow(a) {
@@ -1596,7 +1602,7 @@ function pRenderInbox() {
     '<button class="p-chip' + (P.showClosed ? " on" : "") + '" data-act="closed-on">Include closed</button></div>' + pErr();
   if (!alerts.length && !needs.length && !P.q) h += '<div class="p-zero">All caught up: nothing needs you.</div>';
   if (alerts.length) h += pSec("Alerts", alerts.length) + pList(alerts.map(pAlertRow));
-  if (needs.length) h += pSec("Needs you", needs.length, '<button data-act="all-read">Mark all read</button>') + pList(needs.map(pTaskRow));
+  if (needs.length) h += pSec("Needs you", needs.length) + pList(needs.map(pTaskRow));
   h += pSec(needs.length ? "Other open" : "Open", rest.length) +
     (rest.length ? pList(rest.map(pTaskRow)) : '<div class="p-empty">' + (P.q ? "no matching open tasks" : "no other open tasks") + "</div>");
   if (P.showClosed) h += pSec("Closed", closed.length) + (closed.length ? pList(closed.map(pTaskRow)) : '<div class="p-empty">none</div>');
@@ -1806,7 +1812,7 @@ async function pCloseTask(id) {
   const t = pTask(id);
   if (t) t.status = "closed";
   pRender();
-  try { await postJ("/v1/tasks/" + encodeURIComponent(id) + "/close", {}); pToast("Closed. Reply to reopen."); }
+  try { await postJ("/v1/tasks/" + encodeURIComponent(id) + "/close", {}); pToast("Closed; the planner will stop its jobs. Reply to reopen."); }
   catch (e) { pToast("close failed: " + e.message, true); }
   P.threadSig = "";
   pLoad();
@@ -1836,8 +1842,7 @@ async function pAct(act, id, el) {
       break;
     }
     case "closed-on": case "closed-off": P.showClosed = act === "closed-on"; pRenderInbox(); pLoad(); break;
-    case "all-read": P.tasks.filter(needsYou).forEach(t => markSeen(t)); pRender(); break;
-    case "toggle-read": { const t = pTask(id); if (t) { markSeen(t, needsYou(t)); pRender(); } break; }
+    case "toggle-read": { const t = pTask(id); if (t) { markSeen(t, isUnread(t)); pRender(); } break; }
     case "quick-reply": pResetSwipe(); pQuickReply(id); break;
     case "close": pResetSwipe(); pCloseSheet(); pCloseTask(id); break;
     case "ack": pAck(id); break;

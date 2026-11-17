@@ -163,7 +163,9 @@ func (a *App) ensureTaskForWaker(ctx context.Context, env wire.MessageEnvelope) 
 		t, err := a.tasks.GetTask(ctx, env.ThreadID)
 		switch {
 		case err == nil:
-			if t.Status == tasks.StatusClosed {
+			// An operator close wakes the planner on the closed task; it
+			// must not undo the close.
+			if t.Status == tasks.StatusClosed && env.Type != taskClosedByOperatorType {
 				if _, err := a.reopenTask(ctx, t.ID); err != nil {
 					log.Printf("factoryapp: tasks: reopen %s: %v", t.ID, err)
 				}
@@ -272,6 +274,13 @@ func (a *App) postToTask(ctx context.Context, taskID string, env wire.MessageEnv
 	posted, err := a.inbox.Post(ctx, auth.PlannerMainInbox, env)
 	if err != nil {
 		return posted, fmt.Errorf("post to task %s: %w", taskID, err)
+	}
+	// The operator answered: the planner's needs_operator flag is spent
+	// (spec §9.5.2).
+	if env.Type == tasks.TypeChatMessage {
+		if err := a.tasks.ClearNeedsOperator(ctx, taskID); err != nil {
+			log.Printf("factoryapp: tasks: clear needs_operator on %s: %v", taskID, err)
+		}
 	}
 	a.publishTaskChanged(ctx, taskID)
 	return posted, nil

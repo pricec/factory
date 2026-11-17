@@ -161,7 +161,26 @@ func (s *Store) migrate(ctx context.Context) error {
 	if n == 0 {
 		return errors.New("messages.thread_id missing: open the database with inbox.Open first")
 	}
-	_, err := s.db.ExecContext(ctx, schema)
+	if _, err := s.db.ExecContext(ctx, schema); err != nil {
+		return err
+	}
+	// needs_operator (spec §9.5.2): added after the first release, so
+	// existing databases get it by ALTER (additive, idempotent).
+	return s.addColumnIfMissing(ctx, "tasks", "needs_operator", "INTEGER NOT NULL DEFAULT 0")
+}
+
+// addColumnIfMissing runs ALTER TABLE ... ADD COLUMN unless the column is
+// already there.
+func (s *Store) addColumnIfMissing(ctx context.Context, table, column, decl string) error {
+	var n int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+column+` `+decl)
 	return err
 }
 

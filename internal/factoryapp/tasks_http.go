@@ -4,12 +4,15 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/pricec/factory/internal/auth"
 	"github.com/pricec/factory/internal/tasks"
+	"github.com/pricec/factory/internal/wire"
 )
 
 // Task HTTP constants (spec §9.5.2, I3).
@@ -37,10 +40,12 @@ const operatorCloseReason = "operator"
 
 // handleCloseTask serves POST /v1/tasks/{id}/close {reason?} -> 200
 // {task}: the operator closes a task from the UI (the phone inbox's quick
-// action). reason defaults to "operator" (at most 200 runes). Closing a
-// closed task is a no-op 200 that keeps the original reason. Unknown id
-// -> 404 unknown_task. Publishes task.changed; it does not wake the
-// planner. Replying reopens the task as usual.
+// action). reason defaults to "operator" (at most 200 runes). The close
+// clears needs_operator and posts task.closed_by_operator {reason} into
+// the task, which wakes the planner so it can cancel the task's jobs; the
+// wake does not reopen the task. Closing a closed task is a no-op 200 that
+// keeps the original reason and posts nothing. Unknown id -> 404
+// unknown_task. Publishes task.changed. Replying reopens the task as usual.
 func (a *App) handleCloseTask(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var in struct {
@@ -77,7 +82,17 @@ func (a *App) handleCloseTask(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "internal", err.Error())
 			return
 		}
-		a.publishTaskChanged(ctx, id)
+		// Wake the planner on the task (same path as operator chat). The
+		// close itself already happened; a failed post only logs.
+		data, _ := json.Marshal(map[string]any{"reason": reason, "text": "The operator closed this task: " + reason})
+		if _, err := a.postToTask(ctx, id, wire.MessageEnvelope{
+			Type:    taskClosedByOperatorType,
+			From:    auth.HumanOperatorIdentity,
+			Payload: data,
+		}); err != nil {
+			log.Printf("factoryapp: tasks: notify planner of close %s: %v", id, err)
+			a.publishTaskChanged(ctx, id)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"task": a.taskView(ctx, t)})
 }
