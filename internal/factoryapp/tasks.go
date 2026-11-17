@@ -169,8 +169,12 @@ func (a *App) ensureTaskForWaker(ctx context.Context, env wire.MessageEnvelope) 
 		switch {
 		case err == nil:
 			// An operator close wakes the planner on the closed task; it
-			// must not undo the close.
-			if t.Status == tasks.StatusClosed && env.Type != taskClosedByOperatorType {
+			// must not undo the close. A chat.message already reopened its
+			// task when postChat stored it, so a closed task here means it
+			// was closed AFTER the message was posted (the planner loop is
+			// asynchronous): the later close wins, and reopening would
+			// silently undo it.
+			if t.Status == tasks.StatusClosed && env.Type != taskClosedByOperatorType && env.Type != tasks.TypeChatMessage {
 				if _, err := a.reopenTask(ctx, t.ID); err != nil {
 					log.Printf("factoryapp: tasks: reopen %s: %v", t.ID, err)
 				}
