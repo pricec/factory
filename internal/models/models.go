@@ -1,11 +1,14 @@
 // Package models pins the factory's model tiering (spec §6.5): the
-// factory standardizes on GLM via OpenRouter (single provider, no
-// per-provider credential sprawl) and optimizes for cost - the
-// coordinator (factory planner + foreman brain) runs full GLM 5.3
-// (#32), and worker jobs pick among three tiers with an explicit bias
-// towards the cheapest one that can do the job. Every string was
-// verified reachable against the running opencode install; each role
-// stays env-overridable (spec §6.5: swapping a role's model is a config
+// factory optimizes for cost - worker jobs pick among three GLM tiers
+// (OpenRouter, single provider, no per-provider credential sprawl) with
+// an explicit bias towards the cheapest one that can do the job, while
+// the coordinator runs full-strength models (2026-11-16 planner-claude
+// amendment: the factory planner runs Claude Opus 5.5 via the Claude
+// Code CLI; the foreman brain stays on full GLM 5.3 per #32 until its
+// own claude migration). Every opencode string was verified reachable
+// against the running opencode install and the claude string against
+// the installed Claude Code CLI (2.1.325); each role stays
+// env-overridable (spec §6.5: swapping a role's model is a config
 // change only).
 package models
 
@@ -18,12 +21,17 @@ func Resolve(override, fallback string) string {
 	return fallback
 }
 
-// PlannerDefault is the factory planner's model (GLM 5.3: the
-// coordinator - planner and foreman brain - runs full GLM 5.3,
-// per operator direction #32; only workers are tiered). Openrouter
-// ~$0.084/$3.6 per M tokens in/out; coordinator sessions are
-// output-light, so the output price barely comes into play.
-const PlannerDefault = "openrouter/z-ai/glm-5.3"
+// PlannerDefault is the factory planner's model (2026-11-16
+// planner-claude amendment): Claude Opus 5.5 via the Claude Code CLI -
+// Claude Code's default model for long-running agentic work, $4/$20
+// per M tokens in/out (planner sessions are operator-driven and
+// output-light, so the output price barely comes into play). The exact
+// snapshot id, not the floating `opus` alias: pinned defaults are
+// exact strings; the alias drifts across CLI upgrades (overrides via
+// FACTORY_PLANNER_MODEL / the settings panel may use aliases). Was
+// openrouter/z-ai/glm-5.3 (#32) before the claude move; the foreman
+// brain keeps the GLM pin until its own migration.
+const PlannerDefault = "claude-opus-5-5"
 
 // ForemanBrainDefault is the foreman brain's model (same coordinator
 // tier as the planner, #32).

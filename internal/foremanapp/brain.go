@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/pricec/factory/internal/llmctx"
+	"github.com/pricec/factory/internal/ocusage"
+	"github.com/pricec/factory/internal/registry"
 	"github.com/pricec/factory/internal/routing"
 	"github.com/pricec/factory/internal/wire"
 )
@@ -234,17 +236,30 @@ const BrainFailedType = "brain.failed"
 // loop (which can fall back - e.g. create_job - and tell the operator).
 // job.question failures are exempt: ask_parent's default answer is the
 // pinned fallback there (#17), so a report would only add noise.
+//
+// It also reports session usage for EVERY brain session - success,
+// failure, or question (spec §6.5 reporting amendment): brain sessions
+// carry no JobResult, so without this post their spend is invisible to
+// the factory's ledger.
 type brainReporter struct {
 	inner  routing.Brain
 	poster routing.Poster
 	from   string
+	// workDir is the brain child's working directory - the key the
+	// session-accounting read matches sessions by.
+	workDir string
+	// usage overrides the session read (test seam); nil means the real
+	// reader: the host's opencode database via ocusage.
+	usage func(dir string, sinceMs int64) ([]ocusage.Session, error)
 }
 
-// Handle runs the wrapped brain and reports non-question failures
-// upstream. The report is best-effort: a posting error logs and never
-// masks the brain's own error.
+// Handle runs the wrapped brain, reports the session's usage, and
+// reports non-question failures upstream. Reports are best-effort:
+// posting errors log and never mask the brain's own error.
 func (b *brainReporter) Handle(ctx context.Context, env wire.MessageEnvelope) error {
+	start := time.Now()
 	err := b.inner.Handle(ctx, env)
+	b.reportUsage(ctx, env, start)
 	if err == nil || env.Type == "job.question" {
 		return err
 	}
@@ -266,4 +281,68 @@ func (b *brainReporter) Handle(ctx context.Context, env wire.MessageEnvelope) er
 		log.Printf("foremanapp: report brain failure for %s %s: %v", env.Type, env.ID, perr)
 	}
 	return err
+}
+
+// reportUsage posts one session.usage envelope per session opencode
+// recorded for the brain's working directory since the session started
+// (spec §3.2, §6.5 reporting amendment). Read failures log - usage is
+// best-effort accounting, never a session failure.
+func (b *brainReporter) reportUsage(ctx context.Context, env wire.MessageEnvelope, start time.Time) {
+	if b.workDir == "" {
+		// No work dir wired (unit stubs): nothing to read.
+		return
+	}
+	read := b.usage
+	if read == nil {
+		read = func(dir string, sinceMs int64) ([]ocusage.Session, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), ocusage.UsageReadTimeout)
+			defer cancel()
+			dbPath, err := ocusage.DBPathCtx(ctx, "")
+			if err != nil {
+				return nil, err
+			}
+			return ocusage.ReadSince(dbPath, dir, sinceMs)
+		}
+	}
+	sessions, err := read(b.workDir, start.UnixMilli())
+	if err != nil {
+		log.Printf("foremanapp: brain session usage read: %v", err)
+		return
+	}
+	durationMs := time.Since(start).Milliseconds()
+	// Post on a detached, bounded context: a job.question session
+	// answers under the 60s SLA, and accounting must not race the
+	// remainder of it - usage is reported even when the caller's
+	// context is about to expire.
+	postCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ocusage.UsageReadTimeout)
+	defer cancel()
+	for _, s := range sessions {
+		u := wire.SessionUsage{
+			SessionID:        s.ID,
+			Role:             wire.SessionRoleForemanBrain,
+			ForemanID:        registry.BareID(b.from),
+			JobID:            env.JobID,
+			Model:            s.Model,
+			InputTokens:      s.InputTokens,
+			OutputTokens:     s.OutputTokens,
+			ReasoningTokens:  s.ReasoningTokens,
+			CacheReadTokens:  s.CacheReadTokens,
+			CacheWriteTokens: s.CacheWriteTokens,
+			CostUSD:          s.CostUSD,
+			DurationMs:       durationMs,
+		}
+		payload, err := json.Marshal(u)
+		if err != nil {
+			log.Printf("foremanapp: brain session usage %s: %v", s.ID, err)
+			continue
+		}
+		if err := b.poster.PostToParent(postCtx, wire.MessageEnvelope{
+			Type:    SessionUsageType,
+			JobID:   u.JobID,
+			From:    b.from,
+			Payload: payload,
+		}); err != nil {
+			log.Printf("foremanapp: brain session usage %s: %v", s.ID, err)
+		}
+	}
 }

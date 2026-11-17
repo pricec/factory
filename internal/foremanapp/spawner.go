@@ -9,12 +9,20 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/pricec/factory/internal/ocusage"
 	"github.com/pricec/factory/internal/wire"
 	"github.com/pricec/factory/internal/workerharness"
 )
 
 // jobsDirName is the per-job directory root under DataDir (spec §8.2).
 const jobsDirName = "jobs"
+
+// SessionUsageType is the envelope type carrying one completed LLM
+// child's token accounting to the factory (spec §3.2, 2026-11-16
+// amendment): posted by the spawner for worker runs and by the brain
+// reporter for brain sessions, recorded by the factory's consumer into
+// the sessions ledger.
+const SessionUsageType = "session.usage"
 
 // spawnerFunc adapts a spawn function to routing.Spawner (one
 // implementation serves both the routing table and the mcpforeman
@@ -153,7 +161,8 @@ func (a *App) postJobEvent(ctx context.Context, jobID, event string) error {
 // `model` when set (spec §5.1, 2026-11-15 amendment - it overrides the
 // tier), else from the settings-synced tier mapping (spec §6.5): flash
 // (and no-tier jobs - the cost-biased default), `tier: "default"`,
-// `tier: "hardest"`.
+// `tier: "hardest"`. The usage hook (spec §6.5 reporting amendment)
+// forwards the run's recorded sessions as session.usage envelopes.
 func (a *App) defaultHarnessConfig(spec wire.JobSpec, bearer string) workerharness.Config {
 	base := localBaseURL(a.cfg.Addr)
 	model := a.modelCfg.WorkerForTier(spec.Tier)
@@ -167,5 +176,51 @@ func (a *App) defaultHarnessConfig(spec wire.JobSpec, bearer string) workerharne
 		Token:     bearer,
 		WorkDir:   a.dataDir,
 		Model:     model,
+		OnUsage:   a.onWorkerUsage,
+	}
+}
+
+// onWorkerUsage posts one session.usage envelope per recorded session of
+// a finished worker run (spec §3.2, §6.5 reporting amendment): the
+// factory's session ledger is the observability source for what spent
+// tokens - JobResult.usage alone stays zero when the agent never
+// self-reports. Best-effort: posting errors log; the job result path is
+// never affected.
+func (a *App) onWorkerUsage(spec wire.JobSpec, sessions []ocusage.Session, durationMs int64) {
+	for _, s := range sessions {
+		a.postSessionUsage(a.workerCtx, wire.SessionUsage{
+			SessionID:        s.ID,
+			Role:             wire.SessionRoleWorker,
+			ForemanID:        a.id,
+			JobID:            spec.ID,
+			Model:            s.Model,
+			InputTokens:      s.InputTokens,
+			OutputTokens:     s.OutputTokens,
+			ReasoningTokens:  s.ReasoningTokens,
+			CacheReadTokens:  s.CacheReadTokens,
+			CacheWriteTokens: s.CacheWriteTokens,
+			CostUSD:          s.CostUSD,
+			DurationMs:       durationMs,
+		})
+	}
+}
+
+// postSessionUsage posts one session.usage envelope to the factory
+// (spec §3.2): direct to the parent like job.event, never via the
+// local staging copy. Failures log - usage is best-effort accounting.
+func (a *App) postSessionUsage(ctx context.Context, u wire.SessionUsage) {
+	payload, err := json.Marshal(u)
+	if err != nil {
+		log.Printf("foremanapp: session usage %s: %v", u.SessionID, err)
+		return
+	}
+	env := wire.MessageEnvelope{
+		Type:    SessionUsageType,
+		JobID:   u.JobID,
+		From:    a.inboxID,
+		Payload: payload,
+	}
+	if err := a.poster.PostToParent(ctx, env); err != nil {
+		log.Printf("foremanapp: session usage %s: %v", u.SessionID, err)
 	}
 }

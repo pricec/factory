@@ -24,6 +24,7 @@ import (
 	"github.com/pricec/factory/internal/mcpfactory"
 	"github.com/pricec/factory/internal/models"
 	"github.com/pricec/factory/internal/notify"
+	"github.com/pricec/factory/internal/ocusage"
 	"github.com/pricec/factory/internal/registry"
 	"github.com/pricec/factory/internal/wire"
 )
@@ -93,6 +94,11 @@ type App struct {
 	modelsCache     []models.ModelInfo
 	modelsFetchedAt time.Time
 	modelsBin       string
+
+	// plannerUsage overrides the planner session-usage read (spec §6.5
+	// reporting amendment) - a test seam so no test touches a real
+	// opencode database. nil means the real read.
+	plannerUsage func(dir string, sinceMs int64) ([]ocusage.Session, error)
 }
 
 // New opens the three sqlite stores under cfg.DataDir, wires every
@@ -197,10 +203,12 @@ func New(cfg Config) (*App, error) {
 		return nil, fmt.Errorf("factoryapp: planner MCP: %w", err)
 	}
 
-	// Conversational planner (spec §9.5): one-shot opencode sessions over
+	// Conversational planner (spec §9.5): one-shot CLI sessions over
 	// the planner MCP surface, woken by the planner loop on chat.message
-	// envelopes in the operator inbox. Model: FACTORY_PLANNER_MODEL
-	// overrides the pinned GLM tiering default (spec §6.5). The MCP URL
+	// envelopes in the operator inbox. The runner routes on the session
+	// model (spec §9.4, the §8.4 twin): claude-* models run the Claude
+	// Code CLI, everything else opencode. Model: FACTORY_PLANNER_MODEL
+	// overrides the pinned claude default (spec §6.5). The MCP URL
 	// is loopback, not the advertised URL: the child runs on this very
 	// host, and the MCP SDK's streamable-HTTP server rejects non-loopback
 	// Host headers (DNS-rebinding protection) - the advertised hostname
@@ -224,7 +232,7 @@ func (a *App) Handler() http.Handler { return a.handler }
 func (a *App) PlannerToken() string { return a.plannerTok }
 
 // SetPlannerExec is a test seam: it replaces the planner brain's session
-// runner so no test ever invokes a real opencode (the BrainRunner.Exec
+// runner so no test ever invokes a real child CLI (the BrainRunner.Exec
 // pattern of foremanapp, #9.3).
 func (a *App) SetPlannerExec(fn func(ctx context.Context, prompt string) (string, error)) {
 	a.planner.Exec = fn
@@ -238,6 +246,13 @@ func (a *App) SetModelsBin(bin string) {
 	defer a.modelsMu.Unlock()
 	a.modelsBin = bin
 	a.modelsCache, a.modelsFetchedAt = nil, time.Time{}
+}
+
+// SetPlannerUsageReader is a test seam: it replaces the planner
+// session-usage read (spec §6.5 reporting amendment) so no test touches
+// a real opencode database.
+func (a *App) SetPlannerUsageReader(fn func(dir string, sinceMs int64) ([]ocusage.Session, error)) {
+	a.plannerUsage = fn
 }
 
 // AdvertiseURL returns the URL advertised to pairing children.
@@ -362,6 +377,7 @@ func buildMux(a *App, mcpH http.Handler) http.Handler {
 	mux.Handle("/v1/deadletter", a.jobs.DeadLetterHandler())
 	mux.Handle("/v1/deadletter/", a.jobs.DeadLetterHandler())
 	mux.Handle("/v1/spend", a.jobs.SpendHandler())
+	mux.Handle("/v1/sessions", a.jobs.SessionsHandler())
 	mux.Handle("/v1/mcp/factory", mcpH)
 	return mux
 }

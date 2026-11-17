@@ -123,6 +123,7 @@
     <button id="tab-chat" class="active">Chat</button>
     <button id="tab-foremen">Foremen</button>
     <button id="tab-jobs">Jobs</button>
+    <button id="tab-spend">Spend</button>
     <button id="tab-inboxes">Inboxes</button>
     <button id="tab-settings">Settings</button>
   </nav>
@@ -174,8 +175,27 @@
     <div id="list"></div>
     <div id="detail" style="display:none"></div>
   </div>
+  <div id="spendview" style="display:none">
+    <div class="toolbar">
+      <span class="count" id="spend-head"></span>
+      <span style="margin-left:auto"></span>
+      <label for="spend-day" style="text-transform:none;letter-spacing:0">day</label>
+      <input type="date" id="spend-day" style="background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:6px;font:12px var(--mono);padding:3px 6px">
+      <label for="spend-role" style="text-transform:none;letter-spacing:0">role</label>
+      <select id="spend-role" style="background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:6px;font:12px var(--mono);padding:3px 6px">
+        <option value="">all roles</option>
+        <option value="planner">planner</option>
+        <option value="foreman_brain">foreman brain</option>
+        <option value="worker">worker</option>
+      </select>
+      <span id="refreshed2" style="color:var(--dim)"></span>
+    </div>
+    <div id="spend-roles"></div>
+    <div id="spend-sessions" style="margin-top:16px"></div>
+  </div>
   <div id="settingsview" style="display:none">
     <form class="panel" id="settingsform">
+
       <div class="toolbar" style="margin-bottom:4px">
         <span>role-default models — pick a model per role (grouped by provider) or leave it at default; custom… for an unlisted id. planner changes apply to the next chat session; worker &amp; brain changes reach foremen within ~60s. a per-host env override still applies when a role sits at default.</span>
       </div>
@@ -627,7 +647,7 @@ function renderSettings(rows) {
   settingsRows = rows || [];
   $("settingsrows").innerHTML = settingsRows.map(r =>
     '<div class="row"><div><label>' + esc(ROLE_LABELS[r.role] || r.role) +
-    ' <span class="badge' + (r.source === "panel" ? " hot" : "") + '" title="panel = saved here; default = pinned GLM default (a per-host env override also applies)">' + esc(r.source) + "</span></label>" +
+    ' <span class="badge' + (r.source === "panel" ? " hot" : "") + '" title="panel = saved here; default = pinned default, per role (a per-host env override also applies)">' + esc(r.source) + "</span></label>" +
     '<select id="setting-' + esc(r.role) + '"></select>' +
     '<input id="setting-' + esc(r.role) + '-custom" list="model-list" placeholder="provider/model, e.g. ollama/qwen3:8b" style="display:none;margin-top:6px">' +
     "</div></div>"
@@ -676,16 +696,91 @@ $("settingsform").onsubmit = async (ev) => {
   } catch (e) { note.style.color = "var(--bad)"; note.textContent = e.message; }
 };
 
+/* ---------- spend (session ledger) ---------- */
+
+// Session spend view (spec §6.5 reporting amendment, §6.9): what spent
+// tokens, per role and per session, from /v1/spend's additive ledger
+// fields plus GET /v1/sessions. The session ledger sees every LLM child
+// - planner, foreman brain, worker - even when no JobResult ever
+// carried usage.
+const ROLE_BADGES = {
+  planner: "factory planner",
+  foreman_brain: "foreman brain",
+  worker: "worker",
+};
+
+function fmtUSD(x) {
+  if (!x) return "$0";
+  if (x > 0 && x < 0.01) return "$" + x.toFixed(4);
+  return "$" + x.toFixed(2);
+}
+function fmtTok(n) {
+  if (!n) return "0";
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+  return String(n);
+}
+function fmtDur(ms) {
+  if (!ms && ms !== 0) return "-";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m" + (s % 60) + "s";
+  return Math.floor(s / 3600) + "h" + Math.floor((s % 3600) / 60) + "m";
+}
+
+async function loadSpend() {
+  const day = $("spend-day").value || new Date().toISOString().slice(0, 10);
+  $("spend-day").value = day;
+  const role = $("spend-role").value;
+  let spend, sessions;
+  try {
+    spend = await getJSON("/v1/spend?day=" + encodeURIComponent(day));
+    sessions = await getJSON("/v1/sessions?day=" + encodeURIComponent(day) + (role ? "&role=" + encodeURIComponent(role) : ""));
+  } catch (e) {
+    $("spend-roles").innerHTML = '<div class="err">' + esc(e.message) + "</div>";
+    $("spend-sessions").innerHTML = "";
+    return;
+  }
+  if (!spend) spend = {};
+  if (!sessions) sessions = [];
+  const totalSessions = (spend.roles || []).reduce((n, r) => n + (r.sessions || 0), 0);
+  $("spend-head").textContent = fmtUSD(spend.session_total_usd || 0) + " across " + totalSessions + " session" +
+    (totalSessions === 1 ? "" : "s") + " · job usage recorded " + fmtUSD(spend.total_usd || 0) + " over " +
+    (spend.jobs || 0) + " job" + ((spend.jobs || 0) === 1 ? "" : "s");
+  const roleRows = (spend.roles || []).map(r =>
+    "<tr><td>" + esc(ROLE_BADGES[r.role] || r.role) + "</td><td>" + (r.sessions || 0) + "</td>" +
+    "<td>" + fmtUSD(r.total_usd || 0) + "</td>" +
+    "<td>" + fmtTok(r.input_tokens) + "</td><td>" + fmtTok(r.output_tokens) + "</td>" +
+    "<td>" + fmtTok(r.reasoning_tokens) + "</td><td>" + fmtTok(r.cache_read_tokens) + "</td>" +
+    "<td>" + fmtTok(r.cache_write_tokens) + "</td></tr>");
+  $("spend-roles").innerHTML =
+    "<h3 style='margin:4px 0'>sessions by role — " + esc(day) + "</h3>" +
+    table(["role", "sessions", "cost", "tokens in", "tokens out", "reasoning", "cache read", "cache write"], roleRows);
+  const sessRows = sessions.map(s =>
+    "<tr><td title='" + esc(s.created_at) + "'>" + esc(rel(s.created_at)) + "</td>" +
+    "<td>" + esc(ROLE_BADGES[s.role] || s.role) + "</td>" +
+    "<td>" + esc(s.foreman_id || "-") + "</td>" +
+    "<td>" + (s.job_id ? '<a href="/v1/jobs/' + encodeURIComponent(s.job_id) + '" target="_blank">' + esc(s.job_id) + "</a>" : "-") + "</td>" +
+    "<td>" + esc(s.model || "-") + "</td>" +
+    "<td>" + fmtTok(s.input_tokens) + "</td><td>" + fmtTok(s.output_tokens) + "</td>" +
+    "<td>" + fmtTok(s.reasoning_tokens) + "</td>" +
+    "<td>" + fmtUSD(s.cost_usd) + "</td><td>" + fmtDur(s.duration_ms) + "</td></tr>");
+  $("spend-sessions").innerHTML =
+    "<h3 style='margin:4px 0'>sessions — " + esc(day) + ", newest first" + (role ? " (role: " + esc(role) + ")" : "") + "</h3>" +
+    table(["when", "role", "foreman", "job", "model", "in", "out", "reasoning", "cost", "duration"], sessRows);
+}
+
 /* ---------- tabs & tick ---------- */
 
-const loaders = { chat: loadChat, foremen: loadForemen, jobs: loadJobs, inboxes: loadInboxes, settings: loadSettings };
+const loaders = { chat: loadChat, foremen: loadForemen, jobs: loadJobs, spend: loadSpend, inboxes: loadInboxes, settings: loadSettings };
 function setTab(t) {
   tab = t;
-  for (const id of ["chat", "foremen", "jobs", "inboxes", "settings"]) {
+  for (const id of ["chat", "foremen", "jobs", "spend", "inboxes", "settings"]) {
     $("tab-" + id).classList.toggle("active", id === t);
   }
   $("chatview").style.display = t === "chat" ? "block" : "none";
-  $("tableview").style.display = t === "chat" || t === "settings" ? "none" : "block";
+  $("tableview").style.display = t === "chat" || t === "settings" || t === "spend" ? "none" : "block";
+  $("spendview").style.display = t === "spend" ? "block" : "none";
   $("settingsview").style.display = t === "settings" ? "block" : "none";
   $("createpanel").style.display = t === "jobs" ? "block" : "none";
   $("state-filter").style.display = t === "jobs" ? "inline" : "none";
@@ -693,10 +788,12 @@ function setTab(t) {
   $("detail").style.display = "none";
   loaders[t]();
 }
-for (const id of ["chat", "foremen", "jobs", "inboxes", "settings"]) {
+for (const id of ["chat", "foremen", "jobs", "spend", "inboxes", "settings"]) {
   $("tab-" + id).onclick = () => setTab(id);
 }
 $("state-filter").onchange = () => loadJobs();
+$("spend-day").onchange = () => loadSpend();
+$("spend-role").onchange = () => loadSpend();
 
 (async () => {
   $("adv").textContent = location.host;

@@ -65,6 +65,53 @@ if ! id factory >/dev/null 2>&1; then
 	useradd --system --home /var/lib/factory --shell /usr/sbin/nologin factory
 fi
 
+# Planner CLIs (spec §9.4, 2026-11-16 planner-claude amendment): the
+# factory planner routes on its session model - the Claude Code CLI for
+# claude-* ids (the §6.5 pinned default), opencode otherwise (a
+# panel/env override back to a GLM string) - so the factory host needs
+# both. systemd runs the unit with the DEFAULT service PATH below - the
+# service user's ~/.local/bin and ~/.opencode/bin are NOT on it (the
+# 2026-11-15 user-unit PATH gotcha) - so each CLI is installed as the
+# service user (its self-updater keeps working) and symlinked into
+# /usr/local/bin. Idempotent: a service-visible install is detected and
+# kept. Every step verifies with command -v against the service PATH -
+# the same lookup the planner's exec performs at run time - and a failed
+# or unverifiable install aborts the bootstrap loudly before the unit
+# file is written (re-run: idempotent).
+SERVICE_USER=factory
+SERVICE_HOME=/var/lib/factory
+SERVICE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+mkdir -p "$SERVICE_HOME"
+chown "$SERVICE_USER" "$SERVICE_HOME"
+if ! command -v su >/dev/null 2>&1; then
+	echo "error: su not found; cannot install the planner CLIs as $SERVICE_USER" >&2
+	exit 1
+fi
+install_planner_cli() {
+	local cli="$1" rel="$2" url="$3"
+	if PATH="$SERVICE_PATH" command -v "$cli" >/dev/null 2>&1; then
+		echo "$cli already on the service PATH: $(PATH="$SERVICE_PATH" command -v "$cli")"
+		return 0
+	fi
+	echo "installing $cli (as $SERVICE_USER) from $url ..."
+	if ! su -s /bin/bash -c "export HOME='$SERVICE_HOME'; curl -fsSL '$url' | bash" "$SERVICE_USER"; then
+		echo "error: $cli installation failed; without it this factory's" >&2
+		echo "error: planner cannot run its routed model (spec §9.4)." >&2
+		echo "error: fix the failure above and re-run this script (idempotent)." >&2
+		exit 1
+	fi
+	ln -sfn "$SERVICE_HOME/$rel" "/usr/local/bin/$cli"
+	if ! PATH="$SERVICE_PATH" command -v "$cli" >/dev/null 2>&1; then
+		echo "error: $cli was installed but is not visible on the service" >&2
+		echo "error: PATH; refusing to bootstrap a factory whose planner" >&2
+		echo "error: cannot exec it (spec §9.4)." >&2
+		exit 1
+	fi
+	echo "$cli installed: $(PATH="$SERVICE_PATH" command -v "$cli")"
+}
+install_planner_cli opencode .opencode/bin/opencode https://opencode.ai/install
+install_planner_cli claude .local/bin/claude https://claude.ai/install.sh
+
 # Pre-seed the foreman binary for this arch so this factory can onboard
 # workers immediately; StateDirectory recreates /var/lib/factory at boot,
 # but the pre-seed happens before first boot. Non-fatal on failure.
@@ -112,5 +159,12 @@ echo "factory installed and running on port $PORT."
 echo "planner token (also in /etc/systemd/system/factory.service, root-readable):"
 echo "  $PLANNER_TOKEN"
 echo "logs: journalctl -u factory -f"
+echo "note: planner CLIs are visible on the service PATH (spec §9.4):"
+echo "note:   opencode: $(PATH="$SERVICE_PATH" command -v opencode || echo MISSING)"
+echo "note:   claude:   $(PATH="$SERVICE_PATH" command -v claude || echo MISSING)"
+echo "note: claude auth is the service user's (login once as $SERVICE_USER"
+echo "note: or set ANTHROPIC_API_KEY in the unit's environment); an"
+echo "note: unauthenticated claude planner session surfaces to the operator"
+echo "note: as a brain.reply error note naming the auth error (spec §9.4)."
 echo "onboard a foreman on another machine:"
 echo "  curl -fsSL -H 'Authorization: Bearer $PLANNER_TOKEN' $FACTORY_URL/install.sh | sudo bash -s -- <foreman-id>"

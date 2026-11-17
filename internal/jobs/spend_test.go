@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -69,7 +70,7 @@ func TestSpendDailySpend(t *testing.T) {
 		if err != nil {
 			t.Fatalf("day %s: %v", c.day, err)
 		}
-		if got != c.want {
+		if !reflect.DeepEqual(got, c.want) {
 			t.Errorf("day %s: got %+v, want %+v", c.day, got, c.want)
 		}
 	}
@@ -125,17 +126,26 @@ func TestSpendHandler(t *testing.T) {
 		if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 			t.Fatal(err)
 		}
-		if got != want {
+		if !reflect.DeepEqual(got, want) {
 			t.Errorf("totals = %+v, want %+v", got, want)
 		}
 	}
 
+	// The additive session-ledger fields: one zero row per pinned role
+	// on a day with no recorded sessions (spec §6.5 reporting
+	// amendment), summed into session_total_usd.
+	zeroRoles := []RoleTotals{
+		{Role: wire.SessionRolePlanner},
+		{Role: wire.SessionRoleForemanBrain},
+		{Role: wire.SessionRoleWorker},
+	}
+
 	// Explicit day.
-	wantTotals(t, get("/v1/spend?day=2026-11-14"), SpendTotals{Total: 1.25, Jobs: 1})
+	wantTotals(t, get("/v1/spend?day=2026-11-14"), SpendTotals{Total: 1.25, Jobs: 1, Roles: zeroRoles})
 	// Default day: the store clock's date.
-	wantTotals(t, get("/v1/spend"), SpendTotals{Total: 1.25, Jobs: 1})
+	wantTotals(t, get("/v1/spend"), SpendTotals{Total: 1.25, Jobs: 1, Roles: zeroRoles})
 	// A day with no jobs at all.
-	wantTotals(t, get("/v1/spend?day=2026-10-01"), SpendTotals{})
+	wantTotals(t, get("/v1/spend?day=2026-10-01"), SpendTotals{Roles: zeroRoles})
 
 	// Malformed day: 400 with the normative error model.
 	rec := get("/v1/spend?day=2026-13-99")

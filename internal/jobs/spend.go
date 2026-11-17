@@ -15,9 +15,19 @@ const spendDayLayout = "2006-01-02"
 
 // SpendTotals is a day's spend summary (GET /v1/spend, spec §6.9): the sum
 // of recorded usage.cost_usd and the number of jobs created that day.
+// The session-ledger fields (2026-11-16 amendment) are additive: the
+// per-role aggregates from the sessions ledger (spec §6.5 reporting)
+// plus its own total, which counts coordinator sessions (planner,
+// foreman brain) that no JobResult ever carries - total_usd (jobs)
+// and SessionTotalUSD (ledger) measure overlapping but different
+// sources and are reported side by side, never merged.
 type SpendTotals struct {
 	Total float64 `json:"total_usd"`
 	Jobs  int     `json:"jobs"`
+	// SessionTotalUSD is the day's ledger sum across all roles.
+	SessionTotalUSD float64 `json:"session_total_usd"`
+	// Roles is one aggregate per pinned role, zero rows included.
+	Roles []RoleTotals `json:"roles"`
 }
 
 // DailySpend sums usage.cost_usd over jobs created on day (YYYY-MM-DD,
@@ -94,6 +104,16 @@ func (s *Store) handleSpend(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error(), true)
 		return
+	}
+	// Session-ledger aggregates (additive, 2026-11-16 amendment): a
+	// ledger read error degrades to zero rows, never fails the endpoint.
+	totals.Roles, err = s.SessionTotals(r.Context(), day)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error(), true)
+		return
+	}
+	for _, r := range totals.Roles {
+		totals.SessionTotalUSD += r.TotalUSD
 	}
 	writeJSON(w, http.StatusOK, totals)
 }

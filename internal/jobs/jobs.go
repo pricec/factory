@@ -127,6 +127,23 @@ CREATE TABLE IF NOT EXISTS settings (
 	model      TEXT NOT NULL,
 	updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS sessions (
+	id                TEXT PRIMARY KEY,
+	role              TEXT NOT NULL,
+	foreman_id        TEXT NOT NULL DEFAULT '',
+	job_id            TEXT NOT NULL DEFAULT '',
+	model             TEXT NOT NULL DEFAULT '',
+	input_tokens      INTEGER NOT NULL DEFAULT 0,
+	output_tokens     INTEGER NOT NULL DEFAULT 0,
+	reasoning_tokens  INTEGER NOT NULL DEFAULT 0,
+	cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+	cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+	cost_usd          REAL NOT NULL DEFAULT 0,
+	duration_ms       INTEGER NOT NULL DEFAULT 0,
+	created_at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_created ON sessions(created_at);
+CREATE INDEX IF NOT EXISTS idx_sessions_role ON sessions(role);
 `
 	_, err := db.Exec(ddl)
 	return err
@@ -207,7 +224,12 @@ func (s *Store) ApplyEvent(ctx context.Context, jobID, event string) error {
 
 // ApplyResult applies a job.result (spec §6.2, §6.4): terminal-idempotent -
 // results only apply to running jobs; anything else is a logged no-op.
-// Usage is overwritten last-wins; per-attempt results are appended.
+// Usage is write-once-preserve: an agent-reported usage overwrites, a
+// result with none never erases usage the session ledger already
+// backfilled (spec §6.5 reporting amendment - the session.usage
+// envelope can arrive before the result it belongs to, and erasing it
+// would silently re-zero the job's accounting). Per-attempt results
+// are appended.
 func (s *Store) ApplyResult(ctx context.Context, res wire.JobResult) error {
 	job, ok, err := s.Get(ctx, res.JobID)
 	if err != nil || !ok {
@@ -222,9 +244,14 @@ func (s *Store) ApplyResult(ctx context.Context, res wire.JobResult) error {
 		return nil
 	}
 
-	usageJSON, err := json.Marshal(res.Usage)
-	if err != nil {
-		return err
+	// nil usage preserves the job's recorded usage (COALESCE).
+	var usageArg any
+	if res.Usage != nil {
+		usageJSON, err := json.Marshal(res.Usage)
+		if err != nil {
+			return err
+		}
+		usageArg = string(usageJSON)
 	}
 	var results []json.RawMessage
 	if err := json.Unmarshal(job.Results, &results); err != nil {
@@ -250,8 +277,8 @@ func (s *Store) ApplyResult(ctx context.Context, res wire.JobResult) error {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx,
-		`UPDATE jobs SET usage = ?, results = ?, last_error = ?, updated_at = ? WHERE id = ?`,
-		string(usageJSON), string(mustJSON(results)), lastErr, s.now(), res.JobID); err != nil {
+		`UPDATE jobs SET usage = COALESCE(?, usage), results = ?, last_error = ?, updated_at = ? WHERE id = ?`,
+		usageArg, string(mustJSON(results)), lastErr, s.now(), res.JobID); err != nil {
 		return err
 	}
 	if Terminal(to) {

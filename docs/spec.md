@@ -88,6 +88,7 @@ response is the full envelope with server-assigned `id` and `ts` (#1).
 | `job.answer` | Foreman brain: via `answer_worker` (#18) | Worker: `ask_parent` long-polls the job inbox (#17); `answer_worker` posts to the job inbox (#18) | #17, #18 |
 | `brain.wake` | Not pinned in any body | Routing -> brain (#4) | #4 |
 | `brain.failed` | Foreman: the brain-failure reporter wrapping the brain, on any failed non-question brain session (2026-11-15 amendment; without it the routing layer logs and acks and a dead delegation is silent - observed live when a brain session spent its 5m bound reading code and never acted) | Factory consumer -> relay into planner:main -> planner wake (§9.5); job.question failures are exempt (ask_parent's default answer is the fallback, #17) | 2026-11-15 amendment |
+| `session.usage` | Foreman: the usage reporters - the spawner's hook for worker runs, the brain reporter for brain sessions - one envelope per completed LLM child on that host, read from the host's opencode session store (2026-11-16 amendment; usage is read, never agent-self-reported - last night's live run recorded $0 across 17 jobs because no agent called report_result with usage) | Factory consumer -> the sessions ledger (§6.5 reporting amendment) + job-usage backfill | 2026-11-16 amendment |
 | any other type | `post_to_factory(type, ...)` (#18), `message_foreman(..., type, ...)` (#19) | Routing -> brain ("anything unmatched -> brain") (#4) | #4, #18, #19 |
 
 The type set is open: `post_to_factory` and `message_foreman` accept arbitrary
@@ -186,8 +187,9 @@ posture, §7.5) and exist because no factory credential carries inbox-read
 scopes: the UI reads the store server-side instead. `GET /` serves the
 single-page operator UI (§9.5 conversational chat over `planner:main`, foremen
 list with `last_seen`, inbox listing, per-item detail views, the job create
-form with its per-job model picker, and the role-default settings panel -
-2026-11-15 amendments) over these endpoints plus §6.9.
+form with its per-job model picker, the role-default settings panel -
+2026-11-15 amendments - and the session spend view over `/v1/spend` +
+`/v1/sessions` - 2026-11-16 amendment) over these endpoints plus §6.9.
 
 `wait_seconds` 0-60 long-polls until non-empty (#1). Error responses use the
 error model in §10.
@@ -416,15 +418,25 @@ env-overridable, and swapping a role's model stays a config change only:
 
 | Role | Pinned default | Env override |
 | --- | --- | --- |
-| factory planner | `openrouter/z-ai/glm-5.3` | `FACTORY_PLANNER_MODEL` |
+| factory planner | `claude-opus-5-5` (Claude Code CLI) | `FACTORY_PLANNER_MODEL` |
 | foreman brain | `openrouter/z-ai/glm-5.3` | `FACTORY_FOREMAN_BRAIN_MODEL` |
 | worker, `tier: "flash"` (and no-tier jobs) | `openrouter/z-ai/glm-5.3-flash` | `FACTORY_WORKER_FLASH_MODEL` |
 | worker, `tier: "default"` | `openrouter/z-ai/glm-5.3-flash#max` | `FACTORY_WORKER_MODEL` |
 | worker, `tier: "hardest"` | `openrouter/z-ai/glm-5.3` | `FACTORY_WORKER_HARDEST_MODEL` |
 
-The coordinator - factory planner and foreman brain - runs full GLM 5.3
-(#32): coordination is the factory's judgment layer, and its sessions
-are output-light, so the output price barely comes into play. The worker
+The coordinator - factory planner and foreman brain - runs full-strength
+models, coordination is the factory's judgment layer, and its sessions
+are output-light, so the output price barely comes into play. The
+factory planner runs Claude Opus 5.5 via the Claude Code CLI
+(2026-11-16 planner-claude amendment: Claude Code's default model for
+long-running agentic work, $4/$20 per M tokens in/out, exact snapshot id
+- the floating `opus` alias is accepted on overrides but never pinned;
+the Anthropic CLI's own auth is a second credential path alongside the
+OpenRouter key); the foreman brain stays on full GLM 5.3 (#32) until
+its own claude migration. The planner's runner follows its model
+(§9.4): a claude-* model runs the Claude Code CLI, everything else
+opencode - so a panel/env override back to a GLM string also flips the
+runner back, no restart. The worker
 ladder is one GLM 5.3 generation across two price points (#30, #31):
 Flash (~$0.04/$0.08 per M tokens; the `default` tier is the same model
 at max reasoning effort - same token prices, the only extra spend is the
@@ -441,8 +453,9 @@ the three worker tiers and BIAS TOWARDS SAVING MONEY (#29): pick the
 cheapest tier that can do the job - flash for routine work, escalate to
 flash#max or full GLM 5.3 only when the task needs it. A job that carries no
 tier runs flash (the cost-biased default). The tier rides JobSpec (§5.1)
-through `create_job`, `POST /v1/jobs`, schedules, and the job create UI.
-Model strings are injected via the generated child config (§8.4).
+through `create_job`, `POST /v1/jobs`, schedules, and the job create UI. Model strings reach
+the child via the generated config or its runner flags (§8.4; §9.4 for
+the planner's claude runner, where the model rides `--model`).
 
 Per-job model override (2026-11-15 amendment): a JobSpec's explicit
 `model` (§5.1) wins over the tier mapping at the worker harness - the
@@ -477,6 +490,54 @@ as a test seam.
 Reporting (v1 amendment, #13): `GET /v1/spend?day=` returns daily totals
 `{total_usd, jobs}` - jobs do not yet carry a role tag, so per-role
 totals `{planner, foreman_brain, worker}` are deferred until they do.
+
+Session-usage ledger (2026-11-16 amendment): per-role reporting is NOT
+deferred on the agent - it is measured. Every LLM child the system
+spawns - factory planner, foreman brain, worker - is an opencode child
+*except* children routed to the Claude Code CLI (the planner's claude
+runner, §9.4; such sessions record no opencode session rows and
+therefore no ledger rows - Claude-side accounting is not pinned), and
+opencode maintains one session row per run in its host-local sqlite
+database (`session_v2`: provider-reported `cost`, token counts
+`tokens_input/output/reasoning/cache_read/cache_write`, `model`,
+`directory`; path discovered via `opencode debug paths db`, never
+assumed - it respects `OPENCODE_DB` and release channels). After a
+child exits, its runner reads the sessions recorded for the child's
+directory since the run started - the per-job dir (§8.2), the brain
+WorkDir, or the planner WorkDir - deterministic, zero LLM calls, and
+independent of agent self-reporting (agents that never call
+`report_result` with usage still get accounted). The read is read-only
+and best-effort: failures log and degrade to no usage, never fail a
+run; it is bounded (`opencode debug paths db` at most 10s) and
+asynchronous on the worker path - accounting never adds latency to a
+run. Recording, one ledger row per opencode session id (duplicate
+deliveries upsert, never double-count):
+
+- factory planner: recorded in-process by the factory after each
+  planner session (the child runs on the factory host); a session on
+  the claude runner records none (no opencode session rows exist for
+  it);
+- foreman brain + worker: the foreman posts one `session.usage`
+  envelope per session to `factory:main` (§3.2); the brain reporter
+  posts on success, failure, and question sessions alike - a session
+  that errored still spent tokens - and posts on a detached context so
+  the 60s question SLA never eats the report;
+- worker sessions additionally backfill the job's still-empty
+  `usage` (post-hoc proxy 4 becomes real even when the agent never
+  self-reported; an agent-reported usage always wins, and
+  `jobs.ApplyResult` preserves recorded usage against results that
+  carry none - the envelope can arrive before the result it belongs
+  to).
+
+Surfaces: `GET /v1/spend?day=` gains additive fields
+`{session_total_usd, roles: [{role, sessions, input_tokens,
+output_tokens, reasoning_tokens, cache_read_tokens,
+cache_write_tokens, total_usd}]}` (one row per pinned role, zero rows
+included; `total_usd` stays the jobs-usage sum, `session_total_usd`
+the ledger sum - overlapping but different sources, reported side by
+side, never merged); `GET /v1/sessions?day=&role=&limit=` (§6.9) lists
+the ledger rows newest-first for the UI's spend view. The daily spend
+breaker (above) still counts jobs' usage only.
 
 ### 6.6 LLM context cap (#7)
 
@@ -567,7 +628,8 @@ factory planner's list view carries summaries only (#7, #19).
 | `POST /v1/schedules/{id}/enable` | (#8) |
 | `POST /v1/schedules/{id}/disable` | (#8) |
 | `POST /v1/foreman/capabilities` | foreman token; upserts tags, bumps `last_seen` (#12) |
-| `GET /v1/spend?day=` | daily totals `{total_usd, jobs}`; per-role deferred until jobs carry role tags (#13) |
+| `GET /v1/spend?day=` | daily totals `{total_usd, jobs}` plus additive session-ledger fields (2026-11-16 amendment, §6.5): `{session_total_usd, roles: [...]}`, one aggregate per pinned role; unauthenticated |
+| `GET /v1/sessions?day=&role=&limit=` | session-ledger rows newest-first (2026-11-16 amendment, §6.5): `[{id, role, foreman_id, job_id, model, input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens, cost_usd, duration_ms, created_at}]`; day defaults to the store clock's today, malformed `400`; unauthenticated |
 | `GET /v1/inboxes` | per-inbox aggregate listing `{inbox_id, total, unacked, last_ts}` (UI; §4.1) |
 | `GET /v1/inboxes/{id}/recent` | recent envelopes for one inbox, acked included (UI; §4.1) |
 | `POST /v1/chat` | `{text}` -> chat.message envelope in the operator inbox; wakes the LLM planner (§9.5) |
@@ -623,7 +685,11 @@ Onboarding endpoints (#24, #25) - all outside `/v1`:
   planner token can bootstrap new factories. The factory renders the
   bootstrap script per-request with its own advertise URL as the download
   source. The script (as root, on Linux with systemd) downloads the factory
-  binary, installs `/etc/systemd/system/factory.service`
+  binary, installs BOTH planner CLIs - opencode and the Claude Code CLI,
+  as the service user and symlinked onto the service PATH, verified with
+  `command -v`, a failed or unverifiable install aborts the bootstrap
+  loudly (the planner routes on its model, §9.4; 2026-11-16 planner-claude
+  amendment) - installs `/etc/systemd/system/factory.service`
   (`Environment=FACTORY_PLANNER_TOKEN`, `chmod 600` - the unit carries the
   planner token; `EnvironmentFile=/etc/factory/factory.env`, the `FACTORY_*`
   override point), pre-seeds the local-arch foreman binary into
@@ -748,7 +814,9 @@ the agent actually sees.
   implementation.
 - Config discovery (#28): the generated config is written to the V2
   project-config path `opencode.json` IN THE CHILD'S WORKING DIRECTORY
-  (worker: the per-job dir; planner/foreman brain: their WorkDir). V2
+  (worker: the per-job dir; foreman brain: its WorkDir; planner: its
+  WorkDir when routed to the opencode runner - a claude-runner planner
+  session writes §9.4's claude-mcp.json instead). V2
   opencode discovers `opencode.json` from the working directory - the
   V1-era `OPENCODE_CONFIG` env var (and the `.opencode.json` dotfile name)
   are IGNORED by V2 (upstream regression, umbrella issue #36990), and
@@ -810,6 +878,13 @@ the agent actually sees.
 - Empty stdout: summary is `(no output)` (satisfies the 1-240 rule, #3).
 - Safety net: a second `job.result` for the same `(inbox_id, job_id)` is
   `409` with the original envelope id (#1).
+- Usage (2026-11-16 amendment): on both exit paths the harness reads the
+  sessions opencode recorded for the job's directory (§6.5 session
+  ledger) and hands them to the spawner's usage hook, asynchronously -
+  accounting never adds run latency, and neither exit path fills the
+  result's `usage` from the measurement: the measured accounting reaches
+  the factory as the hook's `session.usage` envelope, whose ledger row
+  backfills the job there. One accounting source, never two.
 - Spawn-failure surfacing (2026-11-15 amendment): a spawned worker runs
   under the foreman's lifetime context, never the spawner's request
   context - the `spawn_worker` MCP request context is canceled the moment
@@ -852,8 +927,10 @@ Kill the entire process group at `timeout_s`; post a JobResult with
   budget (2026-11-14 amendment: typed handlers advertise input schemas so
   callers can introspect argument names).
 - LLM sessions (worker agent, foreman brain, factory planner) all reuse the
-  #5 opencode harness pattern (`OPENCODE_CONFIG` + generated config),
-  differing in MCP URL + prompt (#5, #18, #19).
+  #5 harness pattern - a generated per-child config plus one
+  non-interactive CLI session, differing in MCP URL + prompt (#5, #18,
+  #19). The planner's child CLI routes on its model (§9.4): the Claude
+  Code CLI for claude-* models, opencode otherwise.
 - Decision (append-only, #17): implemented with
   `github.com/modelcontextprotocol/go-sdk` v1.8.0 (streamable-HTTP server,
   stateless + JSONResponse modes, bearer auth as wrapping middleware);
@@ -960,7 +1037,74 @@ validation failures are tool errors. Advertised schemas count toward the
 instead of `payload` was silently dropped and dead-ended two operator
 feature requests in an inbox no consumer drains.
 
-Planner session mechanics: same opencode harness pattern as #5 (#19).
+Planner session mechanics: the #5 harness pattern (#19) with runner
+routing (2026-11-16 planner-claude amendment, the §8.4 worker twin):
+
+- Runner routing: the session model routes the child CLI. A bare
+  `claude-*` model id (or the bare `claude` alias), optionally behind
+  the `anthropic/` provider prefix, runs via the Claude Code CLI in
+  non-interactive mode (below); everything else - including
+  OpenRouter-hosted claude models (`openrouter/...`: the OpenRouter
+  key's credential path, not the Anthropic CLI's own auth) - runs via
+  opencode (§8.4: `opencode.json` in the planner WorkDir,
+  `--standalone`, `-m`, allow-all permissions, unchanged). The session
+  model resolves per session: settings panel > `FACTORY_PLANNER_MODEL`
+  > the §6.5 pinned default (`claude-opus-5-5`), so the factory
+  planner runs on the claude runner out of the box and a panel/env
+  override to a non-claude string flips the runner back without a
+  restart.
+- Claude Code invocation (flags verified against the installed CLI,
+  2.1.325): `claude -p [--model <model>] --mcp-config
+  <claude-mcp.json> --strict-mcp-config --permission-mode
+  bypassPermissions --no-session-persistence "<prompt>"` - the same
+  planner WorkDir, wake prompt (§9.5), 30m session bound, child env
+  (`FACTORY_PLANNER_TOKEN` guaranteed), and loopback MCP endpoint
+  (§9.5) as the opencode runner. `-p` is the non-interactive mode;
+  `--strict-mcp-config` makes the generated config the ONLY MCP source
+  (the isolation analog of `--standalone`: no user/project MCP servers
+  leak into the child); `--permission-mode bypassPermissions` is the
+  headless analog of the opencode allow-all block; the prompt is the
+  FINAL positional argument - `--mcp-config` is variadic and would
+  otherwise swallow it (observed live). The `anthropic/` prefix is
+  stripped for `--model` (the CLI takes bare ids and aliases); the
+  pinned default is an exact snapshot id, never the floating `opus`
+  alias.
+- Claude Code generated config: the MCP injection lands at
+  `<WorkDir>/claude-mcp.json`, passed explicitly via `--mcp-config`
+  (never name-discovered; a non-`.mcp.json` name also keeps claude's
+  project scan from double-loading it), written 0600 before every run:
+
+```json
+{
+  "mcpServers": {
+    "factory": {
+      "type": "http",
+      "url": "FACTORY_PLANNER_MCP_URL",
+      "headers": { "Authorization": "Bearer ${FACTORY_PLANNER_TOKEN}" }
+    }
+  }
+}
+```
+
+  The server name `factory` is what Claude Code prefixes its tools
+  with (`mcp__<server>__<tool>`), so the §9.4 surface arrives as
+  `mcp__factory__create_job`, `mcp__factory__notify_operator`, and
+  friends - the opencode runner exposes the same tools as
+  `factory_<tool>` under its `<server>_<tool>` naming (§9.2).
+  `type: "http"` is Claude Code's streamable-HTTP transport (the
+  opencode `remote` analog). The token is referenced via Claude
+  Code's `${VAR}` env expansion (evaluated against the child env) so
+  the secret never lands in the file at rest. There is no generated
+  model field (the model rides `--model`) and no permissions block
+  (the headless policy rides `--permission-mode`).
+- Loud failures: Claude Code reports in-run failures - missing auth
+  among them - as the result on stdout with empty stderr and a
+  non-zero exit (observed live on 2.1.325), so the session error
+  surfaced to the operator (§9.5 brain.reply note) falls back to
+  stdout when stderr is empty; an unauthenticated claude planner
+  therefore names the auth error instead of failing silently. A
+  claude-run session records no sessions-ledger rows: the §6.5
+  reporting read covers opencode's session store only.
 
 ### 9.5 Conversational surface: the operator inbox
 
@@ -992,8 +1136,10 @@ Envelope types in `planner:main`:
 
 Planner loop (internal/factoryapp, twin of the consumer loop): drains
 `planner:main`; `chat.message` and `brain.failed` envelopes wake one
-opencode planner session (§9.4 surface, planner bearer, model per the
-settings panel > `FACTORY_PLANNER_MODEL` > the §6.5 default) with the
+planner session (§9.4 surface, planner bearer, model per the
+settings panel > `FACTORY_PLANNER_MODEL` > the §6.5 default; the child
+CLI routes on that model - Claude Code for claude-* ids, opencode
+otherwise, §9.4) with the
 recent inbox history replayed into the prompt (per-payload 2KB caps,
 §6.6); `brain.failed` envelopes arrive via the factory:main consumer,
 which relays a foreman's brain-session failure report (§3.2, 2026-11-15
@@ -1063,6 +1209,7 @@ outside the `result_schema` subset at validation time (#3).
 | Explicit model string | optional; 1-128 printable ASCII chars, no whitespace; overrides the tier mapping | 2026-11-15 amendment |
 | Models listing cache | `GET /v1/models` re-execs `opencode models` at most every 5 min (non-empty listings only) | 2026-11-15 amendment |
 | Settings pull interval | foremen re-read `GET /v1/settings` at startup and every 60s | 2026-11-15 amendment |
+| Session-usage read | post-run `session_v2` read keyed by child directory + start ms; discovery (`opencode debug paths db`) bounded at 10s; the worker path reads asynchronously (accounting never adds run latency) | 2026-11-16 amendment |
 
 ---
 

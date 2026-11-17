@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/pricec/factory/internal/ocusage"
 	"github.com/pricec/factory/internal/wire"
 )
 
@@ -89,6 +90,95 @@ func TestBrainReporterPostsFailure(t *testing.T) {
 			}
 			if p.Error == "" {
 				t.Error("payload carries no error text")
+			}
+		})
+	}
+}
+
+// TestBrainReporterPostsUsage: every brain session reports its token
+// accounting upstream (spec §3.2, §6.5 reporting amendment) - success,
+// failure, and question sessions all spent tokens, and brain spend
+// carries no JobResult, so the ledger only sees it through this post.
+// Read failures stay silent: accounting is best-effort.
+func TestBrainReporterPostsUsage(t *testing.T) {
+	cases := []struct {
+		name      string
+		typ       string
+		brainErr  error
+		readErr   error
+		wantUsage bool
+		wantFail  bool
+	}{
+		{"successful session posts usage", "chat.message", nil, nil, true, false},
+		{"failed session posts usage and brain.failed", "brain.wake", errors.New("boom"), nil, true, true},
+		{"question session posts usage only", "job.question", errors.New("sla"), nil, true, false},
+		{"read error posts nothing", "chat.message", nil, errors.New("no db"), false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			poster := &recordPoster{}
+			reporter := &brainReporter{
+				inner:   &stubBrain{err: tc.brainErr},
+				poster:  poster,
+				from:    "foreman:alpha",
+				workDir: "/var/f/brain",
+				usage: func(string, int64) ([]ocusage.Session, error) {
+					if tc.readErr != nil {
+						return nil, tc.readErr
+					}
+					return []ocusage.Session{{
+						ID: "ses_brain", Directory: "/var/f/brain",
+						Model:       "openrouter/z-ai/glm-5.3",
+						InputTokens: 33592, OutputTokens: 2521,
+						ReasoningTokens: 1017, CostUSD: 0.0324,
+					}}, nil
+				},
+			}
+			env := wire.MessageEnvelope{ID: "msg_nudge", Type: tc.typ, JobID: "job_x", From: "factory:planner"}
+
+			got := reporter.Handle(context.Background(), env)
+			if !errors.Is(got, tc.brainErr) {
+				t.Errorf("Handle error = %v, want the brain's own %v unchanged", got, tc.brainErr)
+			}
+
+			var usage []wire.SessionUsage
+			var failed int
+			for _, posted := range poster.recorded() {
+				switch posted.Type {
+				case BrainFailedType:
+					failed++
+				case SessionUsageType:
+					var u wire.SessionUsage
+					if err := json.Unmarshal(posted.Payload, &u); err != nil {
+						t.Fatalf("session.usage payload: %v", err)
+					}
+					usage = append(usage, u)
+				}
+			}
+			if tc.wantFail && failed != 1 {
+				t.Errorf("brain.failed posts = %d, want 1", failed)
+			}
+			if !tc.wantFail && failed != 0 {
+				t.Errorf("brain.failed posts = %d, want 0", failed)
+			}
+			if !tc.wantUsage {
+				if len(usage) != 0 {
+					t.Errorf("session.usage posts = %+v, want none", usage)
+				}
+				return
+			}
+			if len(usage) != 1 {
+				t.Fatalf("session.usage posts = %d, want 1", len(usage))
+			}
+			u := usage[0]
+			if u.SessionID != "ses_brain" || u.Role != wire.SessionRoleForemanBrain {
+				t.Errorf("usage = %+v, want ses_brain foreman_brain", u)
+			}
+			if u.ForemanID != "alpha" || u.JobID != "job_x" {
+				t.Errorf("usage foreman/job = %q/%q, want alpha/job_x", u.ForemanID, u.JobID)
+			}
+			if u.CostUSD != 0.0324 || u.InputTokens != 33592 || u.ReasoningTokens != 1017 {
+				t.Errorf("usage accounting = %+v, want the recorded session's numbers", u)
 			}
 		})
 	}

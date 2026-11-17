@@ -82,19 +82,26 @@ func wakeReason(wakes []wire.MessageEnvelope) string {
 // wakePlanner runs one planner session for the triggering envelopes,
 // with the recent operator-inbox history replayed into the prompt. On
 // failure it posts a brain.reply error note so the operator is never left
-// waiting on a silent brain.
+// waiting on a silent brain. After the session it records the planner's
+// own token usage in the sessions ledger (spec §6.5 reporting amendment):
+// planner sessions are recorded in-process, not via the session.usage
+// envelope path foremen use.
 func (a *App) wakePlanner(ctx context.Context, reason string, envs []wire.MessageEnvelope) {
 	history, err := a.inbox.Recent(ctx, auth.PlannerMainInbox, plannerHistoryCap)
 	if err != nil {
 		log.Printf("factoryapp: planner: history: %v", err)
 		history = nil
 	}
+	started := a.now()
 	if err := a.planner.Handle(ctx, reason, history, envs); err != nil {
 		log.Printf("factoryapp: planner: %v", err)
 		a.notifyOperator(ctx, "brain.reply", map[string]any{
 			"text": "The planner could not run: " + err.Error() + ". Check the factory service logs (journalctl -u factory).",
 		})
 	}
+	// Best-effort even on failure: a session that errored still spent
+	// tokens, and a session that never started records none.
+	a.recordPlannerUsage(ctx, started.UnixMilli())
 }
 
 // notifyOperator posts one envelope into the operator inbox (spec §9.5).

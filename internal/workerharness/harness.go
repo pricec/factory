@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pricec/factory/internal/ocusage"
 	"github.com/pricec/factory/internal/wire"
 )
 
@@ -62,6 +63,19 @@ type Config struct {
 
 	// OpenCODEBin is the opencode binary; "" means "opencode" on PATH.
 	OpenCODEBin string
+	// ReadUsage, when set, returns the sessions opencode recorded for
+	// dir since sinceMs (ms since epoch) - the session-accounting read
+	// (spec §6.5 reporting amendment). nil means the real reader: the
+	// host's opencode database, discovered via OpenCODEBin. A read
+	// error logs and degrades to zero sessions; accounting never kills
+	// a run. Test seam.
+	ReadUsage func(dir string, sinceMs int64) ([]ocusage.Session, error)
+	// OnUsage, when set, receives the sessions recorded for this run
+	// (the reporting hook: foremanapp posts one session.usage envelope
+	// per session, spec §3.2). Called after the child exits on both the
+	// report_result and fallback paths - a session that produced no
+	// result still spent tokens.
+	OnUsage func(spec wire.JobSpec, sessions []ocusage.Session, durationMs int64)
 	// Env is the child environment; nil means the worker process
 	// environment. WORKER_TOKEN is always overridden.
 	Env []string
@@ -133,11 +147,30 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	stdout, stderr := newSyncBuffer(), newSyncBuffer()
+	started := time.Now()
 	runErr, timedOut, harnessErr := execChild(ctx, cfg, jobTimeout(cfg, spec), jobDir, buildPrompt(spec), stdout, stderr)
 	if harnessErr != nil {
 		return harnessErr
 	}
 	out, errOut := stdout.String(), stderr.String()
+
+	// Session accounting (spec §6.5 reporting amendment): read what
+	// opencode recorded for this job's directory since the child
+	// started, asynchronously - accounting must never add latency to
+	// the run path (the read execs the opencode binary for database
+	// discovery). Best-effort by design: read failures log and leave
+	// the run's accounting empty. The hook fires on both the
+	// report_result and fallback paths - a session that produced no
+	// result still spent tokens.
+	if cfg.OnUsage != nil {
+		startedMs, durationMs := started.UnixMilli(), time.Since(started).Milliseconds()
+		go func() {
+			sessions := readRunUsage(cfg, jobDir, startedMs)
+			if len(sessions) > 0 {
+				cfg.OnUsage(spec, sessions, durationMs)
+			}
+		}()
+	}
 
 	if _, err := os.Stat(filepath.Join(jobDir, flagFileName)); err == nil {
 		log.Printf("worker harness: job %s: agent reported via report_result; stdout: %s", spec.ID, snippet(out))
@@ -150,6 +183,11 @@ func Run(ctx context.Context, cfg Config) error {
 	} else {
 		res = fallbackResult(spec, out, errOut, runErr)
 	}
+	// The fallback result carries no usage: the agent that crashed
+	// never self-reported, and the measured accounting reaches the
+	// factory via the usage hook's session.usage envelope, whose
+	// ledger row backfills the job's usage there (spec §6.5 reporting
+	// amendment). One accounting source, never two.
 	if err := res.Validate(nil); err != nil {
 		return fmt.Errorf("fallback result for %s: %w", spec.ID, err)
 	}
@@ -158,6 +196,35 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	log.Printf("worker harness: job %s: posted fallback result status=%s; stderr: %s", spec.ID, res.Status, snippet(errOut))
 	return nil
+}
+
+// readRunUsage reads the sessions opencode recorded for the run's
+// directory (spec §6.5 reporting amendment): cfg.ReadUsage when wired,
+// else the real reader against the host's opencode database (discovered
+// via OpenCODEBin, bounded by ocusage.UsageReadTimeout). Errors log and
+// degrade to nil - accounting is best-effort, never a run failure.
+func readRunUsage(cfg Config, dir string, sinceMs int64) []ocusage.Session {
+	read := cfg.ReadUsage
+	if read == nil {
+		read = func(dir string, sinceMs int64) ([]ocusage.Session, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), ocusage.UsageReadTimeout)
+			defer cancel()
+			dbPath, err := ocusage.DBPathCtx(ctx, cfg.OpenCODEBin)
+			if err != nil {
+				return nil, err
+			}
+			return ocusage.ReadSince(dbPath, dir, sinceMs)
+		}
+	}
+	sessions, err := read(dir, sinceMs)
+	if err != nil {
+		log.Printf("worker harness: session usage read for %s: %v", filepath.Base(dir), err)
+		return nil
+	}
+	if len(sessions) > 0 {
+		log.Printf("worker harness: session usage: %d session(s) in %s", len(sessions), filepath.Base(dir))
+	}
+	return sessions
 }
 
 // loadSpec reads the job JSON, applies the pinned defaults, and validates

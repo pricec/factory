@@ -243,8 +243,15 @@ func New(cfg Config) (*App, error) {
 		// The brain reporter wraps the runner so a failed session posts
 		// brain.failed upstream (spec §3.2, 2026-11-15 amendment) -
 		// without it a dead delegation acks silently and the operator
-		// waits forever.
-		Brain:   &brainReporter{inner: a.brain, poster: a.poster, from: a.inboxID},
+		// waits forever - and posts session.usage for every brain
+		// session (spec §6.5 reporting amendment): brain spend carries
+		// no JobResult, so the ledger only sees it via this report.
+		Brain: &brainReporter{
+			inner:   a.brain,
+			poster:  a.poster,
+			from:    a.inboxID,
+			workDir: a.brain.WorkDir,
+		},
 		Poster:  a.poster,
 		Spawner: spawnerFunc(a.SpawnWorker),
 	}
