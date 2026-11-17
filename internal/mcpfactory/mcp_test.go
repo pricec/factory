@@ -18,6 +18,7 @@ import (
 	"github.com/pricec/factory/internal/jobs"
 	"github.com/pricec/factory/internal/mcpfactory"
 	"github.com/pricec/factory/internal/registry"
+	"github.com/pricec/factory/internal/secrets"
 	"github.com/pricec/factory/internal/tasks"
 	"github.com/pricec/factory/internal/wire"
 )
@@ -41,6 +42,7 @@ type env struct {
 	t         *testing.T
 	authStore *auth.Store
 	store     *jobs.Store
+	secrets   *secrets.Store
 	svc       *inbox.Service
 	tasks     *tasks.Store
 	matcher   *stubMatcher
@@ -75,13 +77,18 @@ func newEnv(t *testing.T, budget budgets.Config) *env {
 		t.Fatalf("tasks.New: %v", err)
 	}
 	matcher := &stubMatcher{foreman: registry.Foreman{ID: "alpha", Online: true}, ok: true}
-	e := &env{}
+	secretStore, err := secrets.Open(filepath.Join(dir, secrets.FileName))
+	if err != nil {
+		t.Fatalf("secrets.Open: %v", err)
+	}
+	e := &env{secrets: secretStore}
 	h, err := mcpfactory.Handler(mcpfactory.Config{
 		Auth:    authStore,
 		Store:   store,
 		Matcher: matcher,
 		Inbox:   svc,
 		Budget:  budget,
+		Secrets: secretStore,
 		Tasks:   taskStore,
 		TaskChanged: func(_ context.Context, id string) {
 			e.mu.Lock()
@@ -119,7 +126,7 @@ func newEnv(t *testing.T, budget budgets.Config) *env {
 		t.Fatalf("MintWorkerToken: %v", err)
 	}
 	*e = env{
-		t: t, authStore: authStore, store: store, svc: svc, tasks: taskStore, matcher: matcher,
+		t: t, authStore: authStore, store: store, secrets: secretStore, svc: svc, tasks: taskStore, matcher: matcher,
 		base: srv.URL, planner: planner, foreman: foreman, worker: worker,
 	}
 	return e
@@ -310,8 +317,10 @@ func TestToolsListAndBudget(t *testing.T) {
 	// (~450 bytes with its schema) must tell the planner that every
 	// "merge and deploy X" ask is a merge request, not a prose job; the
 	// 4KB surface had 3 bytes of headroom left.
-	if budget >= 4608 {
-		t.Errorf("description budget = %d bytes, want < 4608", budget)
+	// Raised to 5KB (5120) by the job-secrets amendment (2026-11-17): create_job
+	// gains the optional `secrets` argument (schema + one description line).
+	if budget >= 5120 {
+		t.Errorf("description budget = %d bytes, want < 5120", budget)
 	}
 	t.Logf("description budget: %d bytes", budget)
 }

@@ -80,6 +80,11 @@ type Config struct {
 	// Env is the child environment; nil means the worker process
 	// environment. WORKER_TOKEN is always overridden.
 	Env []string
+	// SecretEnv holds credential env vars (name -> value) merged into the
+	// runner child's environment ONLY (spec §13.2). Values live in memory
+	// for the run; they are never written to job.json, config files, logs
+	// or posted envelopes (child output is redacted of them).
+	SecretEnv map[string]string
 	// Post delivers the fallback JobResult; nil means HTTP with Bearer
 	// auth. Retried at-least-once (§8.5).
 	Post PostFunc
@@ -196,6 +201,12 @@ func Run(ctx context.Context, cfg Config) error {
 		return harnessErr
 	}
 	out, errOut := stdout.String(), stderr.String()
+	// Best effort (spec §13.2): scrub secret values the agent echoed to its
+	// output before anything is logged or posted.
+	out, errOut = redactSecrets(cfg.SecretEnv, out), redactSecrets(cfg.SecretEnv, errOut)
+	if runErr != nil {
+		runErr = redactedError{redactSecrets(cfg.SecretEnv, runErr.Error())}
+	}
 	if claude {
 		// Claude runs emit one JSON result object (--output-format json):
 		// the harness ALWAYS records the usage it parsed, before anything
@@ -395,6 +406,9 @@ func execChild(ctx context.Context, cfg Config, lim limits, jobDir, prompt strin
 	// The generated config references the token via {env:WORKER_TOKEN}
 	// (never at rest); guarantee it is present in the child environment.
 	cmd.Env = withEnvValue(env, envWorkerToken, cfg.Token)
+	for k, v := range cfg.SecretEnv {
+		cmd.Env = withEnvValue(cmd.Env, k, v)
+	}
 
 	// Any byte on stdout or stderr is a heartbeat. The claude runner's
 	// stdout is also parsed live (stream-json) for spend and tool loops;

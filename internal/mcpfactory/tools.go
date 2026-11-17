@@ -39,6 +39,8 @@ type (
 	createJobArgs struct {
 		Task     string   `json:"task"`
 		Requires []string `json:"requires,omitempty"`
+		// Secrets are credentials-store NAMES (spec §13.2), never values.
+		Secrets []string `json:"secrets,omitempty"`
 		// Foreman is the explicit routing pin (spec §6.7): bare or
 		// foreman:-prefixed id of the foreman the job runs on; empty
 		// means the Matcher's capability pick.
@@ -177,6 +179,7 @@ func createJobTool(cfg Config) mcp.ToolHandlerFor[createJobArgs, any] {
 
 		spec := wire.NewJobSpec(in.Task, "factory")
 		spec.Requires = in.Requires
+		spec.Secrets = in.Secrets
 		if in.ResultSchema != nil {
 			b, err := wire.MarshalPayload(in.ResultSchema)
 			if err != nil {
@@ -200,6 +203,15 @@ func createJobTool(cfg Config) mcp.ToolHandlerFor[createJobArgs, any] {
 		}
 		if err := spec.Validate(); err != nil {
 			return nil, nil, err
+		}
+		// Fail at create, never at dispatch (spec §13.2).
+		if len(spec.Secrets) > 0 {
+			if cfg.Secrets == nil {
+				return nil, nil, fmt.Errorf("unknown_secrets: %v (no credentials store configured)", spec.Secrets)
+			}
+			if err := cfg.Secrets.CheckNames(spec.Secrets); err != nil {
+				return nil, nil, err
+			}
 		}
 
 		// Dispatch decision (spec §6.7): the pin wins over the Matcher.

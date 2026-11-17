@@ -111,6 +111,24 @@ func (a *App) runWorker(spec wire.JobSpec, hcfg workerharness.Config) {
 		a.setWorkerLive(spec.ID, false)
 		a.revokeJobCredential(context.Background(), spec.ID)
 	}()
+	// Credentials (spec §13.2): fetched before the child starts; a job
+	// promised secrets never runs without them. Values stay in hcfg
+	// (process memory) and are dropped when this function returns; Go
+	// strings are not zeroed - best effort only (spec §13.2).
+	if len(spec.Secrets) > 0 {
+		env, err := a.fetchJobSecrets(a.workerCtx, spec)
+		if err != nil {
+			if a.workerCtx.Err() != nil {
+				log.Printf("foremanapp: worker %s: secrets fetch aborted (foreman stopping)", spec.ID)
+				return
+			}
+			log.Printf("foremanapp: worker %s: %v", spec.ID, err)
+			a.postSpawnFailure(spec, err)
+			return
+		}
+		hcfg.SecretEnv = env
+		defer func() { hcfg.SecretEnv = nil }()
+	}
 	if err := workerharness.Run(a.workerCtx, hcfg); err != nil {
 		if a.workerCtx.Err() != nil {
 			log.Printf("foremanapp: worker %s: %v (foreman stopping)", spec.ID, err)

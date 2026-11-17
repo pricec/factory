@@ -125,6 +125,12 @@ CREATE TABLE IF NOT EXISTS foremen (
 	last_seen    TEXT,
 	online       INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS secret_grants (
+	job_id     TEXT NOT NULL,
+	name       TEXT NOT NULL,
+	granted_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_secret_grants_job ON secret_grants(job_id);
 `
 	if _, err := db.Exec(ddl); err != nil {
 		return err
@@ -174,10 +180,13 @@ type Job struct {
 	OverBudget  bool            `json:"over_budget"`
 	// HeldReason explains why a held job waits (S3 dispatch gate), e.g.
 	// "usage ORANGE: 5h 88%, resets 23:30Z". Empty outside StateHeld.
-	HeldReason string       `json:"held_reason,omitempty"`
-	CreatedAt  string       `json:"created_at"`
-	UpdatedAt  string       `json:"updated_at"`
-	Spec       wire.JobSpec `json:"spec"`
+	HeldReason string `json:"held_reason,omitempty"`
+	// GrantedSecrets are the NAMES of credentials handed to the job's
+	// foreman (spec §13.2 audit); never values. Filled by Get only.
+	GrantedSecrets []string     `json:"granted_secrets,omitempty"`
+	CreatedAt      string       `json:"created_at"`
+	UpdatedAt      string       `json:"updated_at"`
+	Spec           wire.JobSpec `json:"spec"`
 }
 
 // Create stores spec as a pending job (spec §6.1).
@@ -393,7 +402,12 @@ func (s *Store) Get(ctx context.Context, id string) (Job, bool, error) {
 		IFNULL(next_attempt_at, ''), IFNULL(last_error, ''), usage, results, over_budget, created_at, updated_at,
 		IFNULL(held_reason, '')
 		FROM jobs WHERE id = ?`, id)
-	return scanJob(row)
+	j, ok, err := scanJob(row)
+	if err != nil || !ok {
+		return j, ok, err
+	}
+	j.GrantedSecrets, err = s.GrantedSecrets(ctx, id)
+	return j, true, err
 }
 
 // List returns jobs filtered by state and/or foreman, newest first

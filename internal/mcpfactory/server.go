@@ -14,6 +14,7 @@ import (
 	"github.com/pricec/factory/internal/inbox"
 	"github.com/pricec/factory/internal/jobs"
 	"github.com/pricec/factory/internal/registry"
+	"github.com/pricec/factory/internal/secrets"
 	"github.com/pricec/factory/internal/tasks"
 )
 
@@ -34,6 +35,9 @@ type Config struct {
 	// Budget carries the daily spend cap and FACTORY_SPEND_OVERRIDE for the
 	// create_job breaker (spec §6.5).
 	Budget budgets.Config
+	// Secrets is the credentials store; create_job rejects secret names
+	// absent from it (spec §13.2). Nil rejects any non-empty secrets.
+	Secrets *secrets.Store
 	// Tasks is the task store (spec §9.5.2). nil disables the task tools
 	// and task_id handling (notify_operator then posts unthreaded).
 	Tasks *tasks.Store
@@ -79,6 +83,7 @@ func Handler(cfg Config) (http.Handler, error) {
 			"requires entries are capability tag NAMES - accepted forms: os:linux, arch:amd64, " +
 			"tools:<tool>, or a bare tag name (os, arch, tools); NEVER bare values like linux " +
 			"or amd64 (rejected as unknown_requires). " +
+			"secrets: optional credential NAMES (must exist in the store); reach the worker as env vars. " +
 			"foreman: optional explicit pin (bare or foreman:-prefixed id) - wins over requires " +
 			"matching; unknown foreman errors; offline pin pends until it returns. " +
 			"tier: flash (cheapest, default), default (Flash max-thinking), hardest (strongest); " +

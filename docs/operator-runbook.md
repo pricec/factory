@@ -123,3 +123,27 @@ fresh evidence directory, for example
 9. **Record** the following in `$EV`: `DEPLOYED`, `BUILD`, the
    `/proc/$PID/exe` sha, and the check results. A merge job puts these in
    its `report_result`.
+
+## Credentials
+
+Secrets are named values with an env-var mapping, managed in the operator UI
+Credentials panel or over HTTP, and stored plaintext (mode 0600) in
+`secrets.json` in the factory data dir (spec §13).
+
+    curl -X POST $FACTORY/v1/secrets/github-push \
+      -d '{"value":"ghp_...","env_var":"GITHUB_TOKEN"}'
+
+A job opts in by name: `create_job` with `secrets: ["github-push"]`, or the
+`secrets` field of the UI job form (comma-separated). Names must exist at
+creation or the create fails. The worker child then runs with
+`GITHUB_TOKEN=<value>` in its environment (default env var when `env_var` is
+omitted: `SECRET_GITHUB_PUSH`); the value is never in `job.json`, logs or
+envelopes, and output echoing it is replaced by `[REDACTED]`.
+
+- **Rotation:** overwrite with another `POST /v1/secrets/{name}`. Jobs pick
+  it up at dispatch (the foreman fetches just before starting the child);
+  already-running jobs keep the old value.
+- **Audit:** `GET /v1/jobs/{id}` lists `granted_secrets` (names); the
+  `secret_grants` table in `jobs.db` has timestamps.
+- **Deleting** a secret a queued job still names fails that job at start
+  with `could not fetch secrets [name]`; recreate the secret and requeue.

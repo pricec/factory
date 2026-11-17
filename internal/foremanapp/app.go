@@ -87,8 +87,10 @@ type App struct {
 	advertise  string
 	now        func() time.Time
 
-	paired     pairingRecord
-	brainToken string
+	paired pairingRecord
+	// secretBackoff is the handout fetch retry delay; zero means 1s (test seam).
+	secretBackoff time.Duration
+	brainToken    string
 
 	inbox  *inbox.Service
 	auth   *auth.Store

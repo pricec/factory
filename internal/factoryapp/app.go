@@ -230,6 +230,7 @@ func New(cfg Config) (*App, error) {
 		Matcher: matcher,
 		Inbox:   a.inbox,
 		Budget:  cfg.Budget,
+		Secrets: a.secrets, // create_job secrets validation (spec §13.2)
 		// Task tools + woken-task defaults (spec §9.5.2).
 		Tasks:       a.tasks,
 		TaskChanged: a.publishTaskChanged,
@@ -433,6 +434,7 @@ func buildMux(a *App, mcpH http.Handler) http.Handler {
 	mux.HandleFunc("GET /v1/secrets", a.handleListSecrets)            // credentials (spec §13): metadata only
 	mux.HandleFunc("POST /v1/secrets/{name}", a.handlePutSecret)      // upsert; never echoes the value
 	mux.HandleFunc("DELETE /v1/secrets/{name}", a.handleDeleteSecret) // no value-returning route exists
+	mux.HandleFunc("GET /v1/jobs/{id}/secrets", a.handleJobSecrets)   // job handout (spec §13.2): the only value-returning route
 	mux.HandleFunc("GET /v1/usage", a.handleUsage)                    // S2: window state (usage.go)
 	mux.HandleFunc("GET /v1/throttle", a.handleGetThrottle)           // S3: gate (throttle.go)
 	mux.HandleFunc("POST /v1/throttle", a.handlePostThrottle)         // S3: operator override
