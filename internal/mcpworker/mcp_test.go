@@ -270,8 +270,8 @@ func TestInitializeToolsListAndBudget(t *testing.T) {
 	if len(want) != 0 {
 		t.Errorf("missing tools: %v", want)
 	}
-	if budget >= 1024 {
-		t.Errorf("description budget = %d bytes, want < 1024", budget)
+	if budget >= 1536 {
+		t.Errorf("description budget = %d bytes, want < 1536", budget)
 	}
 	t.Logf("description budget: %d bytes", budget)
 }

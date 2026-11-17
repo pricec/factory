@@ -1205,7 +1205,7 @@ orphaned, live, and local job ids.
   a minimal jsonrpc-over-HTTP MCP (2 tools) and record the decision in this
   section (#17, #15).
 - Tool descriptions stay tiny (per-turn token cost for every LLM caller,
-  #6); byte budgets asserted by test: worker surface < 1KB total (#17);
+  #6); byte budgets asserted by test: worker surface < 1.5KB total (#17; 2026-11-17 typed report_result input schema, was 1KB);
   foreman surface < 1.5KB (#18; 2KB since the 2026-11-16 `raise_alert` tool); factory surface < 4.5KB (2026-11-17 merge
   queue: raised from 4KB for `request_merge`, §6.11 - 4093 B were in use;
   earlier: < 4KB since the 2026-11-16
@@ -1243,6 +1243,23 @@ wording matches):
   `internal/wire`; post the JobResult to the result inbox (409 dedupe
   applies); write the flag file the harness checks (#5); return
   `{"ok": true}`.
+  - Contract (2026-11-17 amendment): the advertised input schema is the
+    contract. `error` is the object form `{kind, message}`, `kind` one of
+    `validation|timeout|crash|llm|other`; the schema pins that shape and
+    is what new agent prompts and code target. The server MUST accept the
+    normalized forms below and rewrite them before `wire.JobResult.Validate`:
+    - `error` as a JSON string -> `{kind: other, message: <string>}`;
+    - `kind` matched case-insensitively against the pinned five, plus the
+      aliases `timeout`/`time` -> timeout and `validation`/`invalid` ->
+      validation; any other kind -> `other`, with the original kind kept
+      at the front of the message as `original kind "<kind>": <message>`;
+    - `status=failed` with no `error` (absent or null) -> `{kind: other,
+      message: "status=failed with no error field"}`.
+    Any other `error` type is a tool error. The normalization never
+    loosens the done path: `summary`/`status` rules and result validation
+    are unchanged. Normalization exists so agents that guess the payload
+    still get their result recorded; prompts need not carry defensive
+    prose about the error shape.
 - `ask_parent(question, wait_seconds=60)` - post `job.question` to the
   foreman's inbox `foreman:{id}` (§3.2); long-poll `job:{job_id}` for
   `job.answer`; return the answer; on timeout return "proceed with your best
@@ -2002,7 +2019,7 @@ outside the `result_schema` subset at validation time (#3).
 | Bearer token | 32B random, stored SHA-256 only | #11 |
 | Long-poll window | `wait_seconds` 0-60 | #1 |
 | Inbox fetch limit | default 50, max 500 | #1 |
-| MCP description budgets | worker < 1KB; foreman < 2KB (2026-11-16 raise_alert; was 1.5KB); factory < 4.5KB (2026-11-17 merge queue; was 4KB, 2KB before 2026-11-16) | #17, #18, #19 |
+| MCP description budgets | worker < 1.5KB (2026-11-17 typed report_result schema; was 1KB); foreman < 2KB (2026-11-16 raise_alert; was 1.5KB); factory < 4.5KB (2026-11-17 merge queue; was 4KB, 2KB before 2026-11-16) | #17, #18, #19 |
 | JobSpec defaults | `timeout_s` 14400 (ceiling); `idle_timeout_s` 900; `priority` 5 (1-9, 9 highest); `budget` `{max_prompt_bytes 32768, max_output_tokens 8192, max_cost_usd 20.0}` | #3 |
 | Long-pending alert | `pending` with no matching online foreman for > 30 min -> one `notify.pending` in `planner:main` (dedupe per job per pending episode); check tick 1 min | 2026-11-15 amendment |
 | Merge queue | one `merging` at a time; tick 5s + kicks; merge job tier `hardest`, `timeout_s` 7200, `idle_timeout_s` 1800, priority 3, pinned `foreman:server` (`FACTORY_MERGE_FOREMAN`), never retried; needs_attention alert P1 source `factory:merge_queue` | 2026-11-17 amendment, §6.11 |
