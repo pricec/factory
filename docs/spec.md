@@ -256,7 +256,7 @@ a different, fixed curve.)
   "budget": {
     "max_prompt_bytes": 32768,
     "max_output_tokens": 8192,
-    "max_cost_usd": 5.0
+    "max_cost_usd": 20.0
   },
   "created_by": "factory",
   "created_at": "..."
@@ -1030,8 +1030,20 @@ sentence stay byte-identical across runners.
 
 ### 8.6 Timeout (#5)
 
-Kill the entire process group at `timeout_s`; post a JobResult with
-`error.kind = timeout`.
+Kill the entire process group when a limit fires; post a JobResult whose
+`error.reason` names the limit (2026-11-16 idle-timeout amendment):
+
+| reason | fires when | `error.kind` |
+|---|---|---|
+| `idle` | no stdout/stderr output for `idle_timeout_s` (default 900; any output is a heartbeat) | `timeout` |
+| `ceiling` | wall clock reaches `timeout_s` (hard backstop; default 14400, or by tier when unset: flash 3600, default 7200, hardest 14400) | `timeout` |
+| `budget` | live spend (claude runner: summed stream-json usage, estimated from tokens until the result event's `total_cost_usd` replaces it) reaches `budget.max_cost_usd` (default $20; an API-equivalent cost ESTIMATE standing in for subscription usage-window consumption - the factory runs on a Claude subscription plan, not API billing, so this is not an invoice); SIGTERM, 5s grace, then SIGKILL of the whole process group (even if the leader already exited); the job is flagged `over_budget`, partial output kept, never retried | `other` |
+| `loop` | the same tool call (identical name, compacted input AND tool result) repeats 8 times in a row (claude runner; override per job with `loop_limit`, 0 = 8, negative = disabled); the job is KILLED (SIGTERM, grace, group SIGKILL), never retried | `other` |
+
+Runners without usage data (opencode) are bounded by idle + ceiling only.
+The factory sweeper keys on the ceiling (`timeout_s` + 60s grace): the
+harness always posts by the ceiling, so the sweeper never marks `timed_out`
+a job the harness still considers alive.
 
 ### 8.7 Worker lifecycle across a foreman restart (2026-11-16 orphan-recovery amendment)
 
@@ -1888,7 +1900,7 @@ outside the `result_schema` subset at validation time (#3).
 | Foreman offline threshold | 90s since `last_seen` | #9 |
 | Jobs sweeper tick | 10s | #9 |
 | Retry picker tick | 10s | #10 |
-| Job timeout grace | `timeout_s + 60s` -> `timed_out` | #9 |
+| Job timeout grace | `timeout_s` (ceiling) `+ 60s` -> `timed_out` | #9 |
 | Retries by error kind | validation 0; timeout 1; crash/llm/other 2 | #10 |
 | Retry backoff curve | 30s, 2m, 8m (attempt n waits `backoff[n-1]`) | #10 |
 | SSE reconnect backoff | 1s, 2s, 4s, ... max 60s, +-25% jitter | #2 |
@@ -1902,7 +1914,7 @@ outside the `result_schema` subset at validation time (#3).
 | Long-poll window | `wait_seconds` 0-60 | #1 |
 | Inbox fetch limit | default 50, max 500 | #1 |
 | MCP description budgets | worker < 1KB; foreman < 2KB (2026-11-16 raise_alert; was 1.5KB); factory < 4KB (2026-11-16 inbox redesign; was 2KB) | #17, #18, #19 |
-| JobSpec defaults | `timeout_s` 300; `priority` 5 (1-9, 9 highest); `budget` `{max_prompt_bytes 32768, max_output_tokens 8192, max_cost_usd 5.0}` | #3 |
+| JobSpec defaults | `timeout_s` 14400 (ceiling); `idle_timeout_s` 900; `priority` 5 (1-9, 9 highest); `budget` `{max_prompt_bytes 32768, max_output_tokens 8192, max_cost_usd 20.0}` | #3 |
 | Long-pending alert | `pending` with no matching online foreman for > 30 min -> one `notify.pending` in `planner:main` (dedupe per job per pending episode); check tick 1 min | 2026-11-15 amendment |
 | Foreman orphan recovery | startup pass before any loop; listing 1000 rows per owner spelling; 5 attempts, 2s apart; orphan result kind `crash` | 2026-11-16 orphan-recovery amendment, §8.7 |
 

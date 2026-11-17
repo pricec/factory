@@ -40,10 +40,25 @@ func (k ErrorKind) Valid() bool {
 	}
 }
 
-// JobError explains a failed result (§5.2).
+// Kill reasons (JobError.Reason): why the worker harness terminated the
+// child itself, so an operator can tell the limits apart.
+const (
+	// ReasonIdle: no worker output for idle_timeout_s.
+	ReasonIdle = "idle"
+	// ReasonCeiling: wall-clock ceiling timeout_s reached.
+	ReasonCeiling = "ceiling"
+	// ReasonBudget: live spend reached budget.max_cost_usd.
+	ReasonBudget = "budget"
+	// ReasonLoop: the same tool call repeated back to back too often.
+	ReasonLoop = "loop"
+)
+
+// JobError explains a failed result (§5.2). Reason is set only when the
+// harness killed the child (idle|ceiling|budget|loop).
 type JobError struct {
 	Kind    ErrorKind `json:"kind"`
 	Message string    `json:"message"`
+	Reason  string    `json:"reason,omitempty"`
 }
 
 // Usage reports a job's token and cost spend (§5.2).

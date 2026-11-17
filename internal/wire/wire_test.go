@@ -567,3 +567,61 @@ func TestEnvelopeThreadIDBackwardCompatible(t *testing.T) {
 		t.Errorf("thread_id missing: %s", b)
 	}
 }
+
+func TestNormalizeTimeoutDefaults(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		tier     string
+		timeout  int
+		wantCeil int
+	}{
+		{"unset no tier", "", 0, 14400},
+		{"flash", TierFlash, 0, 3600},
+		{"default", TierDefault, 0, 7200},
+		{"hardest", TierHardest, 0, 14400},
+		{"explicit wins", TierFlash, 90, 90},
+	} {
+		s := JobSpec{Tier: tc.tier, TimeoutS: tc.timeout}
+		s.Normalize()
+		if s.TimeoutS != tc.wantCeil || s.IdleTimeoutS != 900 {
+			t.Errorf("%s: timeout_s=%d idle=%d, want %d/900", tc.name, s.TimeoutS, s.IdleTimeoutS, tc.wantCeil)
+		}
+	}
+	s := JobSpec{IdleTimeoutS: 60}
+	s.Normalize()
+	if s.IdleTimeoutS != 60 {
+		t.Errorf("explicit idle_timeout_s overridden: %d", s.IdleTimeoutS)
+	}
+}
+
+// TestDefaultMaxCostIs20: the default live spend cap is $20 (an
+// API-equivalent estimate for subscription usage, not real money).
+func TestDefaultMaxCostIs20(t *testing.T) {
+	t.Parallel()
+	if DefaultMaxCostUSD != 20 {
+		t.Errorf("DefaultMaxCostUSD = %v, want 20", DefaultMaxCostUSD)
+	}
+	s := NewJobSpec("t", "factory")
+	if s.Budget.MaxCostUSD != 20 {
+		t.Errorf("NewJobSpec budget = %v, want 20", s.Budget.MaxCostUSD)
+	}
+	var z JobSpec
+	z.Normalize()
+	if z.Budget.MaxCostUSD != 20 {
+		t.Errorf("Normalize budget = %v, want 20", z.Budget.MaxCostUSD)
+	}
+}
+
+func TestLoopLimitOmittedWhenZero(t *testing.T) {
+	t.Parallel()
+	b, _ := json.Marshal(NewJobSpec("t", "factory"))
+	if strings.Contains(string(b), "loop_limit") {
+		t.Errorf("loop_limit serialized when zero: %s", b)
+	}
+	s := NewJobSpec("t", "factory")
+	s.LoopLimit = -1
+	if err := s.Validate(); err != nil {
+		t.Errorf("negative loop_limit (disabled) rejected: %v", err)
+	}
+}

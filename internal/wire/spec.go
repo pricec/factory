@@ -9,13 +9,25 @@ import (
 
 // Pinned JobSpec defaults (§5.1, §11).
 const (
-	DefaultTimeoutS        = 300
+	// DefaultTimeoutS is the hard wall-clock CEILING (timeout_s) for a job
+	// that sets none (4h): since the idle-timeout amendment timeout_s is a
+	// backstop, not the working limit - idle_timeout_s is.
+	DefaultTimeoutS = 14400
+	// DefaultIdleTimeoutS is how long a worker may produce no output
+	// (idle_timeout_s) before the harness kills it (15m).
+	DefaultIdleTimeoutS = 900
+	// DefaultLoopLimit is the loop guard default (identical call+result repeats).
+	DefaultLoopLimit       = 8
 	DefaultPriority        = 5
 	MinPriority            = 1
 	MaxPriority            = 9
 	DefaultMaxPromptBytes  = 32768
 	DefaultMaxOutputTokens = 8192
-	DefaultMaxCostUSD      = 5.0
+	// DefaultMaxCostUSD is the default live spend cap. NOT real money: the
+	// factory runs on a Claude subscription usage plan, not API billing;
+	// this is an API-equivalent cost ESTIMATE standing in for usage-window
+	// consumption (see internal/claudecli price table).
+	DefaultMaxCostUSD = 20.0
 )
 
 // Job tiers (§5.1, §6.5): the model tier a job runs at. Empty means
@@ -31,11 +43,31 @@ const (
 // Tiers is every allowed tier value (§5.1).
 var Tiers = []string{TierFlash, TierDefault, TierHardest}
 
+// tierCeilingS is the per-tier timeout_s ceiling applied by Normalize when
+// a spec leaves timeout_s unset (zero) and names a tier.
+var tierCeilingS = map[string]int{
+	TierFlash:   3600,
+	TierDefault: 7200,
+	TierHardest: 14400,
+}
+
+// TierCeilingS returns the default timeout_s ceiling for tier: flash 1h,
+// default 2h, hardest 4h. An empty or unknown tier gets DefaultTimeoutS.
+func TierCeilingS(tier string) int {
+	if n, ok := tierCeilingS[tier]; ok {
+		return n
+	}
+	return DefaultTimeoutS
+}
+
 // Budget bounds a job's prompt size, output size, and spend (§5.1).
 type Budget struct {
-	MaxPromptBytes  int     `json:"max_prompt_bytes"`
-	MaxOutputTokens int     `json:"max_output_tokens"`
-	MaxCostUSD      float64 `json:"max_cost_usd"`
+	MaxPromptBytes  int `json:"max_prompt_bytes"`
+	MaxOutputTokens int `json:"max_output_tokens"`
+	// MaxCostUSD caps the live spend estimate (default $20). It is an
+	// API-equivalent estimate standing in for subscription usage-window
+	// consumption (we do not pay per token), not an invoice amount.
+	MaxCostUSD float64 `json:"max_cost_usd"`
 }
 
 func defaultBudget() Budget {
@@ -60,9 +92,19 @@ type JobSpec struct {
 	// forms via registry.InboxID); requires stay informational on a
 	// pinned job - the pin is the routing decision and is never
 	// capability-matched.
-	Foreman   string `json:"foreman,omitempty"`
-	Tier      string `json:"tier,omitempty"`
-	TimeoutS  int    `json:"timeout_s"`
+	Foreman string `json:"foreman,omitempty"`
+	Tier    string `json:"tier,omitempty"`
+	// TimeoutS is the hard wall-clock ceiling in seconds; the job is killed
+	// (reason=ceiling) when it passes even if it is still producing output.
+	TimeoutS int `json:"timeout_s"`
+	// IdleTimeoutS kills the job (reason=idle) after this many seconds
+	// without any worker output; any output resets the timer. Zero means
+	// DefaultIdleTimeoutS; it never exceeds the ceiling in effect.
+	IdleTimeoutS int `json:"idle_timeout_s,omitempty"`
+	// LoopLimit is the loop guard's threshold: that many consecutive tool
+	// calls with identical name, input AND result kill the job
+	// (reason=loop). 0 means DefaultLoopLimit (8); negative disables it.
+	LoopLimit int    `json:"loop_limit,omitempty"`
 	Priority  int    `json:"priority"`
 	Budget    Budget `json:"budget"`
 	CreatedBy string `json:"created_by,omitempty"`
@@ -96,7 +138,10 @@ func NewJobSpec(task, createdBy string) JobSpec {
 // schedule templates get those when the schedule fires (§6.8).
 func (s *JobSpec) Normalize() {
 	if s.TimeoutS == 0 {
-		s.TimeoutS = DefaultTimeoutS
+		s.TimeoutS = TierCeilingS(s.Tier)
+	}
+	if s.IdleTimeoutS == 0 {
+		s.IdleTimeoutS = DefaultIdleTimeoutS
 	}
 	if s.Priority == 0 {
 		s.Priority = DefaultPriority
@@ -137,6 +182,9 @@ func (s *JobSpec) validate(requireID bool) error {
 	}
 	if s.TimeoutS <= 0 {
 		return fmt.Errorf("timeout_s: must be > 0, got %d", s.TimeoutS)
+	}
+	if s.IdleTimeoutS < 0 {
+		return fmt.Errorf("idle_timeout_s: must be >= 0, got %d", s.IdleTimeoutS)
 	}
 	if s.Priority < MinPriority || s.Priority > MaxPriority {
 		return fmt.Errorf("priority: must be %d-%d, got %d", MinPriority, MaxPriority, s.Priority)

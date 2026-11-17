@@ -321,6 +321,13 @@ func (s *Store) ApplyResult(ctx context.Context, res wire.JobResult) error {
 		string(usageJSON), string(mustJSON(results)), lastErr, s.now(), res.JobID); err != nil {
 		return err
 	}
+	// A harness kill at the live spend cap flags the job over budget (the
+	// post-hoc check is strictly '>' and the live kill fires at '>=').
+	if res.Error != nil && res.Error.Reason == wire.ReasonBudget {
+		if err := s.MarkOverBudget(ctx, res.JobID); err != nil {
+			return err
+		}
+	}
 	if Terminal(to) {
 		s.fireTerminal(res.JobID, to)
 	}
