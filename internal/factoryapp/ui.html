@@ -826,7 +826,7 @@ async function replyAlert(form) {
   }
 }
 
-/* ----- triage queue helpers (mirror internal/tasks/awaiting.go; ordering itself is server-side) ----- */
+/* ----- triage queue helpers (mirror internal/tasks/awaiting.go; the queue is the needs_operator flag, ordering is server-side) ----- */
 
 // mergeQueue keeps the on-screen queue stable: ids still waiting keep their
 // place, answered ones drop out, newly waiting ones join at the end.
@@ -849,7 +849,7 @@ window.__queue = { mergeQueue, advance };
 async function loadQueue() {
   if (!st.tasksAvailable) return;
   try {
-    const fresh = ((await getJ("/v1/tasks?status=open&awaiting=operator&limit=500")).tasks || []).map(t => t.id);
+    const fresh = ((await getJ("/v1/tasks?status=open&needs_operator=true&limit=500")).tasks || []).map(t => t.id);
     st.queue = mergeQueue(st.queue, fresh);
   } catch (e) { if (api404(e)) st.tasksAvailable = false; return; }
   if (st.mode === "focus" && !st.queue.includes(st.focusId)) {
@@ -901,7 +901,7 @@ function renderFocusBar() {
 async function loadTasks() {
   if (!st.tasksAvailable) return;
   const qs = "?status=" + (st.onlyActive ? "open" : "all") + "&limit=100" + (st.q ? "&q=" + encodeURIComponent(st.q) : "") +
-    (st.needsInput ? "&awaiting=operator" : "");
+    (st.needsInput ? "&needs_operator=true" : "");
   try { st.tasks = (await getJ("/v1/tasks" + qs)).tasks || []; }
   catch (e) {
     if (api404(e)) { st.tasksAvailable = false; st.tasks = []; renderTasks(); await loadLegacy(); return; }
@@ -919,8 +919,7 @@ function renderTasks() {
   box.innerHTML = st.tasks.map(t =>
     '<div class="task' + (t.id === st.selected ? " selected" : "") + (t.status === "closed" ? " closed" : "") + '" data-id="' + esc(t.id) + '">' +
     '<div class="thead">' + prioBadge(t.priority) + ' <span class="ttitle">' + esc(t.title) + "</span>" +
-    (t.awaiting === "operator" ? '<span class="needs" title="waiting on you">● needs input</span>' : "") +
-    (t.status === "open" && t.needs_operator ? ' <span class="badge flagged" title="the planner flagged this as waiting on you (needs_operator)">needs you</span>' : "") + "</div>" +
+    (t.status === "open" && t.needs_operator ? '<span class="needs" title="the planner flagged this as waiting on you (needs_operator)">● needs input</span> <span class="badge flagged" title="the planner flagged this as waiting on you (needs_operator)">needs you</span>' : "") + "</div>" +
     (t.preview ? '<div class="tprev">' + esc(t.preview) + "</div>" : "") +
     '<div class="tmeta">' + esc(t.status) + " · " + esc(rel(t.last_activity_at || t.updated_at)) + " · " + esc(t.id) + "</div></div>").join("");
   for (const el of box.querySelectorAll(".task")) el.onclick = () => {

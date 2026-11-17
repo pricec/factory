@@ -360,11 +360,16 @@ func TestUIPhoneShell(t *testing.T) {
 	for _, want := range []string{
 		`const needsYou = (t) => t.status === "open" && !!t.needs_operator;`,
 		"P.alerts.length + P.tasks.filter(needsYou).length",
-		`t.status === "open" && t.needs_operator ? ' <span class="badge flagged"`, // desktop marker
+		`t.status === "open" && t.needs_operator ? '<span class="needs"`, // desktop "needs input" badge
+		"/v1/tasks?status=open&needs_operator=true&limit=500",            // focus/triage queue
+		`"&needs_operator=true"`,                                         // needs-input filter
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("UI page missing %q", want)
 		}
+	}
+	if strings.Contains(body, "awaiting=operator") || strings.Contains(body, `t.awaiting`) {
+		t.Error("desktop needs-input must use needs_operator, not the awaiting heuristic")
 	}
 	if strings.Contains(body, `data-act="all-read"`) {
 		t.Error(`"Mark all read" must not clear the server-side needs_operator section`)

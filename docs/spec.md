@@ -1567,7 +1567,7 @@ Chat and task API (unauthenticated, like the rest of the UI surface,
   collapsed, at most 120 characters, and "" if there is none.
   `preview_from` names its author: `operator` (`chat.message`), `planner`
   (`brain.reply`), or "" if there is none (display only).
-  `awaiting` is `operator` iff the task is open AND its newest
+  `awaiting` is a legacy heuristic and no longer drives any UI: `awaiting` is `operator` iff the task is open AND its newest
   operator-visible message is a `brain.reply` (internal rows never count);
   otherwise (closed, no visible message, or the operator spoke last) it is
   `factory`. `awaiting_since` is the ts of that unanswered `brain.reply`
@@ -1585,7 +1585,11 @@ Chat and task API (unauthenticated, like the rest of the UI surface,
   defaults to `all`, `limit` defaults to 200 (clamped at 1000), and a bad
   status or limit returns 400. Ranking: open first, then priority ASC,
   then last_activity_at DESC. `q` matches a title substring, an id prefix
-  or a `YYYY-MM-DD` date prefix. `awaiting=operator|factory` keeps only
+  or a `YYYY-MM-DD` date prefix. `needs_operator=true|false` (2026-11-17)
+  keeps only tasks that are open and flagged (true) or the rest (false); a
+  bad value returns 400. `needs_operator=true` is the desktop "needs
+  input" filter and focus/triage queue, in triage order: priority ASC (0
+  first), then oldest `last_activity_at`. `awaiting=operator|factory` keeps only
   tasks awaiting that party (a bad value returns 400); the operator list
   is in triage order: priority ASC (0 first), then oldest `awaiting_since`.
 - `GET /v1/tasks/{id}?internal=1&limit=` -> `{task, messages: [{id, type,

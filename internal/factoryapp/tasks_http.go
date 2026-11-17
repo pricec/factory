@@ -154,7 +154,9 @@ func (a *App) handleCloseTask(w http.ResponseWriter, r *http.Request) {
 // handleListTasks serves GET /v1/tasks?status=open|closed|all&q=&limit=
 // -> {"tasks":[Task]}: open first, then priority ASC, then
 // last_activity_at DESC. awaiting=operator|factory keeps only tasks awaiting
-// that party (operator results come in triage order: priority ASC, oldest
+// that party (legacy heuristic; the UIs use needs_operator=true|false, the
+// planner's explicit flag, triage order priority ASC then oldest activity;
+// operator results come in triage order: priority ASC, oldest
 // waiting first). status defaults to all; q matches a title
 // substring, an id prefix or a YYYY-MM-DD date prefix.
 func (a *App) handleListTasks(w http.ResponseWriter, r *http.Request) {
@@ -179,8 +181,15 @@ func (a *App) handleListTasks(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "awaiting: want operator or factory")
 		return
 	}
+	needs := q.Get("needs_operator")
+	switch needs {
+	case "", "true", "false":
+	default:
+		writeError(w, http.StatusBadRequest, "bad_request", "needs_operator: want true or false")
+		return
+	}
 	filter := tasks.TaskFilter{Status: status, Query: q.Get("q"), Limit: limit}
-	if awaiting != "" {
+	if awaiting != "" || needs != "" {
 		filter.Limit = 0 // filter first, then cap
 	}
 	list, err := a.tasks.ListTasks(r.Context(), filter)
@@ -191,17 +200,41 @@ func (a *App) handleListTasks(w http.ResponseWriter, r *http.Request) {
 	out := make([]taskView, 0, len(list))
 	for _, t := range list {
 		v := a.taskView(r.Context(), t)
-		if awaiting == "" || v.Awaiting == awaiting {
-			out = append(out, v)
+		if awaiting != "" && v.Awaiting != awaiting {
+			continue
 		}
+		if needs != "" && (v.NeedsOperator && v.Status == tasks.StatusOpen) != (needs == "true") {
+			continue
+		}
+		out = append(out, v)
 	}
-	if awaiting == tasks.AwaitingOperator {
+	if needs == "true" {
+		out = orderFlaggedViews(out)
+	} else if awaiting == tasks.AwaitingOperator {
 		out = orderWaitingViews(out)
 	}
 	if len(out) > limit {
 		out = out[:limit]
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"tasks": out})
+}
+
+// orderFlaggedViews sorts needs_operator views into triage order:
+// priority ASC, then oldest last_activity_at first (the flag has no
+// timestamp of its own; the planner's update_task bumps activity).
+func orderFlaggedViews(views []taskView) []taskView {
+	items := make([]tasks.WaitingItem, len(views))
+	byID := make(map[string]taskView, len(views))
+	for i, v := range views {
+		items[i] = tasks.WaitingItem{ID: v.ID, Priority: v.Priority, Since: v.LastActivityAt}
+		byID[v.ID] = v
+	}
+	tasks.OrderWaiting(items)
+	out := make([]taskView, len(items))
+	for i, it := range items {
+		out[i] = byID[it.ID]
+	}
+	return out
 }
 
 // orderWaitingViews sorts awaiting-operator views into triage order

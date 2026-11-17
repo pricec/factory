@@ -1,10 +1,13 @@
 package factoryapp_test
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/pricec/factory/internal/wire"
 )
 
 // taskWithNeeds is taskJSON plus needs_operator.
@@ -159,4 +162,70 @@ func TestNeedsOperatorFlag(t *testing.T) {
 		t.Fatalf("close = %d", s)
 	}
 	check("operator closed", false)
+}
+
+// TestNeedsOperatorListFilterAndOrder: GET /v1/tasks?needs_operator=true is
+// the desktop triage queue. It follows only the planner's flag (not who
+// spoke last): a flagged task whose newest message is the operator's still
+// counts, an unflagged task whose newest message is a brain.reply does not.
+// Order is priority ASC, then oldest activity first; a bad value is a 400.
+func TestNeedsOperatorListFilterAndOrder(t *testing.T) {
+	e := newEnv(t)
+	e.a.SetPlannerExec((&wakeLog{}).exec)
+	flag := func(id string, v bool) {
+		t.Helper()
+		e.plannerTool("update_task", map[string]any{"task_id": id, "needs_operator": v})
+	}
+	brainReply := e.chat("unflagged, brain spoke last", "")
+	if _, err := e.a.Inbox().Post(e.ctx, "planner:main", wire.MessageEnvelope{
+		Type: "brain.reply", From: "factory:brain", ThreadID: brainReply.TaskID, Payload: json.RawMessage(`{"text":"q?"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	older := e.chat("p2 flagged older", "")
+	newer := e.chat("p2 flagged newer", "")
+	urgent := e.chat("p0 flagged", "")
+	cleared := e.chat("flagged then cleared", "")
+	closedT := e.chat("flagged then closed", "")
+	flag(older.TaskID, true)
+	flag(newer.TaskID, true)
+	flag(urgent.TaskID, true)
+	p0 := 0
+	e.plannerTool("update_task", map[string]any{"task_id": urgent.TaskID, "priority": p0})
+	flag(cleared.TaskID, true)
+	flag(cleared.TaskID, false)
+	flag(closedT.TaskID, true)
+	if s := e.do("POST", "/v1/tasks/"+closedT.TaskID+"/close", "", nil, nil); s != http.StatusOK {
+		t.Fatalf("close = %d", s)
+	}
+
+	ids := func(q string) []string {
+		t.Helper()
+		var out struct {
+			Tasks []taskJSON `json:"tasks"`
+		}
+		if s := e.do("GET", "/v1/tasks?"+q, "", nil, &out); s != http.StatusOK {
+			t.Fatalf("%s = %d", q, s)
+		}
+		var r []string
+		for _, tk := range out.Tasks {
+			r = append(r, tk.ID)
+		}
+		return r
+	}
+	got := ids("needs_operator=true")
+	want := []string{urgent.TaskID, older.TaskID, newer.TaskID}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("needs_operator=true = %v, want %v", got, want)
+	}
+	if got := ids("needs_operator=true&limit=1"); len(got) != 1 || got[0] != urgent.TaskID {
+		t.Errorf("limited = %v", got)
+	}
+	if got := ids("needs_operator=false"); len(got) != 3 {
+		t.Errorf("needs_operator=false = %v, want 3 tasks", got)
+	}
+	var bad map[string]any
+	if s := e.do("GET", "/v1/tasks?needs_operator=maybe", "", nil, &bad); s != http.StatusBadRequest {
+		t.Errorf("bad needs_operator = %d, want 400", s)
+	}
 }
