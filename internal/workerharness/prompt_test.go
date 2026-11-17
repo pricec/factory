@@ -17,7 +17,7 @@ func wantPrompt(runner, task, payload string) string {
 		tool = "mcp__inbox__report_result"
 	}
 	return task + "\n\nMachine input:\n" + payload +
-		"\n\nReport with the " + tool + " tool. If you cannot, your final stdout is used as fallback."
+		"\n\nReport with the " + tool + " tool. If you cannot, your final stdout is used as fallback." + supersededNote
 }
 
 func TestBuildPrompt(t *testing.T) {

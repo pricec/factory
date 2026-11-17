@@ -1,0 +1,57 @@
+name: audit-guardrail
+
+# The auditor's diff guardrail (spec §6.12) as a CI check. It is meant to be
+# a REQUIRED status check on master (docs/operator-runbook.md, "Auditor").
+#
+# Why pull_request_target: for this event GitHub runs this workflow file AS
+# IT IS ON MASTER, never the PR's copy, so a fix branch cannot edit or delete
+# its own check. The checker (cmd/auditcheck -> auditor.CheckDiff) is built
+# from master as well. The PR's code is never built or executed: its commits
+# are only fetched and diffed. .github/, Makefile, cmd/auditcheck/ and
+# internal/auditor/ are on the auditor's denylist.
+#
+# Branches named auto/audit-* (auditor auto-fixes) must pass: diff against
+# master non-empty, text only, at most 150 changed lines, and no denylisted
+# path. Every other PR passes trivially, so requiring the check is safe.
+on:
+  pull_request_target:
+    branches: [master]
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  audit-guardrail:
+    runs-on: ubuntu-latest
+    env:
+      HEAD_REF: ${{ github.head_ref }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      PR: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Skip (not an auditor auto-fix branch)
+        if: ${{ !startsWith(github.head_ref, 'auto/audit-') }}
+        run: echo "$HEAD_REF is not an auto/audit-* branch; nothing to check"
+      - name: Check out master (the checker's source)
+        if: ${{ startsWith(github.head_ref, 'auto/audit-') }}
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        if: ${{ startsWith(github.head_ref, 'auto/audit-') }}
+        with:
+          go-version: 'stable'
+      - name: Diff the branch against master with master's checker
+        if: ${{ startsWith(github.head_ref, 'auto/audit-') }}
+        run: |
+          set -euo pipefail
+          go build -o "$RUNNER_TEMP/auditcheck" ./cmd/auditcheck
+          git fetch --no-tags origin "+refs/pull/${PR}/head:refs/remotes/pr/head"
+          got=$(git rev-parse refs/remotes/pr/head)
+          if [ "$got" != "$HEAD_SHA" ]; then
+            echo "auditor guardrail: FAIL: PR head moved ($got != $HEAD_SHA); re-run on the new head"
+            exit 1
+          fi
+          git diff --numstat -z -M origin/master...refs/remotes/pr/head > "$RUNNER_TEMP/numstat"
+          "$RUNNER_TEMP/auditcheck" < "$RUNNER_TEMP/numstat"

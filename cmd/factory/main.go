@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -14,11 +15,19 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pricec/factory/internal/auditor"
 	"github.com/pricec/factory/internal/budgets"
 	"github.com/pricec/factory/internal/factoryapp"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "audit" {
+		if err := runAudit(os.Args[2:], os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	dataDir := flag.String("data", "./factory-data", "data directory for the sqlite stores")
 	addr := flag.String("addr", ":8080", "HTTP listen address")
 	advertise := flag.String("advertise", "", "advertised base URL (default http://<hostname>:<port>)")
@@ -26,7 +35,12 @@ func main() {
 	flag.Parse()
 	budgets.WarnDeprecatedEnv()
 
+	audit, warns := auditor.LoadConfig(os.Getenv)
+	for _, w := range warns {
+		log.Printf("factory: auditor config: %s", w)
+	}
 	app, err := factoryapp.New(factoryapp.Config{
+		Audit:        &audit,
 		DataDir:      *dataDir,
 		Addr:         *addr,
 		AdvertiseURL: *advertise,

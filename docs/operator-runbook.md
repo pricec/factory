@@ -124,6 +124,22 @@ fresh evidence directory, for example
    `/proc/$PID/exe` sha, and the check results. A merge job puts these in
    its `report_result`.
 
+## Retries and superseded jobs
+
+A failed worker result is retried per spec §6.4 (validation 0, timeout 1,
+crash/llm/other 2; backoff 30s, 2m, 8m), except budget/loop kills and merge
+jobs, which dead-letter immediately.
+
+A worker that finds its job is a duplicate of, or superseded by, another job
+reports `status=failed` with `error.kind=superseded`. The factory moves the
+job to the terminal `superseded` state (the same state
+`cancel_job(supersede=true)` produces) and never retries it. Jobs already
+`cancelled`/`superseded`/`done`/`dead` are never re-dispatched by a late
+result or retry timer. Deterministic failures (no permission, bad auth, bad
+config) should be reported as `error.kind=validation` so they are not retried.
+If a job was retried wrongly before this fix, look for
+`jobs: retrying <id>` in the factory log.
+
 ## Credentials
 
 Secrets are named values with an env-var mapping, managed in the operator UI
@@ -147,6 +163,56 @@ envelopes, and output echoing it is replaced by `[REDACTED]`.
   `secret_grants` table in `jobs.db` has timestamps.
 - **Deleting** a secret a queued job still names fails that job at start
   with `could not fetch secrets [name]`; recreate the secret and requeue.
+
+## Factory auditor
+
+The daily audit (spec §6.12) is configured by the factory service's
+environment (systemd unit); changes apply on the next factory restart,
+which re-creates the audit schedule:
+
+| Env | Default | Meaning |
+|---|---|---|
+| `FACTORY_AUDIT_ENABLED` | `1` | `0` removes the schedule |
+| `FACTORY_AUDIT_AUTOFIX` | `1` | `0` files every finding as a proposal |
+| `FACTORY_AUDIT_CRON` / `FACTORY_AUDIT_TZ` | `0 6 * * *` / host zone | when it runs |
+| `FACTORY_AUDIT_BUDGET_USD` | `10` | per-run `cost_usd` meter (audit + fix jobs) |
+| `FACTORY_AUDIT_FIX_RESERVE_USD` | `1.5` | what an unfinished fix job counts against the meter |
+| `FACTORY_AUDIT_MAX_AUTOFIXES` | `5` | per-run cap; can only be lowered |
+| `FACTORY_AUDIT_MAX_CHANGED_LINES` | `150` | per-PR cap; can only be lowered |
+| `FACTORY_AUDIT_FOREMAN` | `foreman:server` | where audit and fix jobs run |
+| `FACTORY_AUDIT_REPO_DIR` | `/home/price/temp/factory` | clone on the audit foreman whose worktrees the AUDIT JOB scans read-only (empty disables) |
+| `FACTORY_AUDIT_WORKTREE_ROOT` | `/home/price/work` | only merged, clean worktrees under it may be cleaned (never forced) |
+
+The factory service runs no git and needs no ssh key or deploy key for the
+auditor: the worktree scan runs in the audit job, and fix branches are
+checked in CI.
+
+**Required check (one-time, after this lands on master).** Auto-fix PRs
+(`auto/audit-*`) are gated by the `audit-guardrail` workflow
+(`.github/workflows/audit-guardrail.yml`, run from master's copy via
+`pull_request_target`). The merge procedure already waits for every check
+to be green; to make GitHub enforce it too, add it as a required status
+check on master. Do this only once the workflow is on master: until then
+the check never reports and would block every PR. In the UI: Settings ->
+Branches (or Rules -> Rulesets) -> master -> Require status checks to pass
+-> add `audit-guardrail`. With `gh` (classic branch protection; master
+had none on 2026-11-17 - if you add other rules later, keep this check):
+
+    gh api -X PUT repos/pricec/factory/branches/master/protection \
+      -H 'Accept: application/vnd.github+json' --input - <<'JSON'
+    {"required_status_checks":{"strict":false,"contexts":["audit-guardrail"]},
+     "enforce_admins":false,"required_pull_request_reviews":null,"restrictions":null}
+    JSON
+
+Check it: `gh api repos/pricec/factory/branches/master/protection/required_status_checks`.
+
+Preview a run without side effects:
+`factory audit -data /var/lib/factory -dry-run` (no git: the worktree scan
+is reported as skipped; `-worktrees FILE` previews cleanup decisions for a
+scan in the audit job's result format).
+
+Raising the hard caps (5 auto-fixes, 150 lines) or editing the denylist is
+a code change in `internal/auditor`, which auto-fixes can never touch.
 
 ## Factory-repo work and cancelling jobs
 
