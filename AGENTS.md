@@ -26,3 +26,10 @@ Linux only: amd64 and arm64.
 
 Reproducible release builds: `make release-docker` (pinned golang image);
 `make release` is the native path.
+
+## Checkouts
+
+- Builds never commit `dist/` (or a root `factory` binary); both are gitignored. `make release` regenerates `dist/`.
+- Job worktrees are removed when the job reports.
+- Never work in the operator checkout (`/home/price/temp/factory`); it holds uncommitted work. Use your own worktree.
+- Finished work is always pushed before reporting.
