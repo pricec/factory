@@ -110,3 +110,10 @@ func TestParseOutputKeepsRejectedEvent(t *testing.T) {
 		t.Fatal("stderr limit text not captured")
 	}
 }
+
+func TestParseOutputDuration(t *testing.T) {
+	out := ParseOutput(`{"type":"result","result":"ok","session_id":"s","total_cost_usd":0.1,"duration_ms":4321}`)
+	if out.Usage.DurationMs != 4321 {
+		t.Fatalf("duration = %d, want 4321", out.Usage.DurationMs)
+	}
+}

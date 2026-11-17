@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/pricec/factory/internal/ocusage"
 	"github.com/pricec/factory/internal/wire"
 	"github.com/pricec/factory/internal/workerharness"
 )
@@ -223,6 +224,11 @@ func (a *App) postJobEvent(ctx context.Context, spec wire.JobSpec, event string)
 	return a.poster.PostToParent(ctx, env)
 }
 
+// opencodeUsageReader is the worker runs' opencode usage capture: the
+// host's opencode database (opencode prints no usage; the claude route
+// parses stdout). A package var so tests never exec a real opencode.
+var opencodeUsageReader ocusage.Reader = ocusage.ReaderFor("")
+
 // defaultHarnessConfig builds the harness config for one job (spec §8.1):
 // the persisted spec path, the loopback ResultURL and MCPURL (see
 // localBaseURL - workers are local in-process children), the per-job token,
@@ -237,7 +243,7 @@ func (a *App) postJobEvent(ctx context.Context, spec wire.JobSpec, event string)
 // Claude Code CLI; the pinned GLM defaults are unchanged.
 func (a *App) defaultHarnessConfig(spec wire.JobSpec, bearer string) workerharness.Config {
 	base := localBaseURL(a.cfg.Addr)
-	model := a.modelCfg.WorkerForTier(spec.Tier)
+	model := a.workerModelForTier(spec.Tier)
 	if spec.Model != "" {
 		model = spec.Model
 	}
@@ -248,5 +254,25 @@ func (a *App) defaultHarnessConfig(spec wire.JobSpec, bearer string) workerharne
 		Token:     bearer,
 		WorkDir:   a.dataDir,
 		Model:     model,
+		// opencode runs print no usage: read it back from the host's
+		// opencode database (the claude route parses stdout instead).
+		ReadUsage: opencodeUsageReader,
 	}
+}
+
+// workerModelForTier resolves the tier's worker model from the
+// settings-synced modelCfg (set by New). An App built without New (bare
+// &App{} in tests) has no modelCfg; it falls back to the static cfg
+// models - the pre-settings behaviour.
+func (a *App) workerModelForTier(tier string) string {
+	if a.modelCfg != nil {
+		return a.modelCfg.WorkerForTier(tier)
+	}
+	switch tier {
+	case wire.TierDefault:
+		return a.cfg.WorkerModel
+	case wire.TierHardest:
+		return a.cfg.WorkerHardestModel
+	}
+	return a.cfg.WorkerFlashModel
 }

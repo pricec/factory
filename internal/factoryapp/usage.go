@@ -124,3 +124,49 @@ func (a *App) handleUsage(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
+
+// handleUsageEvents serves GET /v1/usage/events?day=&kind=&limit= (the
+// UI-surface class, like /v1/usage): the per-run usage_events log, newest
+// first. day is a UTC YYYY-MM-DD (default today, "all" for every day);
+// kind is worker|planner|brain or empty; limit defaults to 200, max 500.
+func (a *App) handleUsageEvents(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	day := q.Get("day")
+	switch day {
+	case "":
+		now := time.Now()
+		if a.jobs.Now != nil {
+			now = a.jobs.Now()
+		}
+		day = now.UTC().Format("2006-01-02")
+	case "all":
+		day = ""
+	default:
+		if _, err := time.Parse("2006-01-02", day); err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "day must be YYYY-MM-DD or all")
+			return
+		}
+	}
+	kind := q.Get("kind")
+	switch kind {
+	case "", wire.UsageKindWorker, wire.UsageKindPlanner, wire.UsageKindBrain:
+	default:
+		writeError(w, http.StatusBadRequest, "bad_request", "kind must be worker, planner or brain")
+		return
+	}
+	limit := 0
+	if v := q.Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			writeError(w, http.StatusBadRequest, "bad_request", "limit must be a positive integer")
+			return
+		}
+		limit = n
+	}
+	evs, err := a.jobs.ListUsageEvents(r.Context(), day, kind, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, evs)
+}

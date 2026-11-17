@@ -141,6 +141,8 @@ type UsageEvent struct {
 	Limit       string  `json:"limit,omitempty"`
 	// RateLimit is the raw rate_limit_event.rate_limit_info JSON (stream-json).
 	RateLimit string `json:"rate_limit,omitempty"`
+	// DurationMs is the run's wall-clock duration (0 = unknown).
+	DurationMs int64 `json:"duration_ms,omitempty"`
 }
 
 // Usage event kinds and envelope types.

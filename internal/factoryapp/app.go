@@ -284,6 +284,7 @@ func New(cfg Config) (*App, error) {
 		ev := wire.UsageEvent{
 			Kind: wire.UsageKindPlanner, TaskID: taskID, Model: u.Model, Input: u.Input, Output: u.Output,
 			CacheCreate: u.CacheCreate, CacheRead: u.CacheRead, CostUSD: u.CostUSD, SessionID: u.SessionID, Limit: u.Limit, RateLimit: u.RateLimit,
+			DurationMs: u.DurationMs,
 		}
 		if ev.Model == "" {
 			ev.Model = a.planner.currentModel()
@@ -477,6 +478,7 @@ func buildMux(a *App, mcpH http.Handler) http.Handler {
 	mux.HandleFunc("DELETE /v1/secrets/{name}", a.handleDeleteSecret) // no value-returning route exists
 	mux.HandleFunc("GET /v1/jobs/{id}/secrets", a.handleJobSecrets)   // job handout (spec §13.2): the only value-returning route
 	mux.HandleFunc("GET /v1/usage", a.handleUsage)                    // S2: window state (usage.go)
+	mux.HandleFunc("GET /v1/usage/events", a.handleUsageEvents)       // per-run usage log (usage.go)
 	mux.HandleFunc("GET /v1/throttle", a.handleGetThrottle)           // S3: gate (throttle.go)
 	mux.HandleFunc("POST /v1/throttle", a.handlePostThrottle)         // S3: operator override
 	mux.Handle("/v1/mcp/factory", mcpH)

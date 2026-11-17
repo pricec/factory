@@ -147,8 +147,10 @@ CREATE INDEX IF NOT EXISTS idx_secret_grants_job ON secret_grants(job_id);
 	if _, err := db.Exec(settingsDDL); err != nil {
 		return err
 	}
-	_, err := db.Exec(usageDDL)
-	return err
+	if _, err := db.Exec(usageDDL); err != nil {
+		return err
+	}
+	return addColumnIfMissing(db, "usage_events", "duration_ms", "INTEGER NOT NULL DEFAULT 0")
 }
 
 // addColumnIfMissing runs ALTER TABLE ... ADD COLUMN unless the column is
