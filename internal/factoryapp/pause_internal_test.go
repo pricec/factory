@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -368,5 +369,52 @@ func TestPauseDeferWake(t *testing.T) {
 	a.gate.Resume(ctx)
 	if !<-done {
 		t.Fatal("deferWake should report rerun after the resume")
+	}
+}
+
+// TestPauseDefersJobTerminalWake: a terminal notify.job threaded to a task
+// is a non-chat wake, so it waits out the pause (deferred, not dropped)
+// and runs once the pause lifts.
+func TestPauseDefersJobTerminalWake(t *testing.T) {
+	ctx := context.Background()
+	clk := &gateClock{t: pauseNow}
+	a := newPauseApp(t, t.TempDir(), clk)
+	defer a.Close()
+	var mu sync.Mutex
+	var prompts []string
+	a.SetPlannerExec(func(_ context.Context, prompt string) (string, error) {
+		mu.Lock()
+		prompts = append(prompts, prompt)
+		mu.Unlock()
+		return "ok", nil
+	})
+	count := func() int { mu.Lock(); defer mu.Unlock(); return len(prompts) }
+	tk, err := a.tasks.CreateTask(ctx, "paused job wake", tasks.DefaultPriority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = a.recordUsage(ctx, wire.UsageEvent{Kind: wire.UsageKindPlanner, RateLimit: rejectedJSON(pauseNow.Add(2*time.Hour), "five_hour")})
+	if a.gate.Dispatching(ctx) {
+		t.Fatal("gate should be paused")
+	}
+
+	a.notifyOperatorThreaded(ctx, tk.ID, "job_paused", notifyJobType, map[string]any{"job_id": "job_paused", "state": "done"})
+	a.dispatchWakers(ctx, []wire.MessageEnvelope{{
+		Type: notifyJobType, ThreadID: tk.ID, JobID: "job_paused",
+		Payload: json.RawMessage(`{"state":"done"}`),
+	}})
+	time.Sleep(150 * time.Millisecond)
+	if n := count(); n != 0 {
+		t.Fatalf("job wake ran during the pause: %d sessions", n)
+	}
+	a.gate.Resume(ctx)
+	deadline := time.Now().Add(3 * time.Second)
+	for count() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(prompts) != 1 || !strings.Contains(prompts[0], "reached a terminal state") {
+		t.Fatalf("job wake after resume: %d sessions %q", len(prompts), prompts)
 	}
 }
