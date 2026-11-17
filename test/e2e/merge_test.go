@@ -1,6 +1,7 @@
 package e2e_test
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"sync"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/pricec/factory/internal/jobs"
+	"github.com/pricec/factory/internal/wire"
 )
 
 // mergeView mirrors GET /v1/merge-requests (spec §6.11).
@@ -148,5 +150,51 @@ func testMergeQueue(t *testing.T, s *stack) {
 	}
 	if v := s.mergeQueue(t); v.Paused {
 		t.Error("queue left paused")
+	}
+}
+
+// testJobOwnedMerge (spec §6.11 job-owned merges, §9.2) on the real stack:
+// a worker calls request_merge on the foreman's worker MCP with its
+// per-job token; the foreman relays it to the factory's merge queue with
+// the job id; the request is job-owned, runs through the same serialized
+// merge job, and lands - no planner involved. A refusal by the factory
+// (bad head) comes back to the worker as a tool error.
+func testJobOwnedMerge(t *testing.T, s *stack) {
+	ctx := s.ctx
+	const head = "0123456789abcdef0123456789abcdef01234567"
+	spec := wire.NewJobSpec("e2e job-owned merge: change code, queue the merge", "factory")
+	if err := s.factory.Jobs().Create(ctx, spec); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	workerTok, err := s.foreman.Auth().MintWorkerToken(ctx, foremanInbox, spec.ID)
+	if err != nil {
+		t.Fatalf("MintWorkerToken: %v", err)
+	}
+
+	sc := s.callTool(s.workerMCP(), workerTok, "request_merge", map[string]any{
+		"branch": "feat/e2e-owned", "head": head, "note": "E2E owned",
+	})
+	id, _ := sc["id"].(string)
+	if id == "" || sc["state"] != jobs.MergeQueued {
+		t.Fatalf("worker request_merge = %v", sc)
+	}
+	mr := s.mergeByID(t, id)
+	if mr.RequestedBy != jobs.RequestedByJob || mr.SourceJobID != spec.ID || mr.Branch != "feat/e2e-owned" || mr.Head != head {
+		t.Fatalf("job-owned request = %+v", mr)
+	}
+	waitFor(t, "job-owned merge landed", 30*time.Second, func() bool {
+		return s.mergeByID(t, id).State == jobs.MergeLanded
+	})
+	if got := s.mergeByID(t, id); got.JobID == "" || got.JobID == spec.ID {
+		t.Fatalf("merge job = %q, want a separate merge job (source %s)", got.JobID, spec.ID)
+	}
+
+	// The factory's validation reaches the worker as a tool error.
+	_, out := s.rpc(s.workerMCP(), workerTok, "tools/call", map[string]any{
+		"name": "request_merge", "arguments": map[string]any{"branch": "feat/e2e-owned-bad", "head": "not-a-sha"},
+	})
+	raw, _ := json.Marshal(out)
+	if !strings.Contains(string(raw), "hex commit sha") {
+		t.Fatalf("bad head: %s, want the factory's validation message", raw)
 	}
 }

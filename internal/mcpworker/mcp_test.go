@@ -36,6 +36,27 @@ type env struct {
 	spawner *fakeSpawner               // spawn_child enqueues (spec §9.2)
 	parents map[string]wire.JobSpec    // ParentSpec stub backing store
 	childs  map[string]map[string]bool // ChildJobs stub: parent -> child ids
+	merges  *fakeMergeQueue            // request_merge relay (spec §9.2)
+}
+
+// fakeMergeQueue records request_merge relays (the foreman -> factory
+// seam); an injected err simulates a factory refusal.
+type fakeMergeQueue struct {
+	mu    sync.Mutex
+	jobs  []string
+	calls []mcpworker.MergeRequestArgs
+	err   error
+}
+
+func (f *fakeMergeQueue) request(_ context.Context, jobID string, in mcpworker.MergeRequestArgs) (mcpworker.MergeRequestResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return mcpworker.MergeRequestResult{}, f.err
+	}
+	f.jobs = append(f.jobs, jobID)
+	f.calls = append(f.calls, in)
+	return mcpworker.MergeRequestResult{ID: "mr_TEST", State: "queued", WaitingOn: in.After}, nil
 }
 
 // fakeSpawner records spawn_child's enqueues (the harness seam, spec
@@ -77,6 +98,7 @@ func newEnv(t *testing.T) *env {
 	spawner := &fakeSpawner{}
 	parents := map[string]wire.JobSpec{}
 	childs := map[string]map[string]bool{}
+	merges := &fakeMergeQueue{}
 	h, err := mcpworker.Handler(mcpworker.Config{
 		Auth:           authStore,
 		Inbox:          svc,
@@ -94,6 +116,7 @@ func newEnv(t *testing.T) *env {
 			}
 			return out
 		},
+		RequestMerge: merges.request,
 	})
 	if err != nil {
 		t.Fatalf("mcpworker.Handler: %v", err)
@@ -118,7 +141,7 @@ func newEnv(t *testing.T) *env {
 	return &env{
 		t: t, svc: svc, auth: authStore, handler: h, base: srv.URL,
 		worker: worker, foreman: foreman, workDir: workDir,
-		spawner: spawner, parents: parents, childs: childs,
+		spawner: spawner, parents: parents, childs: childs, merges: merges,
 	}
 }
 
@@ -238,12 +261,13 @@ func TestInitializeToolsListAndBudget(t *testing.T) {
 	_, out = e.rpc(e.worker, "tools/list", nil)
 	res := resultOf(t, out)
 	tools, ok := res["tools"].([]any)
-	if !ok || len(tools) != 4 {
-		t.Fatalf("tools/list: want 4 tools, got %v", res["tools"])
+	if !ok || len(tools) != 5 {
+		t.Fatalf("tools/list: want 5 tools, got %v", res["tools"])
 	}
 	want := map[string]bool{
 		"report_result": true, "ask_parent": true,
 		"spawn_child": true, "collect_children": true,
+		"request_merge": true, // job-owned merges (spec §6.11)
 	}
 	names := map[string]bool{}
 	var budget int
@@ -270,8 +294,10 @@ func TestInitializeToolsListAndBudget(t *testing.T) {
 	if len(want) != 0 {
 		t.Errorf("missing tools: %v", want)
 	}
-	if budget >= 1536 {
-		t.Errorf("description budget = %d bytes, want < 1536", budget)
+	// Spec §9.1: worker surface < 2KB (raised from 1.5KB for request_merge,
+	// the job-owned-merge tool, 2026-11-17).
+	if budget >= 2048 {
+		t.Errorf("description budget = %d bytes, want < 2048", budget)
 	}
 	t.Logf("description budget: %d bytes", budget)
 }

@@ -86,6 +86,7 @@ func (a *App) MergeQueuePass(ctx context.Context) (string, error) {
 	if err := a.reconcileMerging(ctx); err != nil {
 		return "", fmt.Errorf("reconcile: %w", err)
 	}
+	a.alertStalledDependencies(ctx)
 	paused, _, err := a.jobs.MergePaused(ctx)
 	if err != nil {
 		return "", fmt.Errorf("pause flag: %w", err)
@@ -206,10 +207,16 @@ func (a *App) finishMerge(ctx context.Context, jobID, jobState string) {
 	}
 	log.Printf("factoryapp: merge queue: %s %s (job %s %s)", mr.ID, mr.State, jobID, jobState)
 	if mr.State == jobs.MergeNeedsAttention {
-		a.alertMerge(ctx, mr)
+		mr.Failure = jobs.MergeFailureOther
+		if job, ok, err := a.jobs.Get(ctx, jobID); err == nil && ok {
+			mr.Failure = jobs.ClassifyMergeFailure(job)
+		}
+		if err := a.jobs.SetMergeFailure(ctx, mr.ID, mr.Failure); err != nil {
+			log.Printf("factoryapp: merge queue: record failure of %s: %v", mr.ID, err)
+		}
 	}
-	// An auditor auto-fix whose merge failed becomes a proposal (§6.12).
-	a.auditMergeOutcome(ctx, mr)
+	// Alert, fix job, planner note, auditor proposal (mergeowner.go).
+	a.routeMergeOutcome(ctx, mr)
 	a.kickMergeQueue()
 }
 
@@ -222,20 +229,28 @@ func (a *App) mergeNeedsAttention(ctx context.Context, id, reason string) {
 		return
 	}
 	if applied {
-		a.alertMerge(ctx, mr)
-		a.auditMergeOutcome(ctx, mr)
+		mr.Failure = jobs.MergeFailureOther
+		if err := a.jobs.SetMergeFailure(ctx, mr.ID, mr.Failure); err != nil {
+			log.Printf("factoryapp: merge queue: record failure of %s: %v", mr.ID, err)
+		}
+		a.routeMergeOutcome(ctx, mr)
 	}
 }
 
 // alertMerge raises the operator alert for a needs_attention request
-// (spec §6.11, §9.5.3).
-func (a *App) alertMerge(ctx context.Context, mr jobs.MergeRequest) {
-	a.raiseSystemAlert(ctx, alertPriorityMerge,
-		"Merge "+mr.ID+" ("+mr.Branch+") needs attention",
-		fmt.Sprintf("repo %s, branch %s, head %s\nmerge job: %s\n%s\n\nThe merge queue continues with the next request; "+
-			"fix the cause and re-request with POST /v1/merge-requests (or the request_merge tool).",
-			mr.Repo, mr.Branch, mr.Head, mr.JobID, mr.Result),
-		mergeAlertSource)
+// (spec §6.11, §9.5.3). For a job-owned request the alert is linked to
+// the job's task and why says why it was not fixed automatically.
+func (a *App) alertMerge(ctx context.Context, mr jobs.MergeRequest, why string) {
+	body := fmt.Sprintf("repo %s, branch %s, head %s\nmerge job: %s\n%s\n\nThe merge queue continues with the next request; "+
+		"fix the cause and re-request with POST /v1/merge-requests (or the request_merge tool).",
+		mr.Repo, mr.Branch, mr.Head, mr.JobID, mr.Result)
+	if mr.SourceJobID != "" {
+		body += fmt.Sprintf("\n\nRequested by job %s (fix round %d of %d). Not fixed automatically: %s.",
+			mr.SourceJobID, mr.FixRound, jobs.MaxMergeFixRounds, why)
+	}
+	a.raiseSystemAlertForTask(ctx, alertPriorityMerge,
+		"Merge "+mr.ID+" ("+mr.Branch+") needs attention", body,
+		mergeAlertSource, a.knownTask(ctx, a.jobThread(ctx, mr.SourceJobID)))
 }
 
 // isMergeJob reports whether jobID is a merge-queue job.

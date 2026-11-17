@@ -350,6 +350,7 @@ func New(cfg Config) (*App, error) {
 		Spawn:          a.SpawnWorker,
 		ParentSpec:     a.parentSpec,
 		ChildJobs:      a.childrenOfJob,
+		RequestMerge:   a.requestMerge, // job-owned merges (spec §6.11)
 	})
 	if err != nil {
 		_ = a.Close()

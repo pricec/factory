@@ -33,3 +33,26 @@ Reproducible release builds: `make release-docker` (pinned golang image);
 - Job worktrees are removed when the job reports.
 - Never work in the operator checkout (`/home/price/temp/factory`); it holds uncommitted work. Use your own worktree.
 - Finished work is always pushed before reporting.
+
+## Owning a change through to the merge
+
+A job that changes code owns it until the merge is requested. Do not hand
+"queue the merge" or any other follow-up to the planner.
+
+1. Work on a branch in your own clone or worktree.
+2. `make ci` green, then push the branch.
+3. Call the `request_merge` tool yourself with the branch and the pushed
+   head sha (`note` = PR title). If your branch needs another job's branch
+   on master first, pass `after: ["that-branch"]`: the request waits for
+   it.
+4. Report done, with the branch, head and merge request id.
+
+The factory merges one request at a time by `docs/merging.md` and tracks
+the outcome on your task. If the merge fails on red checks, a conflict or
+a moved head, it dispatches a fix job on the same branch (at most twice);
+anything else goes to the operator. If you push again after requesting,
+call `request_merge` again with the new head.
+
+Talk to the planner (`ask_parent`, or a failed report) only when you need
+coordination with other jobs or a decision only the operator can make.
+Decide everything else yourself.

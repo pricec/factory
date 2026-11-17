@@ -47,6 +47,7 @@ func TestE2E(t *testing.T) {
 	t.Run("SettingsPanel", func(t *testing.T) { testSettingsPanel(t, s) })
 	t.Run("SummaryView", func(t *testing.T) { testSummaryView(t, s) })
 	t.Run("MergeQueue", func(t *testing.T) { testMergeQueue(t, s) })
+	t.Run("JobOwnedMerge", func(t *testing.T) { testJobOwnedMerge(t, s) })
 }
 
 // testHappyPath: create a job via the planner MCP create_job, let the real
