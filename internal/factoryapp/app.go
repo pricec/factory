@@ -94,6 +94,9 @@ type App struct {
 	wakePoll    time.Duration
 	advertise   string
 	plannerTok  string
+
+	selfCancels sync.Map // job ids the planner is cancelling itself (planner.go)
+
 	// downloadsDir backs GET /download/foreman/{platform} (#24).
 	downloadsDir string
 
@@ -212,6 +215,8 @@ func New(cfg Config) (*App, error) {
 		TaskChanged: a.publishTaskChanged,
 		// raise_alert tool (spec §9.5.3).
 		RaiseAlert: a.RaisePlannerAlert,
+		// cancel_job marks its own cancels so they do not wake the planner.
+		MarkSelfCancel: a.markSelfCancel,
 	})
 	if err != nil {
 		_ = a.Close()

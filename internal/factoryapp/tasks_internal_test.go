@@ -381,3 +381,40 @@ func TestResolveJobTaskLineage(t *testing.T) {
 		t.Error("jobThread mismatch")
 	}
 }
+
+// TestRecoverTerminalJobWake: an in-flight notify.job wake interrupted by
+// a restart is re-run on its task with the job reason.
+func TestRecoverTerminalJobWake(t *testing.T) {
+	a := newInternalApp(t)
+	ctx := context.Background()
+	tk, err := a.tasks.CreateTask(ctx, "job done", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	posted, err := a.inbox.Post(ctx, auth.PlannerMainInbox, wire.MessageEnvelope{
+		Type: "notify.job", From: "factory", JobID: "job_x", ThreadID: tk.ID,
+		Payload: json.RawMessage(`{"job_id":"job_x","state":"done"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.inbox.Ack(ctx, auth.PlannerMainInbox, []string{posted.ID}); err != nil {
+		t.Fatal(err)
+	}
+	a.persistInflight(map[string][]string{tk.ID: {posted.ID}})
+	var mu sync.Mutex
+	var gotTask, gotPrompt string
+	a.SetPlannerExec(func(ctx context.Context, prompt string) (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		gotTask, gotPrompt = PlannerTaskFromContext(ctx), prompt
+		return "ok", nil
+	})
+	a.recoverWakes(ctx)
+	a.wakes.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	if gotTask != tk.ID || !strings.Contains(gotPrompt, "reached a terminal state") {
+		t.Errorf("recovered job wake: task=%q prompt=%q", gotTask, snippet(gotPrompt))
+	}
+}

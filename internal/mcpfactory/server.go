@@ -42,6 +42,10 @@ type Config struct {
 	TaskChanged func(ctx context.Context, taskID string)
 	// RaiseAlert backs the raise_alert tool (spec §9.5.3); nil -> tool errors.
 	RaiseAlert RaiseAlertFunc
+	// MarkSelfCancel, when set, is called before cancel_job cancels a job
+	// and returns a func that withdraws the mark if the cancel fails; the
+	// factory uses it so the planner's own cancels do not wake it.
+	MarkSelfCancel func(jobID string) (undo func())
 }
 
 // Handler builds the factory planner MCP endpoint (spec §9.4): the five-tool

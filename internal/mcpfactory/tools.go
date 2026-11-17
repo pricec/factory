@@ -343,8 +343,13 @@ func cancelJobTool(cfg Config) mcp.ToolHandlerFor[cancelJobArgs, any] {
 		if in.Supersede {
 			to = jobs.StateSuperseded
 		}
+		undo := func() {}
+		if cfg.MarkSelfCancel != nil {
+			undo = cfg.MarkSelfCancel(in.JobID)
+		}
 		job, err := cfg.Store.Cancel(ctx, in.JobID, to, in.Reason)
 		if err != nil {
+			undo()
 			if errors.Is(err, jobs.ErrNoSuchJob) {
 				return nil, nil, fmt.Errorf("unknown job %q (see list_jobs)", in.JobID)
 			}
