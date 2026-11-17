@@ -151,7 +151,7 @@ func TestRequestShape(t *testing.T) {
 			if _, err := New(Config{URL: srv.URL, Model: tc.model, Think: tc.think, MinBytes: 1}).Summarize(context.Background(), longInput); err != nil {
 				t.Fatal(err)
 			}
-			if got.Stream || got.Model != tc.model || got.Think != tc.want {
+			if got.Stream || got.Model != tc.model || got.Think != tc.want || got.KeepAlive != DefaultKeepAlive {
 				t.Fatalf("request = model %q stream %v think %#v", got.Model, got.Stream, got.Think)
 			}
 			if got.Options["temperature"] != float64(0) || got.Options["num_ctx"] != float64(DefaultNumCtx) {
@@ -190,23 +190,25 @@ func TestLoadConfig(t *testing.T) {
 		t.Fatalf("default config = %+v %v", cfg, warns)
 	}
 	cfg, warns = LoadConfig(env(map[string]string{
-		"FACTORY_SUMMARIZER_URL":       "http://openclaw:11434/",
-		"FACTORY_SUMMARIZER_MODEL":     "gpt-oss:20b",
-		"FACTORY_SUMMARIZER_MIN_BYTES": "8000",
-		"FACTORY_SUMMARIZER_TIMEOUT":   "45s",
-		"FACTORY_SUMMARIZER_READ_WAIT": "0s",
+		"FACTORY_SUMMARIZER_URL":        "http://openclaw:11434/",
+		"FACTORY_SUMMARIZER_MODEL":      "gpt-oss:20b",
+		"FACTORY_SUMMARIZER_MIN_BYTES":  "8000",
+		"FACTORY_SUMMARIZER_TIMEOUT":    "45s",
+		"FACTORY_SUMMARIZER_READ_WAIT":  "0s",
+		"FACTORY_SUMMARIZER_KEEP_ALIVE": "0",
 	}))
 	if !cfg.Enabled() || cfg.URL != "http://openclaw:11434" || cfg.Model != "gpt-oss:20b" || cfg.MinBytes != 8000 ||
-		cfg.Timeout != 45*time.Second || cfg.ReadWait != 0 || len(warns) != 0 {
+		cfg.Timeout != 45*time.Second || cfg.ReadWait != 0 || cfg.KeepAlive != "0" || len(warns) != 0 {
 		t.Fatalf("config = %+v %v", cfg, warns)
 	}
 	cfg, warns = LoadConfig(env(map[string]string{
-		"FACTORY_SUMMARIZER_URL":       "http://x",
-		"FACTORY_SUMMARIZER_MIN_BYTES": "lots",
-		"FACTORY_SUMMARIZER_TIMEOUT":   "soon",
-		"FACTORY_SUMMARIZER_THINK":     "maybe",
+		"FACTORY_SUMMARIZER_URL":        "http://x",
+		"FACTORY_SUMMARIZER_MIN_BYTES":  "lots",
+		"FACTORY_SUMMARIZER_TIMEOUT":    "soon",
+		"FACTORY_SUMMARIZER_THINK":      "maybe",
+		"FACTORY_SUMMARIZER_KEEP_ALIVE": "forever",
 	}))
-	if len(warns) != 3 || cfg.MinBytes != DefaultMinBytes || cfg.Timeout != DefaultTimeout || cfg.Think != "" {
+	if len(warns) != 4 || cfg.KeepAlive != DefaultKeepAlive || cfg.MinBytes != DefaultMinBytes || cfg.Timeout != DefaultTimeout || cfg.Think != "" {
 		t.Fatalf("bad values not defaulted: %+v %v", cfg, warns)
 	}
 }

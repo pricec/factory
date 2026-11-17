@@ -31,6 +31,10 @@ const (
 	DefaultNumCtx        = 32768
 	DefaultNumPredict    = 2048
 	DefaultMaxInputBytes = 80 * 1024
+	// DefaultKeepAlive is sent with every request so the model is
+	// unloaded soon after the last digest; Ollama's server default may
+	// pin it on the GPUs for much longer.
+	DefaultKeepAlive = "10m"
 	// DefaultMaxRatio: a digest must be at most this fraction of the
 	// input's bytes; anything larger saves too little to be worth the risk.
 	DefaultMaxRatio = 0.8
@@ -44,7 +48,6 @@ Rules:
 - Never invent anything that is not in the input. Do not add advice of your own.
 - Drop repetition, narrative filler and pleasantries. Tables may be condensed to compact lists but keep their numbers.
 - Be terse: short bullet points, no full sentences where a fragment will do. Stay within the word budget given with the input.
-- If the input says it was truncated, say so in the first line.
 - Output only the summary in plain Markdown. No preamble, no reasoning, no closing remarks.`
 
 // Errors returned by Summarize; every one means "use the original".
@@ -76,6 +79,9 @@ type Config struct {
 	// turn thinking off), otherwise "false". Thinking text is returned by
 	// Ollama in a separate field and is never used.
 	Think string
+	// KeepAlive is Ollama's keep_alive for each request (a Go-style
+	// duration such as "10m", or "0"); empty -> DefaultKeepAlive.
+	KeepAlive string
 	// NumCtx, NumPredict, MaxInputBytes, MaxRatio: zero -> defaults.
 	NumCtx        int
 	NumPredict    int
@@ -97,6 +103,13 @@ func LoadConfig(getenv func(string) string) (Config, []string) {
 		URL:   strings.TrimRight(strings.TrimSpace(getenv("FACTORY_SUMMARIZER_URL")), "/"),
 		Model: strings.TrimSpace(getenv("FACTORY_SUMMARIZER_MODEL")),
 		Think: strings.TrimSpace(getenv("FACTORY_SUMMARIZER_THINK")),
+	}
+	if v := strings.TrimSpace(getenv("FACTORY_SUMMARIZER_KEEP_ALIVE")); v != "" {
+		if _, err := time.ParseDuration(v); err != nil && v != "0" {
+			warns = append(warns, fmt.Sprintf("FACTORY_SUMMARIZER_KEEP_ALIVE=%q invalid; using %s", v, DefaultKeepAlive))
+		} else {
+			cfg.KeepAlive = v
+		}
 	}
 	if v := strings.TrimSpace(getenv("FACTORY_SUMMARIZER_MIN_BYTES")); v != "" {
 		n, err := strconv.Atoi(v)
@@ -147,6 +160,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.ReadWait < 0 {
 		c.ReadWait = 0
+	}
+	if c.KeepAlive == "" {
+		c.KeepAlive = DefaultKeepAlive
 	}
 	if c.NumCtx <= 0 {
 		c.NumCtx = DefaultNumCtx
@@ -246,11 +262,12 @@ func (c *Client) Condense(ctx context.Context, text string) (string, bool) {
 }
 
 type chatRequest struct {
-	Model    string         `json:"model"`
-	Messages []chatMessage  `json:"messages"`
-	Stream   bool           `json:"stream"`
-	Think    any            `json:"think"`
-	Options  map[string]any `json:"options"`
+	Model     string         `json:"model"`
+	Messages  []chatMessage  `json:"messages"`
+	Stream    bool           `json:"stream"`
+	Think     any            `json:"think"`
+	KeepAlive string         `json:"keep_alive,omitempty"`
+	Options   map[string]any `json:"options"`
 }
 
 type chatMessage struct {
@@ -279,7 +296,10 @@ func (c *Client) Call(ctx context.Context, text string) (Raw, error) {
 	input, truncated := clip(text, c.cfg.MaxInputBytes)
 	note := ""
 	if truncated {
-		note = fmt.Sprintf(", TRUNCATED to %d bytes - the middle is omitted", len(input))
+		// Only a really clipped input carries the instruction: a standing
+		// "say so if truncated" rule made qwen3:8b claim truncation on 6
+		// of 20 complete inputs in the pilot.
+		note = fmt.Sprintf(", TRUNCATED to %d bytes - the middle is omitted; start the summary with \"(input truncated)\"", len(input))
 	}
 	body, err := json.Marshal(chatRequest{
 		Model: c.cfg.Model,
@@ -287,8 +307,9 @@ func (c *Client) Call(ctx context.Context, text string) (Raw, error) {
 			{Role: "system", Content: SystemPrompt},
 			{Role: "user", Content: fmt.Sprintf("Job output (%d bytes%s). Word budget: at most %d words.\n\n%s", len(text), note, wordBudget(len(text)), input)},
 		},
-		Stream: false,
-		Think:  c.cfg.think(),
+		Stream:    false,
+		Think:     c.cfg.think(),
+		KeepAlive: c.cfg.KeepAlive,
 		Options: map[string]any{
 			"temperature": 0,
 			"num_ctx":     c.cfg.NumCtx,

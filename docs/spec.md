@@ -872,6 +872,9 @@ and always retrievable, and every failure falls back to the original.
   `FACTORY_SUMMARIZER_READ_WAIT` (default 60s, see read path),
   `FACTORY_SUMMARIZER_THINK` (`false|true|low|medium|high`; default auto:
   `low` for `gpt-oss*`, which cannot disable thinking, else `false`).
+  `FACTORY_SUMMARIZER_KEEP_ALIVE` (Ollama `keep_alive` per request, default
+  `10m`, so the model leaves the GPUs soon after the last digest instead
+  of following the Ollama server default).
   Invalid values warn and use the default.
 - **Input.** The job's LAST result's `result` (§5.2): a JSON string is
   unquoted, any other JSON value is used as its text. Only inputs of at
@@ -879,8 +882,11 @@ and always retrievable, and every failure falls back to the original.
   first 2/3 and last 1/3 of 80 KiB with an omission marker, and the
   model is told the input was truncated.
 - **Request.** `POST {URL}/api/chat`, `stream=false`, a fixed system prompt
-  (keep every number/ID/path/error, never invent, say so if truncated, no
-  preamble), options `temperature 0`, `num_ctx 32768`, `num_predict 2048`.
+  (keep every number/ID/path/error, never invent, be terse, no preamble)
+  and a per-input word budget (about a quarter of the input's words, at
+  least 120); only a clipped input carries a "say it was truncated"
+  instruction (a standing one made `qwen3:8b` claim truncation on 6/20
+  complete inputs in the pilot), options `temperature 0`, `num_ctx 32768`, `num_predict 2048`.
   Only `message.content` is used; Ollama's separate `message.thinking` is
   discarded.
 - **Sanity check.** Inline `<think>...</think>` blocks are stripped. The
@@ -2224,7 +2230,7 @@ outside the `result_schema` subset at validation time (#3).
 | Summary length | required, 1-240 chars | #3, #7 |
 | Fallback summary | first 240 chars of stdout | #5 |
 | LLM context cap | 2KB per payload (except `read_result`) | #7 |
-| Result digests | off unless `FACTORY_SUMMARIZER_URL`; model `qwen3:8b`; min 6144 B; timeout 90s; read wait 60s; max ratio 0.8; input clip 80 KiB; queue 32, one worker | 2026-11-17 amendment, §6.13 |
+| Result digests | off unless `FACTORY_SUMMARIZER_URL`; model `qwen3:8b`; min 6144 B; timeout 90s; read wait 60s; keep_alive 10m; max ratio 0.8; input clip 80 KiB; queue 32, one worker | 2026-11-17 amendment, §6.13 |
 | Daily spend breaker | removed 2026-11-17; usage throttle gate is the only limit; env vars deprecated/ignored | #13 |
 | Pairing token | 32B random hex, 15-min TTL, single use | #11 |
 | Bearer token | 32B random, stored SHA-256 only | #11 |
