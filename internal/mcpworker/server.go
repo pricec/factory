@@ -71,9 +71,10 @@ func Handler(cfg Config) (http.Handler, error) {
 	}
 
 	srv := mcp.NewServer(&mcp.Implementation{Name: "factory-worker", Version: "v1"}, nil)
-	mcp.AddTool(srv, &mcp.Tool{
+	srv.AddTool(&mcp.Tool{
 		Name:        "report_result",
-		Description: "Report this job's final result.",
+		Description: reportResultDescription,
+		InputSchema: reportResultSchema(),
 	}, reportResultTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "ask_parent",

@@ -872,6 +872,23 @@ named `inbox`, the agent sees `inbox_report_result` and `inbox_ask_parent`
   `internal/wire`; post the JobResult to the result inbox (409 dedupe
   applies); write the flag file the harness checks (#5); return
   `{"ok": true}`.
+  - Contract (2026-11-17 amendment): the advertised input schema is the
+    contract. `error` is the object form `{kind, message}`, `kind` one of
+    `validation|timeout|crash|llm|other`; the schema pins that shape and
+    is what new agent prompts and code target. The server MUST accept the
+    normalized forms below and rewrite them before `wire.JobResult.Validate`:
+    - `error` as a JSON string -> `{kind: other, message: <string>}`;
+    - `kind` matched case-insensitively against the pinned five, plus the
+      aliases `timeout`/`time` -> timeout and `validation`/`invalid` ->
+      validation; any other kind -> `other`, with the original kind kept
+      at the front of the message as `original kind "<kind>": <message>`;
+    - `status=failed` with no `error` (absent or null) -> `{kind: other,
+      message: "status=failed with no error field"}`.
+    Any other `error` type is a tool error. The normalization never
+    loosens the done path: `summary`/`status` rules and result validation
+    are unchanged. Normalization exists so agents that guess the payload
+    still get their result recorded; prompts need not carry defensive
+    prose about the error shape.
 - `ask_parent(question, wait_seconds=60)` - post `job.question` to the
   foreman's inbox `foreman:{id}` (§3.2); long-poll `job:{job_id}` for
   `job.answer`; return the answer; on timeout return "proceed with your best
