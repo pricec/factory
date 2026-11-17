@@ -229,6 +229,8 @@ func New(cfg Config) (*App, error) {
 		RaiseAlert: a.RaisePlannerAlert,
 		// cancel_job marks its own cancels so they do not wake the planner.
 		MarkSelfCancel: a.markSelfCancel,
+		// request_merge kicks the merge queue (spec §6.11).
+		MergeQueued: a.kickMergeQueue,
 	})
 	if err != nil {
 		_ = a.Close()
