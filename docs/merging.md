@@ -111,15 +111,26 @@ If `git log origin/master..$FULL` is empty, the branch is already merged.
 
 ## 5. Wait for green checks
 
+Never trust an existing red verdict, and never declare the merge dead on
+the first red. A red check on the head may be a one-off flake, and a
+request re-queued at the same head would otherwise just re-read the
+previous request's failed run. The deterministic gate (`internal/cigate`)
+waits for the head's runs, and if any is red it re-runs the failed jobs
+once (`gh run rerun <id> --failed`), waits for the fresh attempt, and only
+then decides:
+
 ```sh
-gh pr checks "$PR" -R "$REPO" --watch --interval 30
+go run ./cmd/cigate -repo "$REPO" -sha "$FULL" | tee "$EV/cigate.json"   # exit 0 green, 1 red/no checks/timeout
 gh pr view "$PR" -R "$REPO" --json mergeable,mergeStateStatus
 ```
 
-Green means: every check passed, at least one check ran, and `mergeable` is
-`MERGEABLE`.
+Green means: `cigate` exits 0 (every run passed, at least one ran, possibly
+after the one rerun) and `mergeable` is `MERGEABLE`. A rerun that turned
+the head green is a **flake**: carry on, but report it (see Reporting).
+Run `cigate` again only after pushing a new head (it reruns at most once
+per call and never loops).
 
-If checks are red, or the PR conflicts:
+If `cigate` reports `red` (red in the rerun too), or the PR conflicts:
 
 - **Small and clearly in scope.** The failure or conflict is in files the
   branch already changes, and the fix is a few lines with no contract or
@@ -127,8 +138,8 @@ If checks are red, or the PR conflicts:
   `git merge origin/master`, never a rebase. Run `make ci`, then push the
   branch normally (no force). Go back to the start of step 5. Each extra
   commit goes in the report.
-- **Anything else: STOP** (`checks red: <failing check>` or
-  `conflict: <files>`). Never force-push. Never push to master.
+- **Anything else: STOP** (`checks red after rerun: <tests that failed both
+  times>` or `conflict: <files>`). Never force-push. Never push to master.
 
 ## 6. Merge
 
@@ -174,8 +185,13 @@ Call `report_result` once, at the end:
   is verified healthy. Summary (240 chars max):
   `landed $MR: PR #<n> merged <MERGED:12>; deployed <build id>; exe sha ok, UI 200, journal clean`.
   `result`: `{pr, merge_commit, deployed_commit, build_id, factory_exe_sha256, evidence_dir}`.
+  If `cigate` reran and went green, add `ci_rerun: true` and `ci_flaked: [tests]`
+  to `result` and append `; CI flake rerun: <tests>` to the summary, so flakes stay visible.
 - **failed**: anything that stopped. The summary starts with the stage, for
-  example `head drift: …`, `checks red: …`, `conflict: …`, `deploy: …`.
+  example `head drift: …`, `checks red after rerun: <tests failed both
+  times>`, `conflict: …`, `deploy: …`. For red checks, put the `cigate`
+  output (`rerun`, `first_failed`, `second_failed`, `failed_both`) in
+  `result` so the alert shows that a rerun happened and what failed.
   `error`: `{"kind": "other", "message": "<stage>: <detail>"}`. Include
   `pr` / `merge_commit` in `result` when they exist, because a failure after
   the merge (in deploy) means master moved.
