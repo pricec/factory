@@ -1,7 +1,7 @@
 # Idle timeout + live spend cap (task_01M7K5CSGG3JNWE5C8J54XP188)
 
-- **Branch:** `feat/idle-timeout-spend-cap` — rebased onto `origin/master` @ `7b74ddc`; see "Review fixes" below
-- **Base:** originally `52c8346`, now `7b74ddc`. S1 (`feat/token-s1-capture`) and S2 (`feat/token-s2-window`) are already ancestors of master, so no token branch was needed.
+- **Branch:** `feat/idle-timeout-spend-cap` — rebased onto `origin/master` @ `0d94dae`; see "Review fixes" below
+- **Base:** originally `52c8346`, now `0d94dae`. S1 (`feat/token-s1-capture`) and S2 (`feat/token-s2-window`) are already ancestors of master, so no token branch was needed.
 - Not merged, not deployed.
 
 ## New defaults
@@ -46,7 +46,7 @@ Explicit per-job `timeout_s` / `idle_timeout_s` always win.
 ## Review fixes (job_01M7MCGMYCYT8VMY2HTXJ6N076 → MERGE AFTER FIXES)
 Operator decisions: default cap $20; loop guard kills; dollar figures are API-equivalent estimates standing in for subscription usage-window consumption, not invoices (stated in code comments on `DefaultMaxCostUSD`, `Budget.MaxCostUSD`, the price table, and in the spec).
 
-1. **Rebase** onto `7b74ddc`. One conflict, `internal/workerharness/harness.go` `recordUsage`: now `usage := claudecli.UsageWithStderr(parsed.Usage, errOut)`, then the branch's live-estimate fallback, then `recordUsage(ctx, cfg, spec, usage)`.
+1. **Rebase** onto `0d94dae`. One conflict, `internal/workerharness/harness.go` `recordUsage`: now `usage := claudecli.UsageWithStderr(parsed.Usage, errOut)`, then the branch's live-estimate fallback, then `recordUsage(ctx, cfg, spec, usage)`.
 2. **Default `max_cost_usd` 5 → 20** (`wire.DefaultMaxCostUSD`, used by `NewJobSpec`/`Normalize`/create paths; spec.md; tests).
 3. **Price table** (`internal/claudecli/stream.go`), source https://platform.claude.com/docs/en/about-claude/pricing (2026-11-17), USD/MTok, cache write = 5m rate, cache read = "cache hits" column:
 
