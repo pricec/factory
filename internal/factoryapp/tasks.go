@@ -272,7 +272,8 @@ func (a *App) postToTask(ctx context.Context, taskID string, env wire.MessageEnv
 // idle reaper.
 func (a *App) initTasks() {
 	a.wakes = &wakeDispatcher{
-		limiter: unlimitedWakes{},
+		limiter: pausedWakes{a: a, inner: unlimitedWakes{}},
+		defer_:  a.deferWake,
 		run:     a.runTaskWake,
 		fail:    a.plannerFailed,
 		persist: a.persistInflight,
@@ -292,7 +293,7 @@ func (a *App) SetWakeLimiter(l WakeLimiter) {
 		l = unlimitedWakes{}
 	}
 	a.wakes.mu.Lock()
-	a.wakes.limiter = l
+	a.wakes.limiter = pausedWakes{a: a, inner: l}
 	a.wakes.mu.Unlock()
 }
 

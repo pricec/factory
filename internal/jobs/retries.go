@@ -120,6 +120,9 @@ type RetryPicker struct {
 	store *Store
 	// Tick is the loop interval; default 10s.
 	Tick time.Duration
+	// Hold, when set and true, skips the pass (usage-limit pause, S5);
+	// due retries wait and are not consumed.
+	Hold func(ctx context.Context) bool
 }
 
 // NewRetryPicker creates a picker over store.
@@ -134,6 +137,9 @@ func NewRetryPicker(store *Store) *RetryPicker {
 // (the pin is the only foreman it ever dispatched to), so retries never
 // consult the Matcher. Returns how many were re-dispatched.
 func (p *RetryPicker) Pump(ctx context.Context) (int, error) {
+	if p.Hold != nil && p.Hold(ctx) {
+		return 0, nil
+	}
 	rows, err := p.store.db.QueryContext(ctx,
 		`SELECT id, attempts, next_attempt_at, foreman_id FROM jobs
 		 WHERE state = ? AND next_attempt_at IS NOT NULL AND next_attempt_at <= ?`,

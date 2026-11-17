@@ -72,6 +72,7 @@ func ParseOutput(raw string) Output {
 	}
 	var obj *resultObj
 	var rateLimit string
+	rejected := false
 	// events: a JSON array, or newline-delimited objects (stream-json).
 	var events []resultObj
 	switch trim[0] {
@@ -97,7 +98,14 @@ func ParseOutput(raw string) Output {
 	for i := range events {
 		e := &events[i]
 		if e.Type == "rate_limit_event" && len(e.RateLimitInfo) > 0 {
-			rateLimit = string(e.RateLimitInfo)
+			// A rejection must not be overwritten by a later "allowed"
+			// event (S5): keep the first rejected info, else the newest.
+			if !rejected {
+				rateLimit = string(e.RateLimitInfo)
+			}
+			if infoRejected(e.RateLimitInfo) {
+				rejected = true
+			}
 		}
 	}
 	if len(events) == 1 {
@@ -111,6 +119,11 @@ func ParseOutput(raw string) Output {
 		}
 	}
 	if obj == nil || (obj.Type != "result" && obj.Result == nil && obj.Usage == nil) {
+		if rejected {
+			// No result object (the CLI died on the rejection), but the
+			// stream said so: keep the signal for the S5 pause.
+			fallback.Usage.RateLimit = rateLimit
+		}
 		return fallback
 	}
 	out := Output{Parsed: true, IsError: obj.IsError, Text: ""}
@@ -141,3 +154,11 @@ func ParseOutput(raw string) Output {
 // Text returns the result text of raw CLI stdout (raw itself when not
 // parseable).
 func Text(raw string) string { return ParseOutput(raw).Text }
+
+// infoRejected reports whether a rate_limit_info JSON has status rejected.
+func infoRejected(raw json.RawMessage) bool {
+	var i struct {
+		Status string `json:"status"`
+	}
+	return json.Unmarshal(raw, &i) == nil && i.Status == "rejected"
+}

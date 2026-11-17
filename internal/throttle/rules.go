@@ -70,7 +70,13 @@ type Load struct {
 // UNKNOWN is treated as GREEN (fail open). It returns hold and a short
 // why (empty when admitted).
 func Rule(level usagewin.State, req Request, load Load) (hold bool, why string) {
-	if req.Kind == KindChatWake || req.P0 {
+	if req.Kind == KindChatWake {
+		return false, ""
+	}
+	if level == Paused {
+		return true, "usage limit reached (dispatch paused until the limit resets)"
+	}
+	if req.P0 {
 		return false, ""
 	}
 	switch level {

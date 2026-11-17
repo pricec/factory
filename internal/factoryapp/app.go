@@ -67,27 +67,33 @@ type Config struct {
 
 // App is the wired factory controller.
 type App struct {
-	jobs       *jobs.Store
-	inbox      *inbox.Service
-	tasks      *tasks.Store // shares inbox.db (spec §9.5.1); New runs the legacy backfill; inbox.Close closes it
-	auth       *auth.Store
-	authn      *auth.Authenticator
-	hub        *notify.Hub
-	sweeper    *jobs.Sweeper
-	scheduler  *jobs.Scheduler
-	picker     *jobs.RetryPicker
-	pending    *jobs.PendingPicker
-	matcher    *registry.CapabilityMatcher
-	budget     budgets.Config
-	planner    *PlannerBrain
-	wakes      *wakeDispatcher // per-task planner wakes (spec §9.5.2, tasks_wake.go)
-	reaper     *taskReaper     // idle-24h task auto-close (spec §9.5.2, tasks_reaper.go)
-	handler    http.Handler
-	usage      *usagewin.Tracker
-	usagePoll  *usagewin.Poller // nil unless Usage.Poll
-	gate       *throttle.Gate   // S3 dispatch gate (throttle.go)
-	advertise  string
-	plannerTok string
+	jobs      *jobs.Store
+	inbox     *inbox.Service
+	tasks     *tasks.Store // shares inbox.db (spec §9.5.1); New runs the legacy backfill; inbox.Close closes it
+	auth      *auth.Store
+	authn     *auth.Authenticator
+	hub       *notify.Hub
+	sweeper   *jobs.Sweeper
+	scheduler *jobs.Scheduler
+	picker    *jobs.RetryPicker
+	pending   *jobs.PendingPicker
+	matcher   *registry.CapabilityMatcher
+	budget    budgets.Config
+	planner   *PlannerBrain
+	wakes     *wakeDispatcher // per-task planner wakes (spec §9.5.2, tasks_wake.go)
+	reaper    *taskReaper     // idle-24h task auto-close (spec §9.5.2, tasks_reaper.go)
+	handler   http.Handler
+	usage     *usagewin.Tracker
+	usagePoll *usagewin.Poller // nil unless Usage.Poll
+	gate      *throttle.Gate   // S3 dispatch gate (throttle.go)
+	// S5 pause (pause.go): jobs that hit the limit (job id -> true), and
+	// test seams for the re-probe, jitter and wake poll interval.
+	limitHit    sync.Map
+	probe       func(ctx context.Context) error
+	pauseJitter func() time.Duration
+	wakePoll    time.Duration
+	advertise   string
+	plannerTok  string
 	// downloadsDir backs GET /download/foreman/{platform} (#24).
 	downloadsDir string
 
@@ -296,6 +302,7 @@ func (a *App) Run(ctx context.Context) error {
 		run("usage poller", func() error { a.usagePoll.Run(ctx); return nil })
 	}
 	run("throttle releaser", func() error { a.releaserLoop(ctx); return nil })
+	run("usage pause", func() error { a.pauseLoop(ctx); return nil })
 	run("task reaper", func() error { a.reaper.Run(ctx, taskReapInterval); return nil })
 	wg.Wait()
 	return nil

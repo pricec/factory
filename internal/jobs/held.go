@@ -140,3 +140,22 @@ func (s *Store) CountHeldAhead(ctx context.Context, priority int) (int, error) {
 		AND CAST(IFNULL(json_extract(spec, '$.priority'), 5) AS INTEGER) <= ?`, StateHeld, priority).Scan(&n)
 	return n, err
 }
+
+// RequeueHeld parks a job whose run was refused by the Anthropic usage
+// limit (token throttle S5) back in `held` with reason, instead of failing
+// it: attempts and next_attempt_at are untouched, no result is recorded
+// and no terminal hook fires, so the refusal never burns a retry. Only a
+// dispatched or running job qualifies. NOTE: like Requeue it bypasses the
+// pinned §6.1 legal map (running -> held is not an edge there) with its
+// own state-guarded UPDATE. applied is false when the job was not active.
+func (s *Store) RequeueHeld(ctx context.Context, id, reason string) (applied bool, err error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE jobs SET state = ?, held_reason = ?, next_attempt_at = NULL, updated_at = ?
+		 WHERE id = ? AND state IN (?, ?)`,
+		StateHeld, reason, s.now(), id, StateDispatched, StateRunning)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
