@@ -55,6 +55,12 @@ type Config struct {
 	// MergeQueued, when set, is called after request_merge queues a merge
 	// request (the factory kicks its merge-queue loop, spec §6.11).
 	MergeQueued func()
+	// ResultDigest, when set, returns the local-model digest of a job's
+	// result at lastIndex (spec §6.13), waiting a bounded time for one in
+	// flight; read_result serves it in place of the verbatim last result
+	// unless called with full=true. nil (summariser disabled) -> read_result
+	// always returns the verbatim results.
+	ResultDigest func(ctx context.Context, jobID string, lastIndex int) (jobs.ResultDigest, bool)
 }
 
 // Handler builds the factory planner MCP endpoint (spec §9.4): the five-tool
@@ -96,8 +102,9 @@ func Handler(cfg Config) (http.Handler, error) {
 			"it is queued and dispatches automatically (task priority 0 is never held); cancel_job works on it.",
 	}, createJobTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "read_result",
-		Description: "Read one job's full results and spec.",
+		Name: "read_result",
+		Description: "Read one job's results and spec. A long last result may come back condensed by a local model " +
+			"(result_digest + marker); call with full=true for the verbatim original when exact detail matters.",
 	}, readResultTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "cancel_job",

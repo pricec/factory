@@ -857,6 +857,62 @@ guardrails enforced in code.
   unless a scan in the audit job's result format is passed with
   `-worktrees`.
 
+### 6.13 Local-model result digests (2026-11-17 amendment)
+
+An optional, OFF-by-default pre-pass that condenses long job output with a
+local no-tools model (Ollama) so the planner reads a digest instead of the
+verbatim text. It is advisory only: the verbatim result is always stored
+and always retrievable, and every failure falls back to the original.
+
+- **Config (env, read by `factory` at start).** Disabled entirely unless
+  `FACTORY_SUMMARIZER_URL` (Ollama base URL, e.g. `http://openclaw:11434`)
+  is set. `FACTORY_SUMMARIZER_MODEL` (default `qwen3:8b`),
+  `FACTORY_SUMMARIZER_MIN_BYTES` (default 6144), `FACTORY_SUMMARIZER_TIMEOUT`
+  (Go duration, default 90s, per request including model load),
+  `FACTORY_SUMMARIZER_READ_WAIT` (default 60s, see read path),
+  `FACTORY_SUMMARIZER_THINK` (`false|true|low|medium|high`; default auto:
+  `low` for `gpt-oss*`, which cannot disable thinking, else `false`).
+  Invalid values warn and use the default.
+- **Input.** The job's LAST result's `result` (§5.2): a JSON string is
+  unquoted, any other JSON value is used as its text. Only inputs of at
+  least `MIN_BYTES` bytes are digested. Inputs over 80 KiB are cut to the
+  first 2/3 and last 1/3 of 80 KiB with an omission marker, and the
+  model is told the input was truncated.
+- **Request.** `POST {URL}/api/chat`, `stream=false`, a fixed system prompt
+  (keep every number/ID/path/error, never invent, say so if truncated, no
+  preamble), options `temperature 0`, `num_ctx 32768`, `num_predict 2048`.
+  Only `message.content` is used; Ollama's separate `message.thinking` is
+  discarded.
+- **Sanity check.** Inline `<think>...</think>` blocks are stripped. The
+  reply is rejected (no digest) when it is empty, `done_reason` is
+  `length`, it is longer than 0.8x the input bytes, or it starts with an
+  obvious reasoning leak ("Let's", "We need", "Okay", "The user",
+  "analysis", ...).
+- **When.** After the consumer applies a `job.result` (§6.2) the result is
+  queued (capacity 32; full -> skipped) for ONE background worker, which
+  makes one model call at a time. Enqueueing never blocks and no
+  summariser outcome affects the job's state, retries or notifications.
+- **Storage.** `jobs.result_digest` (TEXT, JSON `{result_index, text,
+  model, input_bytes, truncated, duration_ms, created_at}`) beside the
+  untouched `results`. A digest whose `result_index` is not the last
+  result (a retry appended a newer one) is stale and never served.
+- **Read path.** `read_result` (§9.4) serves the digest unless called
+  with `full=true`: `results[-1].result` is replaced by
+  `results[-1].result_digest` (the digest text) and a top-level
+  `result_digest {note, model, original_bytes, digest_bytes, truncated}`
+  says so and points at `full=true`. When a digest for the job is still in
+  flight, `read_result` waits up to `READ_WAIT` for it (the planner wakes
+  on `notify.job` seconds after completion), then serves whatever exists.
+  No digest -> the verbatim results, as before. `list_jobs` and
+  `notify.job` are unchanged (they never carried result text).
+- **Eval tool.** `factory summarize-eval -data <dir> -out <dir> -url <ollama>
+  -model <m> [-n 20] [-min-bytes 6144] [-jobs id,...] [-think ...]
+  [-unload=true]` opens `jobs.db` read-only, digests the most recent
+  terminal jobs over the threshold, and writes `NN_<job>.orig.txt`,
+  `NN_<job>.summary.txt` (the raw reply) and `results.jsonl` (sizes, token
+  counts, latency, cold/warm, sanity verdict); it unloads the model
+  (`keep_alive 0`) at the end. It changes nothing in the factory.
+
 ## 7. Pairing & scoped auth
 
 ### 7.1 Pairing flow (#11)
@@ -1593,8 +1649,10 @@ Tools (exact):
   that mentions `pricec/factory` or its worktree paths is rejected with
   `factory_repo_needs_pin`. `cancel_job` of a dispatched/running job also
   posts `job.cancel` to the owning foreman, which kills the worker (§3.2).
-- `read_result(job_id)` - full result payload; the ONLY path by which full
-  payloads enter LLM context (#19; #7 point 3).
+- `read_result(job_id, full?)` - full result payload; the ONLY path by which full
+  payloads enter LLM context (#19; #7 point 3). With the §6.13 summariser
+  on, a long last result is served as its local-model digest plus a
+  `result_digest` marker unless `full=true` (2026-11-17 amendment).
 - `cancel_job(job_id, reason?, supersede?)` - terminal-cancels a
   non-terminal job through the §6.1 state machine (`pending | dispatched |
   running | failed -> cancelled`, or `-> superseded` with `supersede=true`);
@@ -2166,6 +2224,7 @@ outside the `result_schema` subset at validation time (#3).
 | Summary length | required, 1-240 chars | #3, #7 |
 | Fallback summary | first 240 chars of stdout | #5 |
 | LLM context cap | 2KB per payload (except `read_result`) | #7 |
+| Result digests | off unless `FACTORY_SUMMARIZER_URL`; model `qwen3:8b`; min 6144 B; timeout 90s; read wait 60s; max ratio 0.8; input clip 80 KiB; queue 32, one worker | 2026-11-17 amendment, §6.13 |
 | Daily spend breaker | removed 2026-11-17; usage throttle gate is the only limit; env vars deprecated/ignored | #13 |
 | Pairing token | 32B random hex, 15-min TTL, single use | #11 |
 | Bearer token | 32B random, stored SHA-256 only | #11 |

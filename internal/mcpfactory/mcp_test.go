@@ -54,6 +54,9 @@ type env struct {
 
 	mu      sync.Mutex
 	changed []string // TaskChanged callbacks, in order
+
+	// digest, when set, backs Config.ResultDigest (spec §6.13).
+	digest func(ctx context.Context, jobID string, lastIndex int) (jobs.ResultDigest, bool)
 }
 
 func newEnv(t *testing.T) *env {
@@ -92,6 +95,12 @@ func newEnv(t *testing.T) *env {
 			e.mu.Lock()
 			e.changed = append(e.changed, id)
 			e.mu.Unlock()
+		},
+		ResultDigest: func(ctx context.Context, jobID string, lastIndex int) (jobs.ResultDigest, bool) {
+			if e.digest == nil {
+				return jobs.ResultDigest{}, false
+			}
+			return e.digest(ctx, jobID, lastIndex)
 		},
 	})
 	if err != nil {

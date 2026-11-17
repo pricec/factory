@@ -77,6 +77,9 @@ func (a *App) handleEnvelope(ctx context.Context, env wire.MessageEnvelope, seen
 		if err != nil || !ok {
 			return
 		}
+		// Local-model digest of a long result (spec §6.13): async,
+		// never blocks; the verbatim result is already stored.
+		a.digest.enqueue(job)
 		// Merge jobs never retry (spec §6.11): a re-run could merge or
 		// deploy twice. A failed merge job goes straight to dead, which
 		// closes its request as needs_attention.

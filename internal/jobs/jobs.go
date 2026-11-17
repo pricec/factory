@@ -141,6 +141,10 @@ CREATE INDEX IF NOT EXISTS idx_secret_grants_job ON secret_grants(job_id);
 	if err := addColumnIfMissing(db, "jobs", "held_reason", "TEXT"); err != nil {
 		return err
 	}
+	// Local-model digest of the last result (spec §6.13, digest.go).
+	if err := addColumnIfMissing(db, "jobs", "result_digest", "TEXT"); err != nil {
+		return err
+	}
 	if _, err := db.Exec(mergeDDL); err != nil {
 		return err
 	}
