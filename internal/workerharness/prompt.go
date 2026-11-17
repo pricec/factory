@@ -15,8 +15,12 @@ func promptSuffix(runner string) string {
 	if runner == RunnerClaude {
 		tool = "mcp__inbox__report_result"
 	}
-	return "\n\nReport with the " + tool + " tool. If you cannot, your final stdout is used as fallback."
+	return "\n\nReport with the " + tool + " tool. If you cannot, your final stdout is used as fallback." + supersededNote
 }
+
+// supersededNote tells workers how to stand down without being retried
+// (§5.2, §6.4, §8.3).
+const supersededNote = "\nIf this job is a duplicate of, or superseded by, another job, report status=failed with error.kind=superseded (it is never retried). Use error.kind=validation for failures that will fail the same way again (permissions, auth, configuration)."
 
 // payloadNull is the payload stand-in when the spec has no payload (§8.3).
 const payloadNull = "null"

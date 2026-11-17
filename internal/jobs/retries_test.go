@@ -83,6 +83,7 @@ func TestMaxRetries(t *testing.T) {
 		want int
 	}{
 		{"validation", 0},
+		{"superseded", 0},
 		{"timeout", 1},
 		{"crash", 2},
 		{"llm", 2},
@@ -98,7 +99,7 @@ func TestMaxRetries(t *testing.T) {
 	// The wire constants must agree with the table.
 	for k, want := range map[wire.ErrorKind]int{
 		wire.KindValidation: 0, wire.KindTimeout: 1, wire.KindCrash: 2,
-		wire.KindLLM: 2, wire.KindOther: 2,
+		wire.KindLLM: 2, wire.KindOther: 2, wire.KindSuperseded: 0,
 	} {
 		if got := MaxRetries(string(k)); got != want {
 			t.Errorf("MaxRetries(%q) = %d, want %d", k, got, want)
@@ -565,5 +566,99 @@ func TestDeadLetter(t *testing.T) {
 	// Bad limit: 400.
 	if rec := get("/v1/deadletter?limit=0"); rec.Code != 400 {
 		t.Errorf("limit=0: %d, want 400", rec.Code)
+	}
+}
+
+// A worker that stands down as a duplicate lands in superseded (terminal),
+// is never armed for retry, and the picker never re-dispatches it.
+func TestRetrySupersededResultNeverRetried(t *testing.T) {
+	s := openStore(t)
+	now := time.Date(2026, 11, 17, 16, 0, 0, 0, time.UTC)
+	s.Now = func() time.Time { return now }
+	ctx := context.Background()
+	spec := newSpec(t, nil)
+	if err := s.Create(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	var hooked string
+	s.SetOnTerminal(func(id, st string) { hooked = st })
+	retryFailAttempt(t, s, spec.ID, string(wire.KindSuperseded))
+	if hooked != StateSuperseded {
+		t.Errorf("terminal hook state = %q, want superseded", hooked)
+	}
+	// The consumer calls this after every failed result; it must be a no-op.
+	if err := s.MarkFailedForRetry(ctx, spec.ID, string(wire.KindSuperseded)); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Hour)
+	n, err := NewRetryPicker(s).Pump(ctx)
+	if err != nil || n != 0 {
+		t.Fatalf("Pump = %d, %v; want 0, nil", n, err)
+	}
+	job, _, _ := s.Get(ctx, spec.ID)
+	if job.State != StateSuperseded || job.Attempts != 0 || job.NextAttempt != "" {
+		t.Errorf("job = state %s attempts %d next %q; want superseded/0/unset", job.State, job.Attempts, job.NextAttempt)
+	}
+}
+
+// A transient failure is still armed and re-dispatched after its backoff.
+func TestRetryTransientStillRetried(t *testing.T) {
+	s := openStore(t)
+	now := time.Date(2026, 11, 17, 16, 0, 0, 0, time.UTC)
+	s.Now = func() time.Time { return now }
+	ctx := context.Background()
+	spec := newSpec(t, nil)
+	if err := s.Create(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	retryFailAttempt(t, s, spec.ID, "crash")
+	if err := s.MarkFailedForRetry(ctx, spec.ID, "crash"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Hour)
+	if n, err := NewRetryPicker(s).Pump(ctx); err != nil || n != 1 {
+		t.Fatalf("Pump = %d, %v; want 1, nil", n, err)
+	}
+	if job, _, _ := s.Get(ctx, spec.ID); job.State != StateDispatched {
+		t.Errorf("state = %s, want dispatched", job.State)
+	}
+}
+
+// A job cancelled or superseded after its retry was armed is not
+// re-dispatched when the timer fires, and a late failed result is ignored.
+func TestRetryNotAfterTerminal(t *testing.T) {
+	for _, to := range []string{StateCancelled, StateSuperseded} {
+		t.Run(to, func(t *testing.T) {
+			s := openStore(t)
+			now := time.Date(2026, 11, 17, 16, 0, 0, 0, time.UTC)
+			s.Now = func() time.Time { return now }
+			ctx := context.Background()
+			spec := newSpec(t, nil)
+			if err := s.Create(ctx, spec); err != nil {
+				t.Fatal(err)
+			}
+			retryFailAttempt(t, s, spec.ID, "crash")
+			if err := s.MarkFailedForRetry(ctx, spec.ID, "crash"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Cancel(ctx, spec.ID, to, "operator"); err != nil {
+				t.Fatal(err)
+			}
+			// Late failed result and retry arming on the terminal job.
+			mustApplyResult(t, s, wire.JobResult{
+				JobID: spec.ID, Status: wire.StatusFailed, Summary: "late",
+				Error: &wire.JobError{Kind: wire.KindOther, Message: "late"},
+			})
+			if err := s.MarkFailedForRetry(ctx, spec.ID, "other"); err != nil {
+				t.Fatal(err)
+			}
+			now = now.Add(time.Hour)
+			if n, err := NewRetryPicker(s).Pump(ctx); err != nil || n != 0 {
+				t.Fatalf("Pump = %d, %v; want 0, nil", n, err)
+			}
+			if job, _, _ := s.Get(ctx, spec.ID); job.State != to {
+				t.Errorf("state = %s, want %s", job.State, to)
+			}
+		})
 	}
 }

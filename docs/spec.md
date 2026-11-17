@@ -302,7 +302,7 @@ job's own id. `spawn_child` is the only writer of the field.
   "summary": "1-240 chars, REQUIRED",
   "result": {},
   "error": {
-    "kind": "validation|timeout|crash|llm|other",
+    "kind": "validation|timeout|crash|llm|other|superseded",
     "message": "..."
   },
   "usage": {
@@ -314,7 +314,11 @@ job's own id. `spawn_child` is the only writer of the field.
 ```
 
 - `status`: `done` | `failed`.
-- `error.kind`: `validation` | `timeout` | `crash` | `llm` | `other`.
+- `error.kind`: `validation` | `timeout` | `crash` | `llm` | `other` | `superseded`.
+  `superseded` (2026-11-17 amendment): the worker stands down because the
+  job is a duplicate of, or superseded by, another job. With `status=failed`
+  the factory moves the job to the terminal `superseded` state (the same
+  state `cancel_job(supersede=true)` produces) and never retries it (§6.4).
 
 ### 5.3 `result_schema` subset (#3)
 
@@ -415,7 +419,13 @@ payload and `GET /v1/jobs/{id}`.
 - Terminal-idempotency: applying a `job.result` to an already-terminal job is
   a no-op (log). Envelope-level dedupe (409) lives in the inbox (#1).
 - Retry policy (normative), by `error.kind`: `validation` -> no retry;
-  `timeout` -> 1 retry; `crash | llm | other` -> 2 retries.
+  `timeout` -> 1 retry; `crash | llm | other` -> 2 retries; `superseded` ->
+  never retried (2026-11-17 amendment): the result lands the job in the
+  terminal `superseded` state, not `failed`. A late result, or a retry timer
+  firing, for a job already terminal (`cancelled`, `superseded`, `done`,
+  `dead`) never re-dispatches it: only `failed` jobs are armed or picked.
+  Workers should report failures that will deterministically recur (missing
+  permission, bad auth, bad config) as `validation` (0 retries).
 - Backoff fixed curve: 30s, 2m, 8m (attempt n waits `backoff[n-1]`;
   `next_attempt_at` is set when entering `failed`).
 - Picker goroutine (10s tick, fake-clockable): `failed` with
@@ -953,7 +963,7 @@ no shared state.
 ### 8.3 Prompt construction (#5, #28)
 
 ```
-{task}\n\nMachine input:\n{payload JSON}\n\nReport with the inbox_report_result tool. If you cannot, your final stdout is used as fallback.
+{task}\n\nMachine input:\n{payload JSON}\n\nReport with the inbox_report_result tool. If you cannot, your final stdout is used as fallback.\nIf this job is a duplicate of, or superseded by, another job, report status=failed with error.kind=superseded (it is never retried). Use error.kind=validation for failures that will fail the same way again (permissions, auth, configuration).
 ```
 
 The tool name is `inbox_report_result` (#28): the generated config mounts
@@ -1264,13 +1274,13 @@ wording matches):
   `{"ok": true}`.
   - Contract (2026-11-17 amendment): the advertised input schema is the
     contract. `error` is the object form `{kind, message}`, `kind` one of
-    `validation|timeout|crash|llm|other`; the schema pins that shape and
+    `validation|timeout|crash|llm|other|superseded`; the schema pins that shape and
     is what new agent prompts and code target. The server MUST accept the
     normalized forms below and rewrite them before `wire.JobResult.Validate`:
     - `error` as a JSON string -> `{kind: other, message: <string>}`;
-    - `kind` matched case-insensitively against the pinned five, plus the
-      aliases `timeout`/`time` -> timeout and `validation`/`invalid` ->
-      validation; any other kind -> `other`, with the original kind kept
+    - `kind` matched case-insensitively against the pinned six, plus the
+      aliases `timeout`/`time` -> timeout, `validation`/`invalid` ->
+      validation and `superseded`/`duplicate` -> superseded; any other kind -> `other`, with the original kind kept
       at the front of the message as `original kind "<kind>": <message>`;
     - `status=failed` with no `error` (absent or null) -> `{kind: other,
       message: "status=failed with no error field"}`.
@@ -2025,7 +2035,7 @@ outside the `result_schema` subset at validation time (#3).
 | Jobs sweeper tick | 10s | #9 |
 | Retry picker tick | 10s | #10 |
 | Job timeout grace | `timeout_s` (ceiling) `+ 60s` -> `timed_out` | #9 |
-| Retries by error kind | validation 0; timeout 1; crash/llm/other 2 | #10 |
+| Retries by error kind | validation 0; superseded 0; timeout 1; crash/llm/other 2 | #10 |
 | Retry backoff curve | 30s, 2m, 8m (attempt n waits `backoff[n-1]`) | #10 |
 | SSE reconnect backoff | 1s, 2s, 4s, ... max 60s, +-25% jitter | #2 |
 | Question SLA / `ask_parent` default wait | 60s; default answer "proceed with your best judgment" | #4, #17 |

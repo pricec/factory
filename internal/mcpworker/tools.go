@@ -31,7 +31,7 @@ type reportResultArgs struct {
 // reportResultDescription is kept short: it counts toward the §9.1 worker
 // byte budget (1536 bytes across the worker tools). The input schema carries the
 // field shapes.
-const reportResultDescription = "Report the final result. failed needs error {kind,message}; kind: validation|timeout|crash|llm|other."
+const reportResultDescription = "Report the final result. failed needs error {kind,message}; kind: validation|timeout|crash|llm|other|superseded (duplicate/superseded job; never retried)."
 
 // reportResultSchema derives report_result's advertised input schema from
 // reportResultArgs and pins the contract: error is the object form
@@ -53,7 +53,7 @@ func reportResultSchema() *jsonschema.Schema {
 		Properties: map[string]*jsonschema.Schema{
 			"kind": {Type: "string", Enum: []any{
 				string(wire.KindValidation), string(wire.KindTimeout), string(wire.KindCrash),
-				string(wire.KindLLM), string(wire.KindOther),
+				string(wire.KindLLM), string(wire.KindOther), string(wire.KindSuperseded),
 			}},
 			"message": {Type: "string"},
 		},
@@ -79,6 +79,8 @@ var errorKindAliases = map[string]wire.ErrorKind{
 	"invalid":    wire.KindValidation,
 	"crash":      wire.KindCrash,
 	"llm":        wire.KindLLM,
+	"superseded": wire.KindSuperseded,
+	"duplicate":  wire.KindSuperseded,
 }
 
 // normalizeError maps the raw error argument onto the pinned object form

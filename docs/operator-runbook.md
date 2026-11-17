@@ -124,6 +124,22 @@ fresh evidence directory, for example
    `/proc/$PID/exe` sha, and the check results. A merge job puts these in
    its `report_result`.
 
+## Retries and superseded jobs
+
+A failed worker result is retried per spec §6.4 (validation 0, timeout 1,
+crash/llm/other 2; backoff 30s, 2m, 8m), except budget/loop kills and merge
+jobs, which dead-letter immediately.
+
+A worker that finds its job is a duplicate of, or superseded by, another job
+reports `status=failed` with `error.kind=superseded`. The factory moves the
+job to the terminal `superseded` state (the same state
+`cancel_job(supersede=true)` produces) and never retries it. Jobs already
+`cancelled`/`superseded`/`done`/`dead` are never re-dispatched by a late
+result or retry timer. Deterministic failures (no permission, bad auth, bad
+config) should be reported as `error.kind=validation` so they are not retried.
+If a job was retried wrongly before this fix, look for
+`jobs: retrying <id>` in the factory log.
+
 ## Credentials
 
 Secrets are named values with an env-var mapping, managed in the operator UI

@@ -447,6 +447,11 @@ func TestResultValidate(t *testing.T) {
 			r.Result = nil
 			r.Error = &JobError{Kind: KindOther, Message: "mystery"}
 		}, nil, false},
+		{"ok failed kind superseded", func(r *JobResult) {
+			r.Status = StatusFailed
+			r.Result = nil
+			r.Error = &JobError{Kind: KindSuperseded, Message: "duplicate of job_x"}
+		}, nil, false},
 		{"ok failed ignores result and schema", func(r *JobResult) {
 			r.Status = StatusFailed
 			r.Error = &JobError{Kind: KindCrash, Message: "exit 1"}
