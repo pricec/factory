@@ -318,6 +318,10 @@ func (s *Store) ApplyResult(ctx context.Context, res wire.JobResult) error {
 	to := StateFailed
 	if res.Status == wire.StatusDone {
 		to = StateDone
+	} else if res.Error != nil && res.Error.Kind == wire.KindSuperseded {
+		// A worker standing down as a duplicate/superseded is not a
+		// failure and must never be retried (spec §6.4).
+		to = StateSuperseded
 	}
 	lastErr := ""
 	if res.Error != nil {

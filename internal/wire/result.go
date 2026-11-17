@@ -28,12 +28,16 @@ const (
 	KindCrash      ErrorKind = "crash"
 	KindLLM        ErrorKind = "llm"
 	KindOther      ErrorKind = "other"
+	// KindSuperseded: the worker stood down because the job is a duplicate
+	// of, or was superseded by, another job. Not a failure to retry: the
+	// factory maps it to the terminal superseded state.
+	KindSuperseded ErrorKind = "superseded"
 )
 
 // Valid reports whether k is one of the pinned error kinds.
 func (k ErrorKind) Valid() bool {
 	switch k {
-	case KindValidation, KindTimeout, KindCrash, KindLLM, KindOther:
+	case KindValidation, KindTimeout, KindCrash, KindLLM, KindOther, KindSuperseded:
 		return true
 	default:
 		return false

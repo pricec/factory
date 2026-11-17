@@ -22,10 +22,13 @@ var retryPolicy = map[string]int{
 	"crash":      2,
 	"llm":        2,
 	"other":      2,
+	// superseded never retries; ApplyResult sends it to the terminal
+	// superseded state, so this entry is belt and braces.
+	"superseded": 0,
 }
 
 // MaxRetries returns how many retries a failure kind allows (spec §6.4):
-// validation 0, timeout 1, crash|llm|other 2, unknown kinds 0.
+// validation 0, superseded 0, timeout 1, crash|llm|other 2, unknown kinds 0.
 func MaxRetries(kind string) int {
 	if n, ok := retryPolicy[kind]; ok {
 		return n
