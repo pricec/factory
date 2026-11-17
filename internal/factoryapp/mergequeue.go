@@ -208,6 +208,8 @@ func (a *App) finishMerge(ctx context.Context, jobID, jobState string) {
 	if mr.State == jobs.MergeNeedsAttention {
 		a.alertMerge(ctx, mr)
 	}
+	// An auditor auto-fix whose merge failed becomes a proposal (§6.12).
+	a.auditMergeOutcome(ctx, mr)
 	a.kickMergeQueue()
 }
 
@@ -221,6 +223,7 @@ func (a *App) mergeNeedsAttention(ctx context.Context, id, reason string) {
 	}
 	if applied {
 		a.alertMerge(ctx, mr)
+		a.auditMergeOutcome(ctx, mr)
 	}
 }
 

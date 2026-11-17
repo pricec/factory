@@ -2,10 +2,18 @@ package factoryapp
 
 // Factory auditor wiring (spec §6.12): the daily schedule, the fire-time
 // snapshot, and the side effects of a finished audit run - proposal
-// tasks, auto-fix jobs, guardrail-checked merge requests. Every decision
-// (dedup, guardrails, budget meter, per-run cap) is made by
-// internal/auditor; this file only acts on it. Both are on the auto-fix
-// denylist (auditor.Denylist).
+// tasks, auto-fix jobs, merge requests for fix branches, and turning a
+// failed auto-fix merge back into a proposal. Every decision (dedup,
+// guardrails, budget meter, per-run cap) is made by internal/auditor; this
+// file only acts on it. Both are on the auto-fix denylist
+// (auditor.Denylist).
+//
+// The factory service does NO git work: the worktree scan runs inside the
+// audit job (its result carries the scan), cleanups and fix branches run
+// in fix jobs, and a fix branch's real diff is checked by CI's required
+// audit-guardrail check (.github/workflows/audit-guardrail.yml: master's workflow
+// and master's cmd/auditcheck) - not here. The merge procedure
+// (docs/merging.md) merges only when every check is green.
 
 import (
 	"context"
@@ -13,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -34,33 +41,18 @@ type auditRuntime struct {
 	// mu serializes run/fix processing; wg tracks it (tests wait on it).
 	mu sync.Mutex
 	wg sync.WaitGroup
-	// diff and scan are seams over git (tests stub them).
-	diff func(ctx context.Context, branch, head string) ([]auditor.FileStat, error)
-	scan func(ctx context.Context) ([]auditor.Worktree, error)
 }
 
 // initAuditor wires the auditor: config (cfg.Audit; nil = disabled -
 // cmd/factory passes auditor.LoadConfig of the FACTORY_AUDIT_* env), the
-// fingerprint store in jobs.db, the git seams, and the scheduler's
-// fire-time hook.
+// fingerprint store in jobs.db, and the scheduler's fire-time hook.
 func (a *App) initAuditor(cfg Config) {
 	ac := auditor.DefaultConfig()
 	ac.Enabled = false
 	if cfg.Audit != nil {
 		ac = *cfg.Audit
 	}
-	rt := &auditRuntime{cfg: ac, store: &auditor.FindingStore{DB: a.jobs.DB(), Now: a.jobs.Now}}
-	mirror := filepath.Join(cfg.DataDir, "auditor", "mirror.git")
-	rt.diff = func(ctx context.Context, branch, head string) ([]auditor.FileStat, error) {
-		return auditor.DiffStat(ctx, mirror, ac.RepoURL, branch, head)
-	}
-	rt.scan = func(ctx context.Context) ([]auditor.Worktree, error) {
-		if ac.RepoDir == "" {
-			return nil, errors.New("no repo dir configured")
-		}
-		return auditor.ScanWorktrees(ctx, ac.RepoDir, ac.WorktreeRoot)
-	}
-	a.audit = rt
+	a.audit = &auditRuntime{cfg: ac, store: &auditor.FindingStore{DB: a.jobs.DB(), Now: a.jobs.Now}}
 	a.scheduler.Prepare = a.prepareScheduled
 }
 
@@ -109,20 +101,12 @@ func sameTemplate(a, b wire.JobSpec) bool {
 	return string(ja) == string(jb)
 }
 
-// auditSnapshot collects the current snapshot (databases + git scan).
+// auditSnapshot collects the current snapshot from the databases. It has
+// no worktrees: the scan arrives with the audit job's result.
 func (a *App) auditSnapshot(ctx context.Context) (auditor.Snapshot, error) {
 	snap, err := auditor.Collect(ctx, a.jobs.DB(), a.inbox.DB(), a.jobs.Now())
-	if err != nil {
-		return snap, err
-	}
-	if a.audit.scan != nil {
-		wts, err := a.audit.scan(ctx)
-		if err != nil {
-			snap.WorktreeErr = err.Error()
-		}
-		snap.Worktrees = wts
-	}
-	return snap, nil
+	snap.WorktreeErr = "scanned by the audit job"
+	return snap, err
 }
 
 func (a *App) detectOptions() auditor.DetectOptions {
@@ -144,7 +128,7 @@ func (a *App) prepareScheduled(ctx context.Context, sch jobs.Schedule, spec *wir
 }
 
 // auditTerminal is the onTerminal branch for auditor jobs: processing runs
-// off the transition path (it may run git), serialized.
+// off the transition path, serialized.
 func (a *App) auditTerminal(ctx context.Context, jobID, state string) {
 	if a.audit == nil {
 		return
@@ -193,24 +177,50 @@ func lastResult(job jobs.Job) json.RawMessage {
 }
 
 // processAuditRun turns a finished audit job into tasks and fixes: the
-// fire-time findings plus the sweep's result go through dedup, then the
-// guardrails (against a FRESH snapshot, so cleanup targets are still
-// valid), the per-run cap and the run's budget meter.
+// fire-time findings, the worktree findings derived from the job's
+// reported scan, and the sweep's prose go through dedup, then the
+// guardrails (against a FRESH database snapshot plus the job's validated
+// scan, so cleanup targets are exactly what the scan classified as merged
+// and clean under the root), the per-run cap and the run's budget meter.
 func (a *App) processAuditRun(ctx context.Context, job jobs.Job) error {
 	cfg := a.audit.cfg
 	p, err := auditor.ParseAuditPayload(job.Spec.Payload)
 	if err != nil {
 		return fmt.Errorf("payload: %w", err)
 	}
-	findings := p.Findings
-	if job.State == jobs.StateDone {
-		if findings, err = auditor.MergeSweep(p.Findings, lastResult(job)); err != nil {
-			log.Printf("factoryapp: auditor: run %s: %v (detector findings only)", job.ID, err)
-		}
-	}
-	fresh, err := a.auditSnapshot(ctx)
+	fresh, err := auditor.Collect(ctx, a.jobs.DB(), a.inbox.DB(), a.jobs.Now())
 	if err != nil {
 		return fmt.Errorf("fresh snapshot: %w", err)
+	}
+	var sweep auditor.SweepResult
+	if job.State == jobs.StateDone {
+		sweep, err = auditor.ParseSweep(lastResult(job))
+		if err != nil {
+			log.Printf("factoryapp: auditor: run %s: %v", job.ID, err)
+		}
+		if rej := auditor.ApplySweepScan(&fresh, sweep, cfg.WorktreeRoot); len(rej) > 0 {
+			log.Printf("factoryapp: auditor: run %s: rejected %d reported worktrees: %s", job.ID, len(rej), strings.Join(rej, "; "))
+		}
+	} else {
+		fresh.WorktreeErr = "audit job ended " + job.State
+	}
+	if fresh.WorktreeErr != "" {
+		log.Printf("factoryapp: auditor: run %s: no worktree scan (%s); no worktree findings or cleanups", job.ID, fresh.WorktreeErr)
+	}
+	var findings []auditor.Finding
+	for _, f := range p.Findings {
+		if !auditor.IsWorktreeFinding(f.Fingerprint) {
+			findings = append(findings, f)
+		}
+	}
+	findings = append(findings, auditor.DetectWorktrees(fresh, a.detectOptions())...)
+	auditor.SortFindings(findings)
+	if job.State == jobs.StateDone {
+		if merged, err := auditor.MergeSweep(findings, lastResult(job)); err != nil {
+			log.Printf("factoryapp: auditor: run %s: %v (detector findings only)", job.ID, err)
+		} else {
+			findings = merged
+		}
 	}
 	runJobs, err := auditor.RunJobs(ctx, a.jobs.DB(), job.ID)
 	if err != nil {
@@ -344,9 +354,15 @@ func orNone(ss []string) string {
 	return strings.Join(ss, ", ")
 }
 
-// finishFix handles a fix job's terminal state. A PR fix's branch enters
-// the merge queue ONLY after its real diff passes auditor.CheckDiff (line
-// cap + denylist); any failure turns the auto-fix task into a proposal.
+// finishFix handles a fix job's terminal state. A PR fix that reports its
+// assigned branch enters the merge queue (requested_by auditor). The
+// factory does not diff the branch (it runs no git): CI's required
+// audit-guardrail check runs auditor.CheckDiff from master's code and the
+// merge procedure merges only on all-green checks, so a failing branch
+// never merges; that
+// failure comes back through auditMergeOutcome and turns the auto-fix
+// task into a proposal. A job that did not finish done, or reports a
+// different branch, becomes a proposal at once.
 func (a *App) finishFix(ctx context.Context, job jobs.Job, state string) {
 	var p auditor.FixPayload
 	if err := json.Unmarshal(job.Spec.Payload, &p); err != nil || p.TaskID == "" {
@@ -371,18 +387,8 @@ func (a *App) finishFix(ctx context.Context, job jobs.Job, state string) {
 		a.fixToProposal(ctx, p, fmt.Sprintf("fix job %s pushed %q, not the assigned branch %q", job.ID, r.Branch, p.Branch))
 		return
 	}
-	files, err := a.audit.diff(ctx, r.Branch, r.Head)
-	if err != nil {
-		a.fixToProposal(ctx, p, fmt.Sprintf("could not verify %s@%s: %v", r.Branch, r.Head, err))
-		return
-	}
-	lines, _ := auditor.ChangedLines(files)
-	if err := auditor.CheckDiff(files, p.MaxLines); err != nil {
-		a.fixToProposal(ctx, p, fmt.Sprintf("branch %s@%s failed the guardrails: %v", r.Branch, shortHead(r.Head), err))
-		return
-	}
 	mr, err := a.jobs.CreateMergeRequest(ctx, jobs.NewMergeRequest{
-		Repo: a.audit.cfg.Repo, Branch: r.Branch, Head: r.Head, RequestedBy: "auditor",
+		Repo: a.audit.cfg.Repo, Branch: r.Branch, Head: r.Head, RequestedBy: auditor.RequestedByAuditor,
 		Note: clipString("auto-fix: "+strings.TrimPrefix(taskTitleOr(ctx, a, p.TaskID), auditor.AutoFixPrefix), 200),
 	})
 	if err != nil {
@@ -390,13 +396,43 @@ func (a *App) finishFix(ctx context.Context, job jobs.Job, state string) {
 		return
 	}
 	a.kickMergeQueue()
-	var paths []string
-	for _, f := range files {
-		paths = append(paths, f.Path)
-	}
 	a.postAuditNote(ctx, p.TaskID, fmt.Sprintf(
-		"Fix job %s pushed `%s` @ %s. The factory checked the real diff: %d changed lines in %s (cap %d, no forbidden areas). Queued as merge request %s; the merge job opens the PR, merges after CI and deploys through the normal flow.\n\n**What changed:** %s\n\n**How to revert:** before it lands, `POST /v1/merge-requests/%s/cancel`. After it lands: %s",
-		job.ID, r.Branch, shortHead(r.Head), lines, strings.Join(paths, ", "), p.MaxLines, mr.ID, r.Change, mr.ID, p.Plan.Revert))
+		"Fix job %s pushed `%s` @ %s (reported files: %s). Queued as merge request %s; the merge job opens the PR and merges only after CI is green, including the required `audit-guardrail` check, which runs the auditor's diff guardrail from master's code (at most %d changed lines, no binaries, no forbidden areas). If it or any other check fails, this task becomes a proposal.\n\n**What changed:** %s\n\n**How to revert:** before it lands, `POST /v1/merge-requests/%s/cancel`. After it lands: %s",
+		job.ID, r.Branch, shortHead(r.Head), orNone(r.Files), mr.ID, p.MaxLines, r.Change, mr.ID, p.Plan.Revert))
+}
+
+// auditMergeOutcome is the merge-queue hook for auditor merge requests
+// (requested_by auditor, branch auto/audit-*), called whenever a request
+// reaches a terminal state or needs_attention (finishMerge,
+// mergeNeedsAttention). needs_attention - a red CI check such as
+// audit-guardrail, a conflict or a failed deploy - turns the auto-fix task into a proposal with the
+// reason; landed and cancelled are noted on the task.
+func (a *App) auditMergeOutcome(ctx context.Context, mr jobs.MergeRequest) {
+	if a.audit == nil || !auditor.IsAuditMerge(mr.RequestedBy, mr.Branch) {
+		return
+	}
+	a.audit.wg.Add(1)
+	go func() {
+		defer a.audit.wg.Done()
+		a.audit.mu.Lock()
+		defer a.audit.mu.Unlock()
+		ctx := context.WithoutCancel(ctx)
+		p, fixJob, ok, err := auditor.FixForBranch(ctx, a.jobs.DB(), mr.Branch)
+		if err != nil || !ok {
+			log.Printf("factoryapp: auditor: merge %s (%s): no fix job found (%v)", mr.ID, mr.Branch, err)
+			return
+		}
+		switch mr.State {
+		case jobs.MergeNeedsAttention:
+			a.fixToProposal(ctx, p, auditor.MergeFailureReason(mr.ID, mr.Result))
+		case jobs.MergeLanded:
+			a.postAuditNote(ctx, p.TaskID, fmt.Sprintf("Merge request %s for `%s` (fix job %s) landed: %s\n\n**How to revert:** %s",
+				mr.ID, mr.Branch, fixJob, orDefault(mr.Result, "merged"), p.Plan.Revert))
+		case jobs.MergeCancelled:
+			a.postAuditNote(ctx, p.TaskID, fmt.Sprintf("Merge request %s for `%s` was cancelled: %s",
+				mr.ID, mr.Branch, orDefault(mr.Result, "no reason recorded")))
+		}
+	}()
 }
 
 // fixToProposal converts an auto-fix task into a proposal: retitled,

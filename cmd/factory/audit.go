@@ -21,11 +21,18 @@ import (
 // and guardrail decisions as the scheduled audit, and prints the findings
 // and what a run would do - without filing tasks, starting jobs or
 // writing anything. The live audit only runs from the factory's schedule.
+//
+// Like the factory service, the CLI runs no git: the worktree scan is
+// done by the audit job on the foreman. By default the dry run reports the
+// scan as skipped; -worktrees FILE feeds it a scan in the audit job's
+// result format ({"worktrees": [...]} or a bare array, e.g. the result of
+// a past audit job) so the cleanup decisions can be previewed.
 func runAudit(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("audit", flag.ContinueOnError)
 	dataDir := fs.String("data", "./factory-data", "factory data directory (jobs.db, inbox.db)")
 	dryRun := fs.Bool("dry-run", false, "print findings and decisions; file nothing, fix nothing")
 	asJSON := fs.Bool("json", false, "print the decisions as JSON")
+	wtFile := fs.String("worktrees", "", "a worktree scan in the audit job's result format to decide on (default: skipped; the scan runs inside the audit job)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -50,13 +57,15 @@ func runAudit(args []string, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("audit: collect: %w", err)
 	}
-	if cfg.RepoDir != "" {
-		snap.Worktrees, err = auditor.ScanWorktrees(ctx, cfg.RepoDir, cfg.WorktreeRoot)
-		if err != nil {
-			snap.WorktreeErr = err.Error()
-		}
+	var rejected []string
+	if *wtFile == "" {
+		snap.WorktreeErr = "skipped: the scan runs inside the audit job on " + cfg.Foreman + " (pass -worktrees FILE to preview one)"
 	} else {
-		snap.WorktreeErr = "no repo dir configured"
+		sweep, err := readScan(*wtFile)
+		if err != nil {
+			return err
+		}
+		rejected = auditor.ApplySweepScan(&snap, sweep, cfg.WorktreeRoot)
 	}
 	findings := auditor.Detect(snap, auditor.DetectOptions{
 		WorktreeRoot: cfg.WorktreeRoot, StaleAfter: cfg.StaleAfter, MaxLines: cfg.MaxChangedLines,
@@ -83,7 +92,23 @@ func runAudit(args []string, stdout io.Writer) error {
 		return enc.Encode(map[string]any{"config": cfg, "warnings": warns, "actions": actions})
 	}
 	printDryRun(stdout, cfg, warns, snap, actions, meter, runCap)
+	for _, rj := range rejected {
+		fmt.Fprintf(stdout, "rejected reported worktree: %s\n", rj)
+	}
 	return nil
+}
+
+// readScan reads a worktree scan file: an audit job result object or a
+// bare array of worktrees.
+func readScan(path string) (auditor.SweepResult, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return auditor.SweepResult{}, err
+	}
+	if t := strings.TrimSpace(string(b)); strings.HasPrefix(t, "[") {
+		b = []byte(`{"findings":[],"worktrees":` + t + `}`)
+	}
+	return auditor.ParseSweep(b)
 }
 
 func openRO(path string) (*sql.DB, error) {

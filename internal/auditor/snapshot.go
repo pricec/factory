@@ -67,7 +67,9 @@ type ForemanRow struct {
 	LastSeen time.Time `json:"last_seen"`
 }
 
-// Worktree is one git worktree of the scanned repo.
+// Worktree is one git worktree of the repo, as reported by the audit
+// job's read-only scan on the foreman (worktrees.go); the factory itself
+// never runs git.
 type Worktree struct {
 	Path       string    `json:"path"`
 	Branch     string    `json:"branch,omitempty"`
@@ -85,7 +87,8 @@ type Snapshot struct {
 	Merges    []MergeRow   `json:"merges"`
 	Foremen   []ForemanRow `json:"foremen"`
 	Worktrees []Worktree   `json:"worktrees,omitempty"`
-	// WorktreeErr explains a skipped/failed git scan.
+	// WorktreeErr explains a missing/failed scan (the worktree detectors
+	// then report nothing and no cleanup is admitted).
 	WorktreeErr string `json:"worktree_err,omitempty"`
 }
 

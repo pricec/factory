@@ -36,12 +36,28 @@ type RunInputs struct {
 	Prior  PriorFunc
 }
 
+// DeadHeldAfter is how long a job must have been held before the auditor
+// may cancel it (operator decision 2026-11-17).
+const DeadHeldAfter = 6 * time.Hour
+
+// heldSince is when a held job entered the held queue: jobs.updated_at is
+// the hold-since stamp while held (internal/jobs/held.go), falling back to
+// created_at.
+func heldSince(j JobRow) time.Time {
+	if !j.UpdatedAt.IsZero() {
+		return j.UpdatedAt
+	}
+	return j.CreatedAt
+}
+
 // isDeadHeld is the code definition of a "held-but-dead" job: held for
-// over 6h, filed under a task that is now closed, not created by the
-// operator directly. Only these may be cancelled without asking.
+// over 6h, filed under a task that is now closed, and not created by the
+// operator directly (created_by ui). Planner-created jobs under operator
+// tasks qualify (operator decision 2026-11-17). Only these may be
+// cancelled without asking.
 func isDeadHeld(j JobRow, now time.Time) bool {
 	return j.State == "held" && j.TaskID != "" && !j.TaskOpen && j.CreatedBy != "ui" &&
-		now.Sub(j.CreatedAt) > 6*time.Hour
+		now.Sub(heldSince(j)) > DeadHeldAfter
 }
 
 // ContextFromSnapshot derives the cleanup targets CheckPlan accepts.

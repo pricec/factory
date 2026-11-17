@@ -164,12 +164,36 @@ which re-creates the audit schedule:
 | `FACTORY_AUDIT_MAX_AUTOFIXES` | `5` | per-run cap; can only be lowered |
 | `FACTORY_AUDIT_MAX_CHANGED_LINES` | `150` | per-PR cap; can only be lowered |
 | `FACTORY_AUDIT_FOREMAN` | `foreman:server` | where audit and fix jobs run |
-| `FACTORY_AUDIT_REPO_DIR` | `/home/price/temp/factory` | clone scanned READ-ONLY for worktrees (`-` disables) |
-| `FACTORY_AUDIT_WORKTREE_ROOT` | `/home/price/work` | only worktrees under it may be cleaned |
-| `FACTORY_AUDIT_REPO_URL` | `git@github.com:pricec/factory.git` | fetched into `<data>/auditor/mirror.git` for the diff check |
+| `FACTORY_AUDIT_REPO_DIR` | `/home/price/temp/factory` | clone on the audit foreman whose worktrees the AUDIT JOB scans read-only (empty disables) |
+| `FACTORY_AUDIT_WORKTREE_ROOT` | `/home/price/work` | only merged, clean worktrees under it may be cleaned (never forced) |
+
+The factory service runs no git and needs no ssh key or deploy key for the
+auditor: the worktree scan runs in the audit job, and fix branches are
+checked in CI.
+
+**Required check (one-time, after this lands on master).** Auto-fix PRs
+(`auto/audit-*`) are gated by the `audit-guardrail` workflow
+(`.github/workflows/audit-guardrail.yml`, run from master's copy via
+`pull_request_target`). The merge procedure already waits for every check
+to be green; to make GitHub enforce it too, add it as a required status
+check on master. Do this only once the workflow is on master: until then
+the check never reports and would block every PR. In the UI: Settings ->
+Branches (or Rules -> Rulesets) -> master -> Require status checks to pass
+-> add `audit-guardrail`. With `gh` (classic branch protection; master
+had none on 2026-11-17 - if you add other rules later, keep this check):
+
+    gh api -X PUT repos/pricec/factory/branches/master/protection \
+      -H 'Accept: application/vnd.github+json' --input - <<'JSON'
+    {"required_status_checks":{"strict":false,"contexts":["audit-guardrail"]},
+     "enforce_admins":false,"required_pull_request_reviews":null,"restrictions":null}
+    JSON
+
+Check it: `gh api repos/pricec/factory/branches/master/protection/required_status_checks`.
 
 Preview a run without side effects:
-`factory audit -data /var/lib/factory -dry-run`.
+`factory audit -data /var/lib/factory -dry-run` (no git: the worktree scan
+is reported as skipped; `-worktrees FILE` previews cleanup decisions for a
+scan in the audit job's result format).
 
 Raising the hard caps (5 auto-fixes, 150 lines) or editing the denylist is
 a code change in `internal/auditor`, which auto-fixes can never touch.

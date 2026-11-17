@@ -57,7 +57,6 @@ const (
 	EnvForeman      = "FACTORY_AUDIT_FOREMAN"
 	EnvRepo         = "FACTORY_AUDIT_REPO"
 	EnvRepoDir      = "FACTORY_AUDIT_REPO_DIR"
-	EnvRepoURL      = "FACTORY_AUDIT_REPO_URL"
 	EnvWorktreeRoot = "FACTORY_AUDIT_WORKTREE_ROOT"
 )
 
@@ -95,11 +94,9 @@ type Config struct {
 	Foreman string
 	// Repo is the GitHub OWNER/REPO auto-fix PRs target.
 	Repo string
-	// RepoURL is what the factory's diff mirror fetches fix branches from
-	// ("" -> git@github.com:<Repo>.git).
-	RepoURL string
-	// RepoDir is a local clone of Repo read (never written) to list
-	// worktrees and branches; "" skips the scan.
+	// RepoDir is the clone on the Foreman host whose worktrees the AUDIT
+	// JOB scans (read-only) and cleanup jobs act on; "" tells the job to
+	// skip the scan. The factory service itself never runs git.
 	RepoDir string
 	// WorktreeRoot is the only directory whose worktrees may be cleaned.
 	WorktreeRoot string
@@ -108,9 +105,11 @@ type Config struct {
 	StaleAfter time.Duration
 }
 
-// DefaultConfig is the operator-approved default: daily 06:00 local, $10
-// per run, at most 5 auto-fixes of at most 150 lines, flash sweep,
-// default-tier fixes, job priority 1, task priority 3.
+// DefaultConfig is the operator-approved default (decisions recorded
+// 2026-11-17): enabled and auto-fixing from the first run, daily 06:00
+// local, $10 per run, at most 5 auto-fixes of at most 150 lines, flash
+// sweep, default-tier fixes, job priority 1, task priority 3, cleanup only
+// of merged clean worktrees under /home/price/work.
 func DefaultConfig() Config {
 	return Config{
 		Enabled:         true,
@@ -186,7 +185,6 @@ func LoadConfig(getenv func(string) string) (Config, []string) {
 	intEnv(EnvMaxLines, &c.MaxChangedLines)
 	strEnv(EnvForeman, &c.Foreman)
 	strEnv(EnvRepo, &c.Repo)
-	strEnv(EnvRepoURL, &c.RepoURL)
 	if v, ok := lookup(getenv, EnvRepoDir); ok {
 		c.RepoDir = v // "" disables the git scan
 	}
@@ -197,9 +195,6 @@ func LoadConfig(getenv func(string) string) (Config, []string) {
 	if _, err := cron.ParseStandard(c.CronSpec()); err != nil {
 		warn = append(warn, fmt.Sprintf("%s/%s: %v; using the default", EnvCron, EnvTZ, err))
 		c.Cron, c.TZ = DefaultConfig().Cron, ""
-	}
-	if c.RepoURL == "" {
-		c.RepoURL = "git@github.com:" + c.Repo + ".git"
 	}
 	warn = append(warn, c.clamp()...)
 	return c, warn

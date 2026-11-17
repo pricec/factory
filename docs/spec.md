@@ -749,10 +749,21 @@ guardrails enforced in code.
   findings computed from jobs.db / inbox.db (jobs with state, failures,
   retries, timeouts, held + `held_reason`, `over_budget`; usage tokens and
   `cost_usd` per job and per kind×tier; merge-queue outcomes; foremen
-  online state and build ids) and a read-only git scan of
-  `FACTORY_AUDIT_REPO_DIR` worktrees under `FACTORY_AUDIT_WORKTREE_ROOT`,
-  over 24h with a 7-day trend. The flash sweep checks them, inspects the
-  host read-only, and returns `{findings: [...]}` (result_schema pinned).
+  online state and build ids) over 24h with a 7-day trend, plus
+  `repo_dir`/`worktree_root` for the job's scan.
+- **No git in the factory service.** The factory service runs no git and
+  holds no repo credential: git happens only in jobs and CI. The audit job
+  itself runs the read-only worktree scan on its foreman (`git worktree
+  list --porcelain` of `FACTORY_AUDIT_REPO_DIR`; for each worktree under
+  `FACTORY_AUDIT_WORKTREE_ROOT`: head, branch, merged = head is an ancestor
+  of the existing `origin/master` ref, no fetch; clean = empty `git status
+  --porcelain`; last commit time). The flash sweep checks the findings,
+  inspects the host read-only, and returns `{findings: [...], worktrees:
+  [...], worktree_scan_error}` (result_schema pinned). The factory treats
+  the scan as untrusted input (`auditor.ValidateWorktrees`: clean absolute
+  paths strictly under the root, hex heads, no prunable targets) and
+  derives the `worktree:*` findings from it; with no scan, no worktree
+  finding is filed and no cleanup is admitted.
 - **Findings.** Each has a fingerprint (`<kind>:<key>`; sweep-only ones
   `sweep:<slug>`), evidence (job ids, token/cost numbers), likely cause,
   proposed fix, benefit, effort and a metric (higher = worse). The sweep may
@@ -771,10 +782,13 @@ guardrails enforced in code.
   fix through the normal branch -> CI -> merge queue -> deploy flow.
 - **Auto-fix** only when ALL hold, each enforced in `internal/auditor`
   (any failure files a proposal and says which):
-  - kind is `pr` (one branch, real diff <= 150 changed lines),
-    `cleanup_worktrees` (clean worktrees merged into master, under the
-    worktree root, as classified by a fresh snapshot) or
-    `cancel_dead_held` (held > 6h, task closed, not `created_by ui`);
+  - kind is `pr` (one branch, plan <= 150 lines; the real diff is checked
+    by CI, below), `cleanup_worktrees` (worktrees the job's scan reported
+    merged into master AND clean, under the worktree root; the cleanup job
+    re-checks both and uses `git worktree remove` / `git branch -d`, never
+    `--force` / `-D`) or `cancel_dead_held` (held > 6h since the hold,
+    task closed, not `created_by ui`: planner-created jobs under operator
+    tasks qualify, jobs the operator created directly never do);
   - no path in, and no plan text naming, a denylisted area: spend caps and
     budgets, the usage throttle, secrets, auth/permissions, the
     merge/deploy/rollback procedure (and Makefile/CI/go.mod), normative
@@ -792,19 +806,29 @@ guardrails enforced in code.
   same admission path as every job (held by the throttle when it holds).
   Each auto-fix opens an informational `[auto-fix] ...` task
   (`needs_operator=false`) saying what changes, the job, and how to revert.
-- **PR fixes reach the queue only through code.** The fix job pushes its
-  assigned branch `auto/audit-<run>-<n>` and reports `{branch, head}`; the
-  factory fetches that branch into its own mirror
-  (`<data>/auditor/mirror.git`, from `FACTORY_AUDIT_REPO_URL`), requires it
-  to be at the reported head, and runs `CheckDiff` (line cap, denylist,
-  no binaries) on `master...head`. Only then does it create the §6.11
-  merge request (`requested_by` `auditor`); the merge job opens the PR,
-  merges after CI and deploys as usual. Any failure (job not done, wrong
-  branch, failed check) turns the task into a `[proposal]` with
-  `needs_operator=true`.
-- **Dry run.** `factory audit -data <dir> -dry-run [-json]` opens the
-  databases read-only and prints the findings and the decisions a run would
-  take (dedup, proposal vs auto-fix and why), filing and fixing nothing.
+- **PR fixes: the diff guardrail is a required CI check.** The fix job
+  pushes its assigned branch `auto/audit-<run>-<n>` and reports `{branch,
+  head}`; the factory (no git) creates the §6.11 merge request
+  (`requested_by` `auditor`) and the merge job opens the PR. The
+  `audit-guardrail` check (`.github/workflows/audit-guardrail.yml`) runs
+  on `pull_request_target`, so GitHub uses MASTER's copy of the workflow,
+  checks out master, builds `cmd/auditcheck` from master and feeds it `git
+  diff --numstat -z -M origin/master...<PR head>`; it fails unless the diff
+  is non-empty, text only, <= 150 changed lines and touches no denylisted
+  path (`.github/`, `Makefile` and `cmd/auditcheck/` are denylisted). A fix
+  branch therefore cannot weaken its own check. Non-`auto/audit-*` PRs pass
+  it trivially, so it is a required status check on master. The merge
+  procedure merges only on all-green checks; a red check (or any other
+  merge failure) puts the request in `needs_attention`, and the factory
+  turns that auto-fix task into a `[proposal]` with `needs_operator=true`
+  and the reason. A fix job that is not `done` or reports another branch
+  becomes a proposal at once.
+- **Dry run.** `factory audit -data <dir> -dry-run [-json] [-worktrees
+  FILE]` opens the databases read-only and prints the findings and the
+  decisions a run would take (dedup, proposal vs auto-fix and why), filing
+  and fixing nothing. It runs no git either: the worktree scan is skipped
+  unless a scan in the audit job's result format is passed with
+  `-worktrees`.
 
 ## 7. Pairing & scoped auth
 

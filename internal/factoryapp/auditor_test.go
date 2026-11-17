@@ -1,6 +1,8 @@
 // Factory auditor wiring (spec §6.12): the owned daily schedule, the
 // fire-time snapshot, proposal filing with dedup, auto-fixes inside the
-// code-enforced guardrails, and the diff check before the merge queue.
+// code-enforced guardrails, the job-reported worktree scan (the factory
+// runs no git), and a failed auto-fix merge (e.g. the CI audit-guardrail
+// check) turning back into a proposal.
 package factoryapp
 
 import (
@@ -39,12 +41,6 @@ func newAuditApp(t *testing.T, cfg auditor.Config) (*App, *testClock) {
 	t.Cleanup(func() { a.WaitAudit(); _ = a.Close() })
 	if err := a.jobs.UpsertForeman(ctxBG(), "foreman:server", json.RawMessage(`{"build":"b1"}`)); err != nil {
 		t.Fatal(err)
-	}
-	a.audit.scan = func(context.Context) ([]auditor.Worktree, error) {
-		return []auditor.Worktree{{Path: "/home/price/work/old", Branch: "feat/old", Head: "abc1234", Merged: true, Clean: true}}, nil
-	}
-	a.audit.diff = func(context.Context, string, string) ([]auditor.FileStat, error) {
-		return []auditor.FileStat{{Path: "internal/mcpfactory/tools.go", Added: 6, Deleted: 1}}, nil
 	}
 	return a, clk
 }
@@ -176,9 +172,10 @@ func TestAuditRunEndToEnd(t *testing.T) {
 	seedFindings(t, a)
 	job := fireAudit(t, a, clk)
 
-	// Fire-time payload: the deterministic findings, LOW priority, flash.
+	// Fire-time payload: the deterministic database findings (no worktree
+	// findings: the job runs that scan), LOW priority, flash.
 	p, err := auditor.ParseAuditPayload(job.Spec.Payload)
-	if err != nil || p.AuditRun != job.ID || len(p.Findings) < 3 {
+	if err != nil || p.AuditRun != job.ID || len(p.Findings) < 2 {
 		t.Fatalf("payload: %v %+v", err, p)
 	}
 	if job.Spec.Priority != 1 || job.Spec.Tier != wire.TierFlash {
@@ -187,11 +184,18 @@ func TestAuditRunEndToEnd(t *testing.T) {
 
 	// The sweep adds one finding with a plan touching a forbidden area: it
 	// must be downgraded to a proposal by code.
+	// The job's worktree scan reports one merged clean worktree under the
+	// root (a cleanup auto-fix), one dirty one and one outside the root
+	// (neither may become a cleanup target).
 	sweep := map[string]any{"findings": []map[string]any{{
 		"fingerprint": "Raise spend cap", "title": "Daily cap too low", "evidence": []string{"x"},
 		"cause": "c", "fix": "f", "metric": 3,
 		"autofix": map[string]any{"kind": "pr", "description": "raise it", "paths": []string{"internal/budgets/config.go"}, "est_lines": 2, "revert": "git revert"},
-	}}}
+	}}, "worktrees": []map[string]any{
+		{"path": "/home/price/work/old", "branch": "feat/old", "head": "abc1234", "merged": true, "clean": true},
+		{"path": "/home/price/work/dirty", "branch": "feat/dirty", "head": "abc1235", "merged": true, "clean": false},
+		{"path": "/home/price/temp/factory", "branch": "master", "head": "abc1236", "merged": true, "clean": true},
+	}}
 	if err := a.jobs.Dispatch(ctxBG(), job.ID, "foreman:server"); err != nil && !strings.Contains(err.Error(), "illegal") {
 		t.Log(err)
 	}
@@ -230,6 +234,16 @@ func TestAuditRunEndToEnd(t *testing.T) {
 	for _, j := range fixJobs {
 		if j.Spec.Priority != 1 || j.Spec.Foreman != "foreman:server" || j.Spec.Budget.MaxCostUSD != 1.5 {
 			t.Errorf("fix job %s: %+v", j.ID, j.Spec)
+		}
+		var fp auditor.FixPayload
+		_ = json.Unmarshal(j.Spec.Payload, &fp)
+		if fp.Plan.Kind != auditor.FixPR {
+			if strings.Join(fp.Plan.Targets, ",") != "/home/price/work/old" {
+				t.Errorf("cleanup targets = %v, want only the merged clean worktree under the root", fp.Plan.Targets)
+			}
+			if strings.Contains(j.Spec.Task, "--force") && !strings.Contains(j.Spec.Task, "never --force") {
+				t.Errorf("cleanup task may force: %s", j.Spec.Task)
+			}
 		}
 	}
 
@@ -299,68 +313,112 @@ func finishFixJob(t *testing.T, a *App, j jobs.Job, branch *string) {
 	a.WaitAudit()
 }
 
-func TestFixDiffGuardrails(t *testing.T) {
-	cases := []struct {
-		name   string
-		files  []auditor.FileStat
-		branch string
-		queued bool
-	}{
-		{"allowed", []auditor.FileStat{{Path: "docs/x.md", Added: 3}}, "", true},
-		{"forbidden path", []auditor.FileStat{{Path: "internal/auth/auth.go", Added: 1}}, "", false},
-		{"own guardrails", []auditor.FileStat{{Path: "internal/auditor/guardrails.go", Added: 1}}, "", false},
-		{"over line cap", []auditor.FileStat{{Path: "docs/x.md", Added: 151}}, "", false},
-		{"wrong branch", []auditor.FileStat{{Path: "docs/x.md", Added: 1}}, "master", false},
+// runToFixJob fires an audit with seeded findings, finishes it with an
+// empty sweep, and returns the single PR fix job it started.
+func runToFixJob(t *testing.T, a *App, clk *testClock) jobs.Job {
+	t.Helper()
+	seedFindings(t, a)
+	job := fireAudit(t, a, clk)
+	if err := a.jobs.ApplyEvent(ctxBG(), job.ID, "started"); err != nil {
+		t.Fatal(err)
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			a, clk := newAuditApp(t, auditCfg())
-			a.audit.scan = func(context.Context) ([]auditor.Worktree, error) { return nil, nil }
-			seedFindings(t, a)
-			job := fireAudit(t, a, clk)
-			if err := a.jobs.ApplyEvent(ctxBG(), job.ID, "started"); err != nil {
+	res := wire.JobResult{JobID: job.ID, Status: wire.StatusDone, Summary: "audit done", Result: json.RawMessage(`{"findings":[],"worktrees":[]}`)}
+	a.handleEnvelope(ctxBG(), wire.MessageEnvelope{Type: "job.result", JobID: job.ID, Payload: mustJSONT(t, res)}, map[string]bool{})
+	a.WaitAudit()
+	fixJobs := auditFixJobs(t, a)
+	if len(fixJobs) != 1 {
+		t.Fatalf("fix jobs = %d", len(fixJobs))
+	}
+	return fixJobs[0]
+}
+
+func auditorMerges(t *testing.T, a *App) []jobs.MergeRequest {
+	t.Helper()
+	mrs, err := a.jobs.MergeRequests(ctxBG(), 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []jobs.MergeRequest
+	for _, m := range mrs {
+		if m.RequestedBy == auditor.RequestedByAuditor {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+func assertConvertedToProposal(t *testing.T, a *App, want string) {
+	t.Helper()
+	proposals, fixes := listAuditTasks(t, a)
+	if len(fixes) != 0 {
+		t.Fatalf("auto-fix task not converted: %+v", fixes)
+	}
+	for _, p := range proposals {
+		if strings.Contains(p.Title, "timeout_s") && p.NeedsOperator {
+			if want == "" {
+				return
+			}
+			msgs, err := a.inbox.ThreadMessages(ctxBG(), p.ID, 50)
+			if err != nil {
 				t.Fatal(err)
 			}
-			res := wire.JobResult{JobID: job.ID, Status: wire.StatusDone, Summary: "audit done", Result: json.RawMessage(`{"findings":[]}`)}
-			a.handleEnvelope(ctxBG(), wire.MessageEnvelope{Type: "job.result", JobID: job.ID, Payload: mustJSONT(t, res)}, map[string]bool{})
-			a.WaitAudit()
-			fixJobs := auditFixJobs(t, a)
-			if len(fixJobs) != 1 {
-				t.Fatalf("fix jobs = %d", len(fixJobs))
+			for _, m := range msgs {
+				if strings.Contains(string(m.Payload), want) {
+					return
+				}
 			}
-			a.audit.diff = func(context.Context, string, string) ([]auditor.FileStat, error) { return c.files, nil }
+			t.Fatalf("converted proposal has no note mentioning %q", want)
+		}
+	}
+	t.Fatalf("no converted proposal: %+v", proposals)
+}
+
+// TestFixBranchToMergeQueue: the factory runs no git, so a fix job that
+// reports its assigned branch is queued without a local diff (CI's
+// required audit-guardrail check judges the diff); a job reporting any
+// other branch becomes a proposal at once.
+func TestFixBranchToMergeQueue(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		branch string
+		queued bool
+	}{{"assigned branch", "", true}, {"wrong branch", "master", false}} {
+		t.Run(c.name, func(t *testing.T) {
+			a, clk := newAuditApp(t, auditCfg())
+			fj := runToFixJob(t, a, clk)
 			var br *string
 			if c.branch != "" {
 				br = &c.branch
 			}
-			finishFixJob(t, a, fixJobs[0], br)
-			mrs, _ := a.jobs.MergeRequests(ctxBG(), 50)
-			n := 0
-			for _, m := range mrs {
-				if m.RequestedBy == "auditor" {
-					n++
-				}
-			}
-			if (n == 1) != c.queued {
+			finishFixJob(t, a, fj, br)
+			if n := len(auditorMerges(t, a)); (n == 1) != c.queued {
 				t.Fatalf("auditor merge requests = %d, want queued=%v", n, c.queued)
 			}
-			_, fixes := listAuditTasks(t, a)
-			proposals, _ := listAuditTasks(t, a)
 			if !c.queued {
-				// The auto-fix task became a proposal awaiting the operator.
-				if len(fixes) != 0 {
-					t.Fatalf("auto-fix task not converted: %+v", fixes)
-				}
-				conv := false
-				for _, p := range proposals {
-					if strings.Contains(p.Title, "timeout_s") && p.NeedsOperator {
-						conv = true
-					}
-				}
-				if !conv {
-					t.Fatalf("no converted proposal: %+v", proposals)
-				}
+				assertConvertedToProposal(t, a, "")
 			}
 		})
 	}
+}
+
+// TestFixMergeGuardrailFailure: when the merge of an auto-fix needs
+// attention (the CI audit-guardrail check refused the diff), the auto-fix
+// task becomes a proposal naming the guardrail; a landed merge does not.
+func TestFixMergeGuardrailFailure(t *testing.T) {
+	a, clk := newAuditApp(t, auditCfg())
+	fj := runToFixJob(t, a, clk)
+	finishFixJob(t, a, fj, nil)
+	mrs := auditorMerges(t, a)
+	if len(mrs) != 1 || !strings.HasPrefix(mrs[0].Branch, auditor.FixBranchPrefix) {
+		t.Fatalf("auditor merges = %+v", mrs)
+	}
+	if _, fixes := listAuditTasks(t, a); len(fixes) != 1 {
+		t.Fatalf("auto-fix tasks before the merge outcome = %d, want 1", len(fixes))
+	}
+	if ok, err := a.jobs.ClaimMerge(ctxBG(), mrs[0].ID, "job_merge"); err != nil || !ok {
+		t.Fatalf("claim merge: %v %v", ok, err)
+	}
+	a.mergeNeedsAttention(ctxBG(), mrs[0].ID, "checks red: audit-guardrail (auditor guardrail: FAIL: 151 changed lines > 150)")
+	a.WaitAudit()
+	assertConvertedToProposal(t, a, "audit-guardrail")
 }

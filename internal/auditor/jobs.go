@@ -110,16 +110,23 @@ func ParseAuditPayload(raw json.RawMessage) (AuditPayload, error) {
 	return p, err
 }
 
-const auditTask = `You are the factory auditor's daily sweep (spec §6.12). READ-ONLY: do not edit, commit, push, delete, cancel or deploy anything.
+const auditTask = `You are the factory auditor's daily sweep (spec §6.12). READ-ONLY: do not edit, commit, push, fetch, delete, cancel or deploy anything.
 
-The payload holds deterministic findings the factory computed from its own databases (jobs, usage, merge queue, foremen, worktrees) for the last 24h with a 7-day trend. Your job:
-1. Sanity-check each payload finding. Where you can add a sharper likely cause or a more concrete fix (file names, functions), return it under the SAME fingerprint.
-2. Look for what the databases cannot see, on this host only and read-only: git worktrees under payload.worktree_root and local branches of the repo at payload.repo_dir (merged into origin/master? dirty? last commit date?), and recurring error strings in job outputs under /var/lib/factory-foreman/jobs/*/ (e.g. grep the last lines of logs). Report new findings with a short kebab-case fingerprint.
-3. Optionally attach an autofix plan to a finding ONLY when the fix is one small reversible code/doc/prompt/config change (kind "pr": list the repo-relative paths and an honest est_lines <= 150, plus exact revert steps). Never propose anything touching spend caps, budgets, the usage throttle, secrets, auth/permissions, the merge/deploy/rollback procedure, or the auditor itself - the factory enforces these rules in code and will downgrade such plans to proposals anyway.
+The payload holds deterministic findings the factory computed from its own databases (jobs, usage, merge queue, foremen) for the last 24h with a 7-day trend. The factory service runs no git, so YOU run the worktree scan. Your job:
 
-Every finding needs: fingerprint, title (one line), evidence (job ids, token/cost numbers, paths), cause, fix, benefit, effort, metric (a number where higher is worse, e.g. an occurrence count). Keep it to the 10 most valuable findings. Report with report_result status done; result = {"findings": [...], "notes": "..."}.`
+1. Worktree scan (required, read-only, no fetch). REPO=payload.repo_dir, ROOT=payload.worktree_root. If REPO is empty or not a git repo, set worktree_scan_error and skip. Otherwise run ` + "`git -C $REPO worktree list --porcelain`" + ` and, for EVERY worktree whose path is under ROOT/ (skip the main checkout and anything else), report one entry:
+   - path, branch (without refs/heads/; "" when detached), head (full sha), prunable (true if the porcelain output says prunable; then skip the other checks);
+   - merged: true only if ` + "`git -C $REPO merge-base --is-ancestor <head> origin/master`" + ` exits 0 (compare with the existing origin/master ref; do not fetch);
+   - clean: true only if ` + "`git -C <path> --no-optional-locks status --porcelain`" + ` succeeds with empty output;
+   - last_commit: ` + "`git -C $REPO log -1 --format=%cI <head>`" + ` (RFC 3339).
+   Report the raw facts only; never guess merged/clean. If a command fails for a worktree, report merged=false, clean=false. If the scan as a whole fails, set worktree_scan_error to the error instead of worktrees.
+2. Sanity-check each payload finding. Where you can add a sharper likely cause or a more concrete fix (file names, functions), return it under the SAME fingerprint.
+3. Look for what the databases cannot see, on this host only and read-only: recurring error strings in job outputs under /var/lib/factory-foreman/jobs/*/ (e.g. grep the last lines of logs). Report new findings with a short kebab-case fingerprint. Do not file worktree findings yourself: the factory derives them from your scan.
+4. Optionally attach an autofix plan to a finding ONLY when the fix is one small reversible code/doc/prompt/config change (kind "pr": list the repo-relative paths and an honest est_lines <= 150, plus exact revert steps). Never propose anything touching spend caps, budgets, the usage throttle, secrets, auth/permissions, the merge/deploy/rollback procedure, CI, or the auditor itself - the factory enforces these rules in code and will downgrade such plans to proposals anyway.
 
-const sweepSchema = `{"type":"object","required":["findings"],"properties":{
+Every finding needs: fingerprint, title (one line), evidence (job ids, token/cost numbers, paths), cause, fix, benefit, effort, metric (a number where higher is worse, e.g. an occurrence count). Keep it to the 10 most valuable findings. Report with report_result status done; result = {"findings": [...], "worktrees": [...], "worktree_scan_error": "", "notes": "..."}.`
+
+const sweepSchema = `{"type":"object","required":["findings","worktrees"],"properties":{
 "findings":{"type":"array","items":{"type":"object","required":["fingerprint","title","evidence","cause","fix","metric"],"properties":{
 "fingerprint":{"type":"string"},"title":{"type":"string"},"evidence":{"type":"array","items":{"type":"string"}},
 "cause":{"type":"string"},"fix":{"type":"string"},"benefit":{"type":"string"},"effort":{"type":"string"},
@@ -127,6 +134,10 @@ const sweepSchema = `{"type":"object","required":["findings"],"properties":{
 "autofix":{"type":"object","required":["kind","description","revert"],"properties":{
 "kind":{"type":"string"},"description":{"type":"string"},"paths":{"type":"array","items":{"type":"string"}},
 "est_lines":{"type":"integer"},"revert":{"type":"string"}}}}}},
+"worktrees":{"type":"array","items":{"type":"object","required":["path","head","merged","clean"],"properties":{
+"path":{"type":"string"},"branch":{"type":"string"},"head":{"type":"string"},"merged":{"type":"boolean"},
+"clean":{"type":"boolean"},"prunable":{"type":"boolean"},"last_commit":{"type":"string"}}}},
+"worktree_scan_error":{"type":"string"},
 "notes":{"type":"string"}}}`
 
 // maxSweepFindings bounds what one sweep may add.
@@ -207,7 +218,7 @@ func FixBranch(run string, n int) string {
 	if len(r) > 10 {
 		r = r[len(r)-10:]
 	}
-	return fmt.Sprintf("auto/audit-%s-%d", r, n)
+	return fmt.Sprintf(FixBranchPrefix+"%s-%d", r, n)
 }
 
 // FixJobSpec builds a fix job: LOW priority, FixTier (flash for a
@@ -250,7 +261,7 @@ const prFixTask = `You are an auto-fix job of the factory auditor (spec §6.12).
 Steps:
 1. Clone fresh into %s/<branch-name-with-slashes-as-dashes> (gh repo clone), create branch %s from origin/master. Never touch /home/price/temp/factory.
 2. Make the change below. Touch only these files unless strictly necessary: %s. Run gofumpt and ` + "`make ci`" + `; it must pass.
-3. Commit, then ` + "`git push -u origin %s`" + `. Never push to master, never force-push, never open or merge a PR, never deploy: the factory checks your diff (at most %d changed lines; no spend/budget/throttle, secrets, auth, deploy/merge procedure or auditor files) and queues the merge itself.
+3. Commit, then ` + "`git push -u origin %s`" + `. Never push to master, never force-push, never open or merge a PR, never deploy: the factory queues the merge itself, and CI's required "audit-guardrail" check (built from master, not your branch) refuses the diff unless it is at most %d changed lines, text only, and touches no spend/budget/throttle, secrets, auth, CI, deploy/merge procedure or auditor files. Never edit .github/, Makefile or the checker.
 4. Remove your clone, then report status done with result {"branch": ..., "head": <full sha>, "files": [...], "change": "<one paragraph>"}. If the change cannot be done within these limits, report failed and explain.
 
 The change: %s

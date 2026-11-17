@@ -87,7 +87,7 @@ var Denylist = []Area{
 		Name: "auditor rules, guardrails and schedule",
 		Paths: []string{
 			"internal/auditor/", "internal/factoryapp/auditor.go", "internal/factoryapp/auditor_test.go",
-			"cmd/factory/audit.go", "internal/jobs/schedules.go",
+			"cmd/factory/audit.go", "cmd/auditcheck/", "internal/jobs/schedules.go",
 		},
 		Keywords: []string{"auditor", "guardrail", "denylist", "audit schedule", "schedule"},
 	},
@@ -182,10 +182,12 @@ func ChangedLines(files []FileStat) (int, bool) {
 	return n, true
 }
 
-// CheckDiff is the code-enforced gate on a finished fix branch: the real
-// diff against master must be non-empty, text-only, at most maxLines
-// changed lines, and touch no denylisted path. maxLines is clamped to
-// HardMaxChangedLines.
+// CheckDiff is the code-enforced gate on a fix branch's real diff against
+// master: non-empty, text-only, at most maxLines changed lines, and no
+// denylisted path (either side of a rename). maxLines is clamped to
+// HardMaxChangedLines. It runs in CI for auto/audit-* branches
+// (cmd/auditcheck built from master, .github/workflows/audit-guardrail.yml) - never
+// in the factory service, which does no git work.
 func CheckDiff(files []FileStat, maxLines int) error {
 	if maxLines <= 0 || maxLines > HardMaxChangedLines {
 		maxLines = HardMaxChangedLines
@@ -225,8 +227,10 @@ type Plan struct {
 }
 
 // PlanContext carries what CheckPlan validates cleanup targets against:
-// only targets the deterministic snapshot itself classified as dead/stale
-// are acceptable - never a target named by LLM prose.
+// only targets the structured snapshot classified as dead/stale are
+// acceptable - never a target named by LLM prose. Worktrees come from the
+// audit job's reported scan, validated by ValidateWorktrees (under the
+// root) and admitted only when flagged merged AND clean.
 type PlanContext struct {
 	MaxLines     int
 	WorktreeRoot string

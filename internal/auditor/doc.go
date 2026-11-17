@@ -5,9 +5,11 @@
 // "obvious" fixes on its own - but only inside guardrails that are
 // enforced here, in code, not in a prompt:
 //
-//   - a changed-line cap and a forbidden path/area denylist checked against
-//     the real git diff of a fix branch before it may enter the merge queue
-//     (guardrails.go: CheckDiff, CheckPlan);
+//   - a forbidden path/area denylist and line cap checked on the fix PLAN
+//     before any fix job starts (guardrails.go: CheckPlan), and on the
+//     branch's real diff by CI's required audit-guardrail check, which
+//     builds cmd/auditcheck (CheckDiff) from MASTER for auto/audit-*
+//     branches (.github/workflows/audit-guardrail.yml);
 //   - a hard per-run cap on auto-fixes (RunCap, HardMaxAutoFixes);
 //   - a per-run cost_usd budget meter (Meter).
 //
@@ -16,6 +18,12 @@
 // auto-fix can never edit the auditor's own rules, guardrails or schedule.
 // Runtime knobs (schedule, budget) come from the factory's environment
 // (config.go), which no worker job can write.
+//
+// The package runs no git and no subprocesses: the factory service does no
+// git work at all. Every git operation (the worktree scan, cleanups, the
+// fix branch, the diff check) happens inside jobs on a foreman or in CI;
+// the worktree scan comes back as structured data in the audit job's
+// result (worktrees.go) and is validated before anything acts on it.
 //
 // The package is storage-agnostic: snapshot.go reads the factory's sqlite
 // files through *sql.DB (so the dry run can open them read-only), dedup.go

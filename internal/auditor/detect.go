@@ -385,12 +385,12 @@ func detectHeld(snap Snapshot, _ DetectOptions) []Finding {
 		if j.State != "held" {
 			continue
 		}
-		age := snap.Now.Sub(j.CreatedAt)
-		if j.TaskID != "" && !j.TaskOpen && j.CreatedBy != "ui" && age > 6*time.Hour {
+		age := snap.Now.Sub(heldSince(j))
+		if isDeadHeld(j, snap.Now) {
 			deadIDs = append(deadIDs, j.ID)
 			continue
 		}
-		if age > 6*time.Hour {
+		if age > DeadHeldAfter {
 			longIDs = append(longIDs, j.ID)
 			reasons = append(reasons, j.ID+": "+clip(j.HeldReason, 100))
 			if age > oldest {
