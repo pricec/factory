@@ -18,7 +18,7 @@ Hard rules (they hold in every step):
   `checkout`, `switch`, `reset`, `stash`, `commit`, `clean`, `rebase` or
   `merge` there. The only allowed use is the read-only fetch in step 3, which
   reads it as a remote and writes nothing to it.
-- **Never push to `master` directly, and never force-push anything**
+- **Never push to the default branch (`master`) directly, and never force-push anything**
   (`--force`, `--force-with-lease`, `+refspec`). Master changes only through
   `gh pr merge --merge`.
 - **Work is never left unpushed.** If the requested commit exists only
@@ -53,10 +53,13 @@ mkdir -p "$EV"
 ## 1. Preflight
 
 ```sh
-gh auth status && go version && sudo -n true
-# Build the account selector from factory master (public repo: any account can read it).
-rm -rf "$EV/ghas-src" && git clone -q --depth 1 https://github.com/pricec/factory "$EV/ghas-src" &&
-  (cd "$EV/ghas-src" && go build -o "$EV/ghas" ./cmd/ghas) && rm -rf "$EV/ghas-src"
+gh auth status && go version
+[ "$REPO" != pricec/factory ] || sudo -n true     # only the factory deploy needs sudo
+# Build the merge tools from factory master (public repo: any account can read it).
+# They are built here, never from $WORK: the repo being merged is usually not
+# pricec/factory and has no cmd/ghas or cmd/cigate.
+rm -rf "$EV/tools-src" && git clone -q --depth 1 --branch master https://github.com/pricec/factory "$EV/tools-src" &&
+  (cd "$EV/tools-src" && go build -o "$EV/ghas" ./cmd/ghas && go build -o "$EV/cigate" ./cmd/cigate) && rm -rf "$EV/tools-src"
 GHAS="$EV/ghas -repo $REPO"
 $GHAS -login | tee "$EV/gh-account"     # the account every later step acts as
 ```
@@ -81,13 +84,26 @@ $GHAS git fetch origin --prune
 
 Every later command runs inside `$WORK`.
 
+`$BASE` is the repo's default branch, read once and used everywhere below
+instead of a hardcoded name (for `pricec/factory` it is `master`):
+
+```sh
+BASE=$($GHAS gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name)
+test -n "$BASE"
+```
+
+If `$BASE` is empty: **STOP** (`preflight: no default branch for $REPO`).
+
 ## 3. Verify the head; push the branch first if needed
 
 ```sh
 REMOTE=$($GHAS git ls-remote origin "refs/heads/$BRANCH" | cut -f1)
 # The requested commit, if it exists only locally: read-only fetch of the
 # branch from the operator repository's object store (writes only to $WORK).
-git fetch /home/price/temp/factory "refs/heads/$BRANCH:refs/local/$BRANCH" 2>/dev/null || true
+# Only for pricec/factory: the operator checkout is that repo, and a same-named
+# branch of it is not a commit of any other repo.
+[ "$REPO" != pricec/factory ] ||
+  git fetch /home/price/temp/factory "refs/heads/$BRANCH:refs/local/$BRANCH" 2>/dev/null || true
 LOCAL=$(git rev-parse -q --verify "refs/local/$BRANCH^{commit}" || true)
 ```
 
@@ -119,16 +135,16 @@ If that fails: **STOP** (head drift).
 ```sh
 TITLE=${NOTE:-$BRANCH}
 { echo "Merge request $MR (factory merge queue, docs/merging.md)."; echo
-  echo "Commits:"; git log --oneline --no-merges "origin/master..$FULL"; } > "$EV/pr-body.md"
+  echo "Commits:"; git log --oneline --no-merges "origin/$BASE..$FULL"; } > "$EV/pr-body.md"
 PR=$($GHAS gh pr list -R "$REPO" --head "$BRANCH" --state open --json number -q '.[0].number')
-[ -n "$PR" ] || PR=$($GHAS gh pr create -R "$REPO" --base master --head "$BRANCH" \
+[ -n "$PR" ] || PR=$($GHAS gh pr create -R "$REPO" --base "$BASE" --head "$BRANCH" \
     --title "$TITLE" --body-file "$EV/pr-body.md" | grep -o '[0-9]*$')
 test "$($GHAS gh pr view "$PR" -R "$REPO" --json headRefOid -q .headRefOid)" = "$FULL"
 ```
 
 If the PR's head is not `$FULL`, **STOP** (head drift).
 
-If `git log origin/master..$FULL` is empty, the branch is already merged.
+If `git log origin/$BASE..$FULL` is empty, the branch is already merged.
 **STOP** (`nothing to merge`).
 
 ## 5. Wait for green checks
@@ -142,9 +158,15 @@ once (`gh run rerun <id> --failed`), waits for the fresh attempt, and only
 then decides:
 
 ```sh
-$GHAS go run ./cmd/cigate -repo "$REPO" -sha "$FULL" | tee "$EV/cigate.json"   # exit 0 green, 1 red/no checks/timeout
+$GHAS "$EV/cigate" -repo "$REPO" -branch "$BRANCH" -sha "$FULL" | tee "$EV/cigate.json"   # exit 0 green, 1 red/no checks/timeout
 $GHAS gh pr view "$PR" -R "$REPO" --json mergeable,mergeStateStatus
 ```
+
+`cigate` is the binary built from factory master in step 1. Run it exactly
+as shown, from any directory. **Never** run `cigate` from source, and never run
+any `go` command, in `$WORK`: the repo being merged may have no `go.mod` and no
+`cmd/cigate`. It takes the target repo, branch and head as arguments and
+checks only that repo's runs for that commit.
 
 Green means: `cigate` exits 0 (every run passed, at least one ran, possibly
 after the one rerun) and `mergeable` is `MERGEABLE`. A rerun that turned
@@ -156,8 +178,9 @@ If `cigate` reports `red` (red in the rerun too), or the PR conflicts:
 
 - **Small and clearly in scope.** The failure or conflict is in files the
   branch already changes, and the fix is a few lines with no contract or
-  behavior change. Fix it in `$WORK` on the branch. Bring master in with
-  `git merge origin/master`, never a rebase. Run `make ci`, then push the
+  behavior change. Fix it in `$WORK` on the branch. Bring the base branch in with
+  `git merge origin/$BASE`, never a rebase. Run the repo's own CI command (`make ci` if it has one, otherwise what its
+  workflow runs), then push the
   branch normally (`$GHAS git push`, no force). Go back to the start of step 5. Each extra
   commit goes in the report.
 - **Anything else: STOP** (`checks red after rerun: <tests that failed both
@@ -168,14 +191,14 @@ If `cigate` reports `red` (red in the rerun too), or the PR conflicts:
 ```sh
 $GHAS gh pr merge "$PR" -R "$REPO" --merge --delete-branch=false
 MERGED=$($GHAS gh pr view "$PR" -R "$REPO" --json mergeCommit -q .mergeCommit.oid)
-$GHAS git fetch origin && git merge-base --is-ancestor "$MERGED" origin/master
+$GHAS git fetch origin && git merge-base --is-ancestor "$MERGED" "origin/$BASE"
 ```
 
 If `gh pr merge` refuses (branch protection, the branch moved), **STOP**.
 Never retry with admin flags.
 
-Only `pricec/factory` has a deploy procedure. For any other repo, skip to
-step 8.
+Only `pricec/factory` has a deploy procedure. For any other repo, skip step 7
+and step 8's factory re-check.
 
 ## 7. Deploy master
 
@@ -188,7 +211,9 @@ before the manifest) are part of this step. A deploy failure means
 
 ## 8. Verify and report
 
-For `pricec/factory`, re-check right before reporting:
+For any other repo there is nothing to deploy or re-check: remove `$WORK` and
+report `done` once the merge commit is on `origin/$BASE`. For `pricec/factory`,
+re-check right before reporting:
 
 ```sh
 systemctl is-active factory
@@ -208,6 +233,9 @@ Call `report_result` once, at the end:
   request only then (a `done` without `merged:true` is `needs_attention`). Summary (240 chars max):
   `landed $MR: PR #<n> merged <MERGED:12>; deployed <build id>; exe sha ok, UI 200, journal clean`.
   `result`: `{merged: true, pr, merge_commit, deployed_commit, build_id, factory_exe_sha256, evidence_dir}`.
+  For any other repo, the summary is
+  `landed $MR: PR #<n> merged <MERGED:12> into $REPO@$BASE (no deploy)` and
+  `result` is `{merged: true, pr, merge_commit, evidence_dir}`.
   If `cigate` reran and went green, add `ci_rerun: true` and `ci_flaked: [tests]`
   to `result` and append `; CI flake rerun: <tests>` to the summary, so flakes stay visible.
 - **failed**: anything that stopped. The summary starts with the stage, for

@@ -36,6 +36,7 @@ func run(ctx context.Context, args []string, gh cigate.GH, stdout, stderr io.Wri
 	fs.SetOutput(stderr)
 	repo := fs.String("repo", "", "OWNER/REPO")
 	sha := fs.String("sha", "", "full head SHA")
+	branch := fs.String("branch", "", "branch under merge (optional; echoed in the verdict)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -49,6 +50,7 @@ func run(ctx context.Context, args []string, gh cigate.GH, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "cigate: %v\n", err)
 		return 2
 	}
+	res.Branch = *branch
 	enc := json.NewEncoder(stdout)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(res)

@@ -58,6 +58,8 @@ func (r Run) red() bool {
 // Result is the gate's verdict, printed as JSON for the merge report.
 type Result struct {
 	Verdict      string   `json:"verdict"`
+	Repo         string   `json:"repo,omitempty"`
+	Branch       string   `json:"branch,omitempty"`
 	Head         string   `json:"head"`
 	Rerun        bool     `json:"rerun"`
 	RerunRuns    []int64  `json:"rerun_runs,omitempty"`
@@ -197,7 +199,7 @@ func redRuns(runs []Run) []Run {
 // Check returns the gate verdict for sha. Existing red runs are never
 // final: they are re-run once and the fresh attempt decides.
 func (g *Gate) Check(ctx context.Context, sha string) (Result, error) {
-	res := Result{Head: sha}
+	res := Result{Head: sha, Repo: g.Repo}
 	runs, v, err := g.settle(ctx, sha, nil)
 	if err != nil {
 		return res, err
