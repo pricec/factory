@@ -107,6 +107,9 @@ type App struct {
 	// modelCfg is the settings-synced role-model resolution (spec §6.5,
 	// settings.go): brain + worker tiers.
 	modelCfg *modelConfig
+	// claudeAuth is the Claude CLI auth health + factory token holder
+	// (spec §13.3, claudeauth.go).
+	claudeAuth *claudeAuth
 	// brainInboxID is the foreman's local durable brain queue (spec §3.3,
 	// 2026-11-15 amendment): the sub-inbox "<inboxID>:brain" on the same
 	// inbox store. Brain-delegated envelopes are enqueued here and acked
@@ -303,12 +306,14 @@ func New(cfg Config) (*App, error) {
 		standard: cfg.WorkerModel,
 		hardest:  cfg.WorkerHardestModel,
 	})
+	a.claudeAuth = newClaudeAuth()
 	a.brain = &BrainRunner{
-		Model:   cfg.BrainModel,
-		ModelFn: a.modelCfg.Brain,
-		MCPURL:  localBaseURL(cfg.Addr) + "/v1/mcp/foreman",
-		Bearer:  a.brainToken,
-		WorkDir: filepath.Join(cfg.DataDir, "brain"),
+		ExtraEnv: a.claudeAuth.Env,
+		Model:    cfg.BrainModel,
+		ModelFn:  a.modelCfg.Brain,
+		MCPURL:   localBaseURL(cfg.Addr) + "/v1/mcp/foreman",
+		Bearer:   a.brainToken,
+		WorkDir:  filepath.Join(cfg.DataDir, "brain"),
 	}
 	a.poster = &Poster{FactoryURL: cfg.FactoryURL, Bearer: a.paired.Bearer}
 	a.brain.OnUsage = func(ctx context.Context, u claudecli.Usage) {
@@ -455,7 +460,11 @@ func (a *App) Run(ctx context.Context) error {
 		log.Printf("foremanapp: initial capabilities push: %v", err)
 	}
 	var wg sync.WaitGroup
-	wg.Add(7)
+	wg.Add(8)
+	go func() {
+		defer wg.Done()
+		a.claudeAuthLoop(ctx)
+	}()
 	go func() {
 		defer wg.Done()
 		a.updater.Run(ctx)
@@ -871,7 +880,7 @@ func (a *App) pushCapabilities(ctx context.Context) error {
 	caps := detectCapabilities()
 	caps["build"] = a.build
 	status, body, err := postJSONResponse(ctx, a.factoryURL+"/v1/foreman/capabilities", a.paired.Bearer,
-		map[string]any{"capabilities": caps, "active_jobs": a.liveJobIDs()})
+		map[string]any{"capabilities": caps, "active_jobs": a.liveJobIDs(), "claude_auth": a.claudeAuth.report(a.claudeTiers())})
 	if err != nil {
 		return err
 	}
@@ -879,6 +888,7 @@ func (a *App) pushCapabilities(ctx context.Context) error {
 	if err != nil {
 		log.Printf("foremanapp: auto-update: %v (ignored)", err)
 	}
+	a.observeClaudeDirective(ctx, parseClaudeDirective(status, body))
 	a.updater.Observe(adv)
 	a.updater.Confirm(ctx)
 	return nil

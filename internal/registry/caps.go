@@ -81,7 +81,15 @@ type refreshBody struct {
 	// reconciliation). nil (absent) means an older foreman that does not
 	// report: nothing is reconciled.
 	ActiveJobs *[]string `json:"active_jobs,omitempty"`
+	// ClaudeAuth is the foreman's Claude CLI auth health report (spec
+	// §13.3); absent from older foremen.
+	ClaudeAuth json.RawMessage `json:"claude_auth,omitempty"`
 }
+
+// ExtensionFunc sees the refresh's optional `claude_auth` report (nil
+// when absent) after the upsert and returns extra top-level fields for
+// the response body (nil or empty = none). Spec §13.3.
+type ExtensionFunc func(ctx context.Context, identity string, claudeAuth json.RawMessage) map[string]any
 
 // ReconcileFunc receives the foreman's claimed in-flight jobs on a refresh.
 type ReconcileFunc func(ctx context.Context, identity string, active []string) error
@@ -114,6 +122,13 @@ func RefreshHandlerWithAdvert(authz AuthzFunc, upsert func(ctx context.Context, 
 // reconciliation: when the body carries active_jobs, reconcile runs after
 // the upsert (spec §6.2).
 func RefreshHandlerReconciling(authz AuthzFunc, upsert func(ctx context.Context, identity string, caps map[string]string) error, advert AdvertFunc, reconcile ReconcileFunc) http.Handler {
+	return RefreshHandlerExtended(authz, upsert, advert, reconcile, nil)
+}
+
+// RefreshHandlerExtended is RefreshHandlerReconciling plus the extension
+// hook (spec §13.3): ext's fields join the response body, which turns a
+// 204 into a 200 when the advert is empty but ext has something to say.
+func RefreshHandlerExtended(authz AuthzFunc, upsert func(ctx context.Context, identity string, caps map[string]string) error, advert AdvertFunc, reconcile ReconcileFunc, ext ExtensionFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "POST required", false)
@@ -143,17 +158,24 @@ func RefreshHandlerReconciling(authz AuthzFunc, upsert func(ctx context.Context,
 				return
 			}
 		}
-		var fu *ForemanUpdate
-		if advert != nil {
-			fu = advert()
+		resp := map[string]any{}
+		if ext != nil {
+			for k, v := range ext(r.Context(), identity, body.ClaudeAuth) {
+				resp[k] = v
+			}
 		}
-		if fu == nil {
+		if advert != nil {
+			if fu := advert(); fu != nil {
+				resp["foreman_update"] = fu
+			}
+		}
+		if len(resp) == 0 {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		if err := json.NewEncoder(w).Encode(map[string]any{"foreman_update": fu}); err != nil {
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
 			log.Printf("registry: encode refresh response: %v", err)
 		}
 	})

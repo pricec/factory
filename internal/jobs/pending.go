@@ -32,6 +32,11 @@ type PendingPicker struct {
 	// Hold, when set and true, skips the whole pass: no dispatching while
 	// the usage-limit pause (token throttle S5) is active.
 	Hold func(ctx context.Context) bool
+	// Exclude, when set, reports that foremanID must not take spec now
+	// (spec §13.3: its Claude CLI is logged out and the job would run
+	// claude there). A pinned job whose pin is excluded stays pending; a
+	// matched job is matched among the remaining foremen.
+	Exclude func(ctx context.Context, spec wire.JobSpec, foremanID string) bool
 }
 
 // NewPendingPicker creates a picker over store dispatching via matcher.
@@ -88,6 +93,9 @@ func (p *PendingPicker) Pump(ctx context.Context) (int, error) {
 			if !found || !pin.Online {
 				continue
 			}
+			if p.Exclude != nil && p.Exclude(ctx, c.spec, pin.ID) {
+				continue
+			}
 			if err := p.store.Dispatch(ctx, c.id, pin.ID); err != nil {
 				return dispatched, err
 			}
@@ -95,7 +103,14 @@ func (p *PendingPicker) Pump(ctx context.Context) (int, error) {
 			dispatched++
 			continue
 		}
-		f, ok, err := p.matcher.Match(ctx, c.spec.Requires)
+		var f registry.Foreman
+		var ok bool
+		if em, isEM := p.matcher.(registry.ExcludingMatcher); isEM && p.Exclude != nil {
+			spec := c.spec
+			f, ok, err = em.MatchExcept(ctx, spec.Requires, func(f registry.Foreman) bool { return p.Exclude(ctx, spec, f.ID) })
+		} else {
+			f, ok, err = p.matcher.Match(ctx, c.spec.Requires)
+		}
 		if err != nil {
 			return dispatched, err
 		}

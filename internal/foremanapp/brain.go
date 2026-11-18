@@ -63,6 +63,9 @@ type BrainRunner struct {
 	// ClaudeBin is the Claude Code CLI binary; "" means "claude" on PATH.
 	// Used only by sessions routed to the claude runner.
 	ClaudeBin string
+	// ExtraEnv, when set, supplies env for claude sessions (spec §13.3:
+	// the factory's CLAUDE_CODE_OAUTH_TOKEN).
+	ExtraEnv func() map[string]string
 	// MCPURL is the foreman brain MCP endpoint (/v1/mcp/foreman).
 	MCPURL string
 	// Bearer is the brain token (a local foreman:{id} credential).
@@ -149,11 +152,19 @@ func (b *BrainRunner) runClaude(ctx context.Context, prompt string) (string, err
 		Prompt:     prompt,
 		Timeout:    brainTimeout,
 		Label:      "brain session",
+		ExtraEnv:   b.extraEnv(),
 	})
 	if b.OnUsage != nil && !usage.IsZero() {
 		b.OnUsage(ctx, usage)
 	}
 	return text, err
+}
+
+func (b *BrainRunner) extraEnv() map[string]string {
+	if b.ExtraEnv == nil {
+		return nil
+	}
+	return b.ExtraEnv()
 }
 
 // writeClaudeConfig regenerates the Claude Code MCP config at

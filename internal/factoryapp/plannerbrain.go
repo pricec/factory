@@ -58,6 +58,9 @@ const (
 // the operator with notify_operator. It implements routing.Brain
 // semantics for planner:main.
 type PlannerBrain struct {
+	// ExtraEnv, when set, supplies env for claude sessions (spec §13.3:
+	// the stored CLAUDE_CODE_OAUTH_TOKEN).
+	ExtraEnv func() map[string]string
 	// Model is the child CLI model string; "" -> the CLI's default.
 	Model string
 	// ModelFn, when set, resolves the model per session - the settings
@@ -404,11 +407,19 @@ func (b *PlannerBrain) runClaude(ctx context.Context, prompt string) (string, er
 		Prompt:     prompt,
 		Timeout:    plannerBrainTimeout,
 		Label:      "planner session",
+		ExtraEnv:   b.extraEnv(),
 	})
 	if b.OnUsage != nil && !usage.IsZero() {
 		b.OnUsage(ctx, b.taskID, usage)
 	}
 	return text, err
+}
+
+func (b *PlannerBrain) extraEnv() map[string]string {
+	if b.ExtraEnv == nil {
+		return nil
+	}
+	return b.ExtraEnv()
 }
 
 // writeConfig regenerates the opencode project config at

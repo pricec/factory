@@ -31,6 +31,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pricec/factory/internal/claudeauth"
+
 	"github.com/pricec/factory/internal/buildinfo"
 )
 
@@ -94,6 +96,21 @@ func parseCapsResponse(status int, body []byte) (*UpdateAdvert, error) {
 		return nil, fmt.Errorf("capabilities response: %w", err)
 	}
 	return r.ForemanUpdate, nil
+}
+
+// parseClaudeDirective extracts the claude_auth block of a caps push
+// response (spec §13.3); nil when absent or unreadable.
+func parseClaudeDirective(status int, body []byte) *claudeauth.Directive {
+	if status != http.StatusOK || len(strings.TrimSpace(string(body))) == 0 {
+		return nil
+	}
+	var r struct {
+		ClaudeAuth *claudeauth.Directive `json:"claude_auth"`
+	}
+	if err := json.Unmarshal(body, &r); err != nil {
+		return nil
+	}
+	return r.ClaudeAuth
 }
 
 // updateMarker is bin/update-pending.json (C5, C7, C8).

@@ -381,6 +381,18 @@ func (a *App) postChat(w http.ResponseWriter, r *http.Request, text, taskID stri
 		writeError(w, http.StatusBadRequest, "bad_request", "text: required")
 		return
 	}
+	// A Claude token or login code is consumed by the re-login flow
+	// (spec §13.3) and never stored in a thread or shown to the planner.
+	if taskID != "" {
+		if _, err := a.tasks.GetTask(ctx, taskID); errors.Is(err, tasks.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "unknown_task", "unknown task "+taskID)
+			return
+		}
+	}
+	if posted, tid, ok := a.interceptClaudeChat(ctx, text, taskID); ok {
+		writeJSON(w, http.StatusCreated, chatResponse{MessageEnvelope: posted, TaskID: tid})
+		return
+	}
 	if taskID != "" {
 		t, err := a.tasks.GetTask(ctx, taskID)
 		if errors.Is(err, tasks.ErrNotFound) {
