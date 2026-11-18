@@ -91,7 +91,10 @@ func finishJob(t *testing.T, a *App, jobID, status string) {
 	if err := a.jobs.ApplyEvent(ctx, jobID, "started"); err != nil {
 		t.Fatal(err)
 	}
-	res := wire.JobResult{JobID: jobID, Status: status, Summary: "merged and deployed"}
+	res := wire.JobResult{
+		JobID: jobID, Status: status, Summary: "merged and deployed",
+		Result: json.RawMessage(`{"merged":true,"merge_commit":"0123456789ab"}`),
+	}
 	if status == wire.StatusFailed {
 		res.Summary = "head drift: origin has 89abcdef"
 		res.Error = &wire.JobError{Kind: wire.KindOther, Message: "head drift"}
@@ -397,4 +400,43 @@ func TestMergeQueueOfflineForeman(t *testing.T) {
 		t.Fatalf("second dispatch %q", id)
 	}
 	assertOneMerging(t, a, 1)
+}
+
+// TestMergeQueueDoneWithoutMergedIsNotLanded: a merge job that ends done
+// without result.merged:true (the 2026-11-18 incident: "nothing was merged
+// due to conflicts" reported as done) must not land the request; it goes
+// needs_attention, classified by result.reason, and the queue moves on.
+func TestMergeQueueDoneWithoutMergedIsNotLanded(t *testing.T) {
+	for _, tc := range []struct {
+		name, result, failure string
+	}{
+		{"merged false", `{"merged":false,"reason":"conflict"}`, jobs.MergeFailureConflict},
+		{"no result", ``, jobs.MergeFailureOther},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newMergeApp(t)
+			ctx := context.Background()
+			first, second := queueMerge(t, a, "feat/one"), queueMerge(t, a, "feat/two")
+			if got := pass(t, a); got != first.ID {
+				t.Fatalf("dispatched %q, want %s", got, first.ID)
+			}
+			jobID := getMerge(t, a, first.ID).JobID
+			if err := a.jobs.ApplyEvent(ctx, jobID, "started"); err != nil {
+				t.Fatal(err)
+			}
+			res := wire.JobResult{JobID: jobID, Status: wire.StatusDone, Summary: "nothing merged: conflicts with master"}
+			if tc.result != "" {
+				res.Result = json.RawMessage(tc.result)
+			}
+			payload, _ := json.Marshal(res)
+			a.handleEnvelope(ctx, wire.MessageEnvelope{Type: "job.result", JobID: jobID, Payload: payload}, map[string]bool{})
+			m := getMerge(t, a, first.ID)
+			if m.State != jobs.MergeNeedsAttention || m.Failure != tc.failure {
+				t.Fatalf("state=%s failure=%s, want needs_attention/%s (%+v)", m.State, m.Failure, tc.failure, m)
+			}
+			if got := pass(t, a); got != second.ID {
+				t.Fatalf("queue did not move on: dispatched %q, want %s", got, second.ID)
+			}
+		})
+	}
 }

@@ -78,10 +78,14 @@ func ClassifyMergeFailure(job Job) string {
 	}
 	last := results[len(results)-1]
 	var body struct {
-		Stage string `json:"stage"`
+		Stage  string `json:"stage"`
+		Reason string `json:"reason"`
 	}
 	if len(last.Result) > 0 && json.Unmarshal(last.Result, &body) == nil {
 		stage := strings.ToLower(strings.TrimSpace(body.Stage))
+		if stage == "" {
+			stage = strings.ToLower(strings.TrimSpace(body.Reason))
+		}
 		switch stage {
 		case MergeFailureCI, MergeFailureConflict, MergeFailureHeadDrift, MergeFailureNothing,
 			MergeFailurePreflight, MergeFailureMerge, MergeFailureDeploy:

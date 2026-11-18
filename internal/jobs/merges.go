@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/oklog/ulid/v2"
+	"github.com/pricec/factory/internal/wire"
 )
 
 // Merge request states (spec §6.11).
@@ -56,7 +57,8 @@ func MergeTerminal(state string) bool {
 }
 
 // MergeStateForJob maps a merge job's terminal job state to the request's
-// terminal state (spec §6.11): done -> landed; failed|timed_out|dead ->
+// terminal state (spec §6.11): done -> landed ONLY when the job's structured
+// result says merged:true (see MergeStateForJobResult); failed|timed_out|dead ->
 // needs_attention; cancelled -> cancelled. superseded (an operator replaced
 // the merge job by hand) also needs attention: the queue cannot know
 // whether the replacement merged. ok is false for non-terminal states
@@ -65,13 +67,47 @@ func MergeTerminal(state string) bool {
 func MergeStateForJob(jobState string) (state string, ok bool) {
 	switch jobState {
 	case StateDone:
-		return MergeLanded, true
+		return MergeLanded, true // callers holding the job use MergeStateForJobResult
 	case StateFailed, StateTimedOut, StateDead, StateSuperseded:
 		return MergeNeedsAttention, true
 	case StateCancelled:
 		return MergeCancelled, true
 	}
 	return "", false
+}
+
+// MergeLandedByResult reports whether the job's last reported result
+// carries merged:true (spec §6.11). A missing, untyped, malformed or
+// merged:false result is not a landing, whatever the job's state.
+func MergeLandedByResult(job Job) bool {
+	var results []struct {
+		Status string          `json:"status"`
+		Result json.RawMessage `json:"result"`
+	}
+	if json.Unmarshal(job.Results, &results) != nil || len(results) == 0 {
+		return false
+	}
+	last := results[len(results)-1]
+	if last.Status != wire.StatusDone || len(last.Result) == 0 {
+		return false
+	}
+	var body struct {
+		Merged *bool `json:"merged"`
+	}
+	if json.Unmarshal(last.Result, &body) != nil || body.Merged == nil {
+		return false
+	}
+	return *body.Merged
+}
+
+// MergeStateForJobResult is MergeStateForJob for a job in hand: a done job
+// lands its request only when MergeLandedByResult; a done job that did not
+// report merged:true needs attention (it stopped without merging).
+func MergeStateForJobResult(job Job, jobState string) (string, bool) {
+	if jobState == StateDone && !MergeLandedByResult(job) {
+		return MergeNeedsAttention, true
+	}
+	return MergeStateForJob(jobState)
 }
 
 // DefaultMergeRepo is the repo a merge request targets when none is given
@@ -607,11 +643,24 @@ func (s *Store) FinishMergeForJob(ctx context.Context, jobID, jobState string) (
 	if err != nil || !ok || mr.State != MergeMerging {
 		return mr, false, err
 	}
+	job, found, err := s.Get(ctx, jobID)
+	if err != nil {
+		return mr, false, err
+	}
 	to, ok := MergeStateForJob(jobState)
+	if found {
+		to, ok = MergeStateForJobResult(job, jobState)
+	} else if jobState == StateDone {
+		to = MergeNeedsAttention // no job record, so no merged:true to trust
+	}
 	if !ok {
 		return mr, false, nil
 	}
-	return s.TransitionMerge(ctx, mr.ID, to, s.mergeOutcome(ctx, jobID, jobState))
+	out := s.mergeOutcome(ctx, jobID, jobState)
+	if jobState == StateDone && to == MergeNeedsAttention {
+		out = "job " + jobID + " done but NOT merged (no merged:true result)" + strings.TrimPrefix(out, "job "+jobID+" done")
+	}
+	return s.TransitionMerge(ctx, mr.ID, to, out)
 }
 
 // mergeOutcome renders the request's result summary from its job: the

@@ -14,12 +14,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/pricec/factory/internal/factoryapp"
 	"github.com/pricec/factory/internal/foremanapp"
+	"github.com/pricec/factory/internal/jobs"
 	"github.com/pricec/factory/internal/ocusage"
 	"github.com/pricec/factory/internal/wire"
 	"github.com/pricec/factory/internal/workerharness"
@@ -107,7 +109,7 @@ func boot(t *testing.T) *stack {
 	// A prompt naming fakeDriftBranch fails like a merge job that found
 	// head drift (spec §6.11, docs/merging.md step 3): exit 1, reason on
 	// stdout - the harness posts a failed result of kind crash.
-	script := "#!/bin/sh\ncase \"$*\" in *" + fakeDriftBranch + "*) printf '" + fakeDriftSummary + "'; exit 1;; esac\nprintf '" + fakeSummary + "'\n"
+	script := "#!/bin/sh\ncase \"$*\" in *" + fakeDriftBranch + "*) printf '" + fakeDriftSummary + "'; exit 1;; *merge\\ job\\ for\\ factory\\ merge\\ request*) sleep 3;; esac\nprintf '" + fakeSummary + "'\n"
 	if err := os.WriteFile(s.fakeOpencode, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake opencode: %v", err)
 	}
@@ -153,6 +155,11 @@ func boot(t *testing.T) *stack {
 		if hook != nil {
 			hook(spec)
 		}
+		if spec.CreatedBy == jobs.MergeJobCreatedBy && !strings.Contains(spec.Task, fakeDriftBranch) {
+			// A merge job carries a typed result_schema and lands its
+			// request only on merged:true: report like a real merge job.
+			go s.reportMerged(spec.ID, bearer)
+		}
 		c := orig(spec, bearer)
 		s.mu.Lock()
 		s.harnessModels[spec.ID] = c.Model
@@ -177,6 +184,19 @@ func boot(t *testing.T) *stack {
 		_ = fac.Close()
 	})
 	return s
+}
+
+// reportMerged is the fake merge worker's report_result call with the
+// typed merged:true result; the fake opencode sleeps so it lands first.
+func (s *stack) reportMerged(jobID, bearer string) {
+	time.Sleep(500 * time.Millisecond)
+	s.rpc(s.workerMCP(), bearer, "tools/call", map[string]any{
+		"name": "report_result",
+		"arguments": map[string]any{
+			"status": "done", "summary": fakeSummary,
+			"result": map[string]any{"merged": true, "merge_commit": "0123456789ab"},
+		},
+	})
 }
 
 // MCP endpoint bases for the three surfaces.
