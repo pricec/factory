@@ -164,6 +164,26 @@ envelopes, and output echoing it is replaced by `[REDACTED]`.
 - **Deleting** a secret a queued job still names fails that job at start
   with `could not fetch secrets [name]`; recreate the secret and requeue.
 
+## Claude CLI login ("Not logged in · Please run /login")
+
+No SSH needed (spec §13.3). When a foreman's Claude CLI loses its login,
+the factory holds that foreman's claude jobs (no retries burned) and opens
+a task **Claude login needed: foreman:X** in Needs you, with a sign-in link.
+
+1. Open the link, sign in with the Claude account the factory should use.
+2. Paste the code the page shows as a reply in that task (or the alert).
+   Alternatively run `claude setup-token` anywhere and paste the
+   `sk-ant-oat01-...` token - in that task or any message box.
+
+The factory verifies the token, stores it as the `claude-oauth-token`
+secret (`CLAUDE_CODE_OAUTH_TOKEN`), and every foreman adopts it within
+about a minute, re-checks, and reports in the task; held jobs then run and
+the task closes. Your reply is never stored in the thread. Reply `new link`
+if the link has expired. The token lasts a year; rotate early by pasting a
+new one. Status: `curl $FACTORY/v1/claude-auth`; force a re-check:
+`curl -X POST $FACTORY/v1/claude-auth/check`. Deleting the secret returns
+every host to its own CLI login.
+
 ## Factory auditor
 
 The daily audit (spec §6.12) is configured by the factory service's

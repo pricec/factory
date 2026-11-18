@@ -38,6 +38,20 @@ type CapabilityMatcher struct{ Source ForemanSource }
 // required tag, then picks the deterministic winner by (running_jobs asc,
 // id asc). No qualifying foreman yields (zero, false, nil).
 func (m *CapabilityMatcher) Match(ctx context.Context, requires []string) (Foreman, bool, error) {
+	return m.MatchExcept(ctx, requires, nil)
+}
+
+// ExcludingMatcher is a Matcher that can also skip foremen per call (spec
+// §13.3: a foreman whose Claude CLI is logged out is skipped for jobs that
+// would run claude there).
+type ExcludingMatcher interface {
+	Matcher
+	MatchExcept(ctx context.Context, requires []string, exclude func(Foreman) bool) (Foreman, bool, error)
+}
+
+// MatchExcept is Match that also drops every foreman exclude reports true
+// for (nil exclude = Match).
+func (m *CapabilityMatcher) MatchExcept(ctx context.Context, requires []string, exclude func(Foreman) bool) (Foreman, bool, error) {
 	foremen, err := m.Source.Foremen(ctx)
 	if err != nil {
 		return Foreman{}, false, err
@@ -48,6 +62,9 @@ func (m *CapabilityMatcher) Match(ctx context.Context, requires []string) (Forem
 			continue
 		}
 		if !Capabilities(f.Capabilities).HasAll(requires) {
+			continue
+		}
+		if exclude != nil && exclude(f) {
 			continue
 		}
 		candidates = append(candidates, f)
@@ -64,4 +81,4 @@ func (m *CapabilityMatcher) Match(ctx context.Context, requires []string) (Forem
 	return candidates[0], true, nil
 }
 
-var _ Matcher = (*CapabilityMatcher)(nil)
+var _ ExcludingMatcher = (*CapabilityMatcher)(nil)

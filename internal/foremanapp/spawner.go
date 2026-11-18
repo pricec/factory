@@ -139,6 +139,20 @@ func (a *App) runWorker(spec wire.JobSpec, hcfg workerharness.Config) {
 		hcfg.SecretEnv = env
 		defer func() { hcfg.SecretEnv = nil }()
 	}
+	// Claude runs get the factory's OAuth token (spec §13.3), through
+	// SecretEnv so the harness also scrubs it from the child's output.
+	if workerharness.RunnerFor(hcfg.Model) == workerharness.RunnerClaude && a.claudeAuth != nil {
+		if env := a.claudeAuth.Env(); env != nil {
+			merged := make(map[string]string, len(hcfg.SecretEnv)+len(env))
+			for k, v := range env {
+				merged[k] = v
+			}
+			for k, v := range hcfg.SecretEnv {
+				merged[k] = v // a job's own declared secret wins
+			}
+			hcfg.SecretEnv = merged
+		}
+	}
 	if err := workerharness.Run(a.workerCtx, hcfg); err != nil {
 		if errors.Is(err, workerharness.ErrCancelled) {
 			// Cancelled/superseded at the factory: stopped on purpose, so

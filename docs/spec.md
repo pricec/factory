@@ -2595,7 +2595,8 @@ POST /v1/secrets/gh-token   {"value":"ghp_...","env_var":"GH_TOKEN"}
 **No value echo.** No response on this surface ever contains a secret's
 value - not the upsert response, not the list, not any error. There is
 deliberately NO endpoint on this surface that returns a value; the only
-value-returning route is the job-scoped handout (§13.2). Values are never logged;
+value-returning routes are the job-scoped handout (§13.2) and the
+foreman-scoped Claude token handout (§13.3). Values are never logged;
 errors and logs carry names only. The operator UI Credentials section is
 write-only for values (the input clears on submit).
 
@@ -2644,6 +2645,121 @@ authored text the harness does not scrub: an agent given a credential can
 disclose it. The plaintext 0600 store, the unencrypted handout (use a
 loopback or otherwise trusted link between foreman and factory) and the
 host-trust control plane remain the trust boundary (§13).
+
+### 13.3 Claude CLI auth health and remote re-login (2026-11-18 amendment)
+
+Incident: five jobs in 24h failed with `Not logged in · Please run /login`
+on `foreman:assistant` and `foreman:router`; the only fix was SSH. Package
+`internal/claudeauth` (shared), `internal/factoryapp/claudeauth.go`,
+`internal/foremanapp/claudeauth.go`.
+
+**Credential.** The fleet-wide Claude credential is a long-lived (1-year)
+OAuth token from `claude setup-token`, stored as the §13 secret
+`claude-oauth-token` (env `CLAUDE_CODE_OAUTH_TOKEN`). When it exists, every
+claude child - worker (merged into `SecretEnv`, so the harness redacts it),
+foreman brain and factory planner (`claudecli.Session.ExtraEnv`, redacted
+from error snippets) - runs with it; when it does not, each host's own CLI
+login is used as before. Chosen over driving `/login` per host: one
+operator action fixes every foreman, nothing is written to any host's
+`~/.claude`, and expiry is yearly instead of the ~30-day interactive login.
+
+**Token handout.** `GET /v1/foreman/claude-token` (paired foreman bearer,
+same authz as the capabilities refresh) -> `200 {"value","rev"}`, `404
+unknown_secret` when none is stored, `Cache-Control: no-store`. `rev` is
+the first 12 hex of sha256(updated_at NUL value): a change detector that
+lets the value stay off the caps push. Foremen hold the value in memory
+only.
+
+**Health report.** The 60s capabilities push (§6.7) carries
+`claude_auth: {state: ok|failed|unknown, detail?, checked_at?, token_rev?,
+claude_tiers: [tier...]}`; `claude_tiers` lists the tiers whose current
+worker model is a claude id on that foreman. The response (200; it turns a
+204 into a 200) carries `claude_auth: {token_rev, probe?}`: a changed
+`token_rev` makes the foreman fetch the token (or drop it, `""`) and probe
+at once; `probe: true` asks for a probe now (debounced to 30 s). Older
+foremen send and read neither.
+
+**Probe.** `claude -p --output-format json --no-session-persistence --model
+haiku --strict-mcp-config --tools "" --system-prompt "Reply with the single
+word OK." ping` in a temp dir (~$0.0001, ~2 s). `ok` = exit 0 and
+`is_error` false; `failed` = an auth-failure text (below), an
+`authentication_error` or API status 401/403; anything else (network,
+usage limit, missing CLI) is `unknown`, which never overturns a known
+verdict. Foremen probe at start, every 30 min, on a token change, on
+request, and push the caps at once when the verdict changes.
+
+**Detection.** Auth-failure texts (`claudeauth.IsAuthFailure`): `Not logged
+in · Please run /login`, `please run /login`, `Failed to authenticate. API
+Error: 401|403`, `OAuth (access) token is invalid|has expired|has been
+revoked`, `Invalid API key ·`, `authentication_error`. A failed
+`job.result` matching them, for a job that runs claude on its foreman
+(explicit claude model, or its tier in that foreman's `claude_tiers`;
+unknown tiers count as claude), marks the foreman `failed`, requests a
+probe, and parks the job `held` (`held_reason` prefix `claude auth: `)
+through `RequeueHeld`: no failed state, no retry burned (the §6.4 budget is
+untouched). The hook runs before the §6.4 retry classification, so
+a Claude auth failure (kind `auth` from current harnesses, `crash` from
+older ones) is held for recovery instead of dead-lettered; `auth`-kind
+failures that are NOT these Claude texts (another tool's login) keep the
+§6.4 no-retry rule. Merge jobs are not requeued (§6.11) but still mark the foreman.
+A foreman report of `failed` does the same without a job. A report of `ok`
+clears `failed` only when its `checked_at` is not older than the last
+result-detected failure; until such a report arrives every response asks
+for a probe.
+
+**Routing.** While a foreman is `failed`, for jobs that would run claude on
+it: the create-time admission (§6.10 gate hook) holds a job pinned to it,
+or an unpinned job whose deterministic Matcher pick is it; the pending
+picker skips it (`PendingPicker.Exclude`: a pinned job pends, a matched job
+goes to the next candidate via `MatchExcept`); the releaser keeps such
+held jobs held (reason refreshed) and releases them once the pin is healthy
+or another matching foreman is. Non-claude jobs on the same foreman are
+unaffected. On a `failed -> ok` transition the releaser runs at once. A
+foreman that never reports (older build) cannot confirm recovery: its
+result-detected failure lapses to `unknown` after 30 min and its held
+jobs are retried. The book persists in `inbox.db` settings key
+`claude_auth_state`.
+
+**Operator flow.** The first failure opens ONE task per episode (priority
+1, `needs_operator`, title `Claude login needed: foreman:X`) plus a linked
+P1 alert (source `factory:claude-auth`); further failing foremen are
+announced in the same task. The factory starts `claude setup-token` under
+util-linux `script` (pty, private temp HOME, no inherited token) and posts
+its authorize URL with instructions. Operator replies are intercepted
+BEFORE storage (`POST /v1/chat`, `POST /v1/tasks`, and replies to the
+claude-auth alert):
+
+- any text containing an `sk-ant-oat..-` token, in any task or a new one;
+- on the episode task, a single word of 16-1000 URL-safe characters (the
+  code the callback page shows), typed into the waiting session, whose
+  printed token is scraped;
+- on the episode task, `new link` / `retry` / `restart` / `login`: a fresh
+  session and URL.
+
+Each is replaced in the thread by a factory `brain.reply` receipt (no
+planner wake, `needs_operator` cleared). The token is verified by the probe
+with an isolated HOME: `failed` -> rejected, nothing stored, operator asked
+again; `ok` (or `unknown`, stored with a warning) -> upserted as the
+secret, every foreman asked to probe. Each foreman's recovery is posted
+(`foreman:X: Claude auth check passed. Released N held job(s).`); when none
+is failed the task is closed (`claude-auth-restored`) and the session
+killed. A rejected code posts the CLI's OAuth error and a new URL. A
+session lives at most 6 h, and none survives a factory restart (a code
+then gets a new link). If the headless flow cannot start, the task says so
+and asks for a token from `claude setup-token` run anywhere.
+
+**Operator API.** `GET /v1/claude-auth` -> `{book, token_stored,
+token_rev, setup_pending}` (never a value); `POST /v1/claude-auth/check` ->
+`202`, every foreman probes on its next push. Same unauthenticated
+UI-surface class as `/v1/secrets` (§13).
+
+**Invariants.** The token and the login code never appear in a thread,
+envelope, log line, error, job spec or caps push; `claudeauth.Redact`
+strips `sk-ant-*` shapes from every probe detail and outcome message.
+Verified on CLI 2.1.325: the failure texts, the probe, and the setup-token
+URL and code paths (a bad code yields `OAuth error: That code wasn't
+accepted...`); the success screen's token scrape could not be exercised
+without a real sign-in - a pasted token is the always-available path.
 
 ---
 

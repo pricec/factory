@@ -107,12 +107,18 @@ func (a *App) initThrottle(cfg Config) {
 	// usage-limit pause is active (override off dispatches as usual).
 	hold := func(ctx context.Context) bool { return !a.gate.Dispatching(ctx) }
 	a.pending.Hold, a.picker.Hold = hold, hold
+	// Claude-auth routing (spec §13.3): never dispatch a claude job to a
+	// foreman whose Claude CLI is logged out.
+	a.pending.Exclude = a.claudeBlocks
 }
 
 // admitNew is the jobs.Admission hook for NEW jobs. A new non-P0 job also
 // queues behind already-held jobs of equal or more urgent priority, so a
 // fresh create cannot jump the FIFO while the gate is restricting.
 func (a *App) admitNew(ctx context.Context, spec wire.JobSpec, taskID string) (bool, string) {
+	if hold, reason := a.claudeHold(ctx, spec, false); hold {
+		return true, reason // its foreman's Claude CLI is logged out (§13.3)
+	}
 	p0 := a.taskIsP0(ctx, taskID)
 	ahead := 0
 	if !p0 {
@@ -198,6 +204,12 @@ func (a *App) ReleasePass(ctx context.Context) (int, error) {
 	}
 	released := 0
 	for _, j := range held {
+		if hold, reason := a.claudeHold(ctx, j.Spec, true); hold {
+			if err := a.jobs.SetHeldReason(ctx, j.ID, reason); err != nil {
+				return released, fmt.Errorf("refresh held reason %s: %w", j.ID, err)
+			}
+			continue
+		}
 		taskID, p0 := a.jobIsP0(ctx, j.ID)
 		hold, reason := a.gate.Admit(ctx, j.ID,
 			throttle.Request{Kind: throttle.KindJob, P0: p0, JobPriority: j.Spec.Priority},

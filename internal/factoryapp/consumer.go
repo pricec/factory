@@ -69,6 +69,9 @@ func (a *App) handleEnvelope(ctx context.Context, env wire.MessageEnvelope, seen
 		if a.requeueLimited(ctx, res) {
 			return // usage-limit rejection: requeued held, no failure, no retry (S5)
 		}
+		if a.requeueClaudeAuth(ctx, res) {
+			return // Claude CLI not logged in: requeued held until auth is restored (§13.3)
+		}
 		if err := a.jobs.ApplyResult(ctx, res); err != nil {
 			log.Printf("factoryapp: consumer: apply result %s: %v", res.JobID, err)
 			return

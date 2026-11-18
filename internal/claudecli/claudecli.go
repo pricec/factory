@@ -139,6 +139,10 @@ type Session struct {
 	Timeout time.Duration
 	// Label names the session in timeout errors, e.g. "brain session".
 	Label string
+	// ExtraEnv is merged into the child env (spec §13.3: the factory's
+	// CLAUDE_CODE_OAUTH_TOKEN). Values never appear in errors: they are
+	// redacted from the stdout/stderr snippets.
+	ExtraEnv map[string]string
 }
 
 // Exec runs one session non-interactively in its own process group under
@@ -159,6 +163,9 @@ func Exec(parent context.Context, s Session) (string, Usage, error) {
 	cmd := exec.CommandContext(ctx, bin, Args(s.Model, s.ConfigPath, s.Prompt)...)
 	cmd.Dir = s.Dir
 	cmd.Env = withEnvValue(os.Environ(), s.TokenEnv, s.Token)
+	for k, v := range s.ExtraEnv {
+		cmd.Env = withEnvValue(cmd.Env, k, v)
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process != nil {
@@ -169,7 +176,14 @@ func Exec(parent context.Context, s Session) (string, Usage, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	err := cmd.Run()
+	for _, v := range s.ExtraEnv {
+		if v != "" {
+			redactBuf(&stdout, v)
+			redactBuf(&stderr, v)
+		}
+	}
+	if err != nil {
 		// Our own bound names the session; a caller's deadline (e.g. the
 		// router's job.question SLA) is reported as the caller's, not ours.
 		if parent.Err() != nil {
@@ -190,6 +204,16 @@ func Exec(parent context.Context, s Session) (string, Usage, error) {
 	}
 	o := ParseOutput(stdout.String())
 	return o.Text, o.Usage, nil
+}
+
+// redactBuf replaces every occurrence of v in b with [REDACTED].
+func redactBuf(b *bytes.Buffer, v string) {
+	if !bytes.Contains(b.Bytes(), []byte(v)) {
+		return
+	}
+	r := bytes.ReplaceAll(b.Bytes(), []byte(v), []byte("[REDACTED]"))
+	b.Reset()
+	b.Write(r)
 }
 
 func parseUsage(raw string) Usage { return ParseOutput(raw).Usage }

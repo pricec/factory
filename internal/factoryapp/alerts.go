@@ -271,6 +271,24 @@ func (a *App) handleReplyAlert(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
+	// A reply to the Claude login alert, or any reply carrying a Claude
+	// token, belongs to the re-login flow (spec §13.3): it is consumed in
+	// the alert's task and never stored or shown to the planner.
+	if alert.Source == claudeAuthSource || hasClaudeToken(in.Text) {
+		taskID := ""
+		if alert.Source == claudeAuthSource {
+			taskID = a.knownTask(ctx, alert.TaskID)
+		}
+		if _, tid, ok := a.interceptClaudeChat(ctx, in.Text, taskID); ok {
+			updated, err := a.tasks.TransitionAlert(ctx, id, []string{tasks.AlertOpen}, tasks.AlertReplied)
+			if err != nil {
+				updated = alert
+			}
+			a.publishAlertChanged(updated)
+			writeJSON(w, http.StatusCreated, map[string]any{"alert": updated, "task_id": tid})
+			return
+		}
+	}
 	title := alert.Title
 	if len(title) > 60 {
 		title = title[:60]

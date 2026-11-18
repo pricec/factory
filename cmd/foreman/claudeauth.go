@@ -30,5 +30,5 @@ func claudeLoginWarning(models []string, getenv func(string) string) string {
 		}
 	}
 	return "foreman: configured for Claude models but the claude CLI does not appear to be logged in; " +
-		"run: sudo -u <service-user> -H claude /login (or set ANTHROPIC_API_KEY); claude jobs will fail until then"
+		"the factory delivers its stored claude-oauth-token if one exists, and otherwise opens a Claude login task for the operator (spec §13.3)"
 }

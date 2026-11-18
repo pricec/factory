@@ -137,6 +137,10 @@ type App struct {
 
 	// audit is the factory auditor (spec §6.12, auditor.go).
 	audit *auditRuntime
+
+	// claude is the Claude CLI auth health book and re-login flow (spec
+	// §13.3, claudeauth.go).
+	claude *claudeAuthRuntime
 }
 
 // New opens the three sqlite stores under cfg.DataDir, wires every
@@ -274,11 +278,13 @@ func New(cfg Config) (*App, error) {
 	// Host headers (DNS-rebinding protection) - the advertised hostname
 	// gets "403 Forbidden: invalid Host header" and the child silently
 	// runs without any factory tools.
+	a.claude = newClaudeAuthRuntime()
 	a.planner = &PlannerBrain{
-		Model:   models.Resolve(os.Getenv("FACTORY_PLANNER_MODEL"), models.PlannerDefault),
-		MCPURL:  loopbackMCPURL(cfg.Addr) + "/v1/mcp/factory",
-		Bearer:  a.plannerTok,
-		WorkDir: filepath.Join(cfg.DataDir, "planner"),
+		ExtraEnv: a.claudeEnv,
+		Model:    models.Resolve(os.Getenv("FACTORY_PLANNER_MODEL"), models.PlannerDefault),
+		MCPURL:   loopbackMCPURL(cfg.Addr) + "/v1/mcp/factory",
+		Bearer:   a.plannerTok,
+		WorkDir:  filepath.Join(cfg.DataDir, "planner"),
 		// The settings panel's planner role (spec §6.5, 2026-11-15
 		// amendment): stored panel value > env > pinned default,
 		// resolved per session so a save applies to the next wake.
@@ -369,6 +375,7 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	run("throttle releaser", func() error { a.releaserLoop(ctx); return nil })
 	run("usage pause", func() error { a.pauseLoop(ctx); return nil })
+	run("claude auth", func() error { a.claudeAuthLoop(ctx); return nil })
 	run("task reaper", func() error { a.reaper.Run(ctx, taskReapInterval); return nil })
 	wg.Wait()
 	return nil
@@ -463,7 +470,13 @@ func buildMux(a *App, mcpH http.Handler) http.Handler {
 	mux.HandleFunc("POST /v1/pairing-tokens", a.handlePairingTokens)
 	mux.Handle("/v1/inboxes/", inbox.NewHandler(a.inbox, a.authn))
 	mux.Handle("GET /v1/inboxes/{id}/stream", notify.StreamHandler(a.hub, a.authn))
-	mux.Handle("/v1/foreman/capabilities", registry.RefreshHandlerReconciling(a.refreshAuthz(), a.upsertCaps, registry.NewAdvertiser(a.downloadsDir).Advert, a.reconcileForeman))
+	mux.Handle("/v1/foreman/capabilities", registry.RefreshHandlerExtended(a.refreshAuthz(), a.upsertCaps, registry.NewAdvertiser(a.downloadsDir).Advert, a.reconcileForeman, a.claudeCapsExt))
+	// Claude CLI auth (spec §13.3, claudeauth.go): the token handout to
+	// paired foremen (the second value-returning route), and the
+	// operator's status / re-check surface.
+	mux.HandleFunc("GET /v1/foreman/claude-token", a.handleClaudeToken)
+	mux.HandleFunc("GET /v1/claude-auth", a.handleClaudeAuthStatus)
+	mux.HandleFunc("POST /v1/claude-auth/check", a.handleClaudeAuthCheck)
 	mux.Handle("/v1/jobs", a.jobs.APIHandler())
 	mux.Handle("/v1/jobs/", a.jobs.APIHandler())
 	mux.HandleFunc("GET /v1/jobs/{id}", a.handleGetJob) // + task_id (§9.5.2)
