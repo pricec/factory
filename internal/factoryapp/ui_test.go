@@ -50,6 +50,37 @@ func TestUIShell(t *testing.T) {
 	}
 }
 
+// TestUISpeechMic: the voice-input client and wiring ship in the page: the
+// three composers get a mic, gated on GET /v1/speech/config, and the page
+// carries no speech secrets (spec §6.13).
+func TestUISpeechMic(t *testing.T) {
+	e := newEnv(t)
+	resp, err := http.Get(e.ts.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	body := string(b)
+	for _, want := range []string{
+		`id="voice-client"`, `window.FactoryVoice`, `getUserMedia`, `echoCancellation: true`, `noiseSuppression: true`,
+		`audio/mp4`, `/v1/speech/stt`, `/v1/speech/config`,
+		`{ ta: "chat-input"`, `{ ta: "newtask-input"`, `{ ta: "p-input"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("UI page missing voice markup %q", want)
+		}
+	}
+	for _, bad := range []string{"FACTORY_SPEECH", "speech-key"} {
+		if strings.Contains(body, bad) {
+			t.Errorf("UI page leaks %q", bad)
+		}
+	}
+	if strings.Contains(body, "autosend") {
+		t.Error("transcripts must not auto-send")
+	}
+}
+
 // inboxSummary mirrors the GET /v1/inboxes row (spec §4.1).
 type inboxSummary struct {
 	InboxID string `json:"inbox_id"`

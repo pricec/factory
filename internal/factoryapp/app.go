@@ -71,6 +71,9 @@ type Config struct {
 	// nil disables it (cmd/factory passes auditor.LoadConfig of the
 	// FACTORY_AUDIT_* env).
 	Audit *auditor.Config
+	// Speech configures the /v1/speech/* reverse proxy (spec §6.13); a
+	// zero URL disables it.
+	Speech SpeechConfig
 }
 
 // App is the wired factory controller.
@@ -100,6 +103,7 @@ type App struct {
 	wakes           *wakeDispatcher // per-task planner wakes (spec §9.5.2, tasks_wake.go)
 	reaper          *taskReaper     // idle-24h task auto-close (spec §9.5.2, tasks_reaper.go)
 	handler         http.Handler
+	speech          *speechProxy // nil = speech disabled (speech.go)
 	usage           *usagewin.Tracker
 	usagePoll       *usagewin.Poller // nil unless Usage.Poll
 	gate            *throttle.Gate   // S3 dispatch gate (throttle.go)
@@ -307,6 +311,7 @@ func New(cfg Config) (*App, error) {
 	a.initTasks()
 	a.initThrottle(cfg)
 	a.initAuditor(cfg)
+	a.speech = newSpeechProxy(a, cfg.Speech)
 	a.handler = buildMux(a, mcpH)
 	return a, nil
 }
@@ -342,6 +347,9 @@ func (a *App) AdvertiseURL() string { return a.advertise }
 func (a *App) Jobs() *jobs.Store     { return a.jobs }
 func (a *App) Inbox() *inbox.Service { return a.inbox }
 func (a *App) Auth() *auth.Store     { return a.auth }
+
+// Secrets is the credentials-store accessor (tests).
+func (a *App) Secrets() *secrets.Store { return a.secrets }
 
 // Run runs the background loops: sweeper, scheduler, retry picker, the
 // factory:main consumer, the dispatch notifier, the long-pending alert,
@@ -456,6 +464,10 @@ func buildMux(a *App, mcpH http.Handler) http.Handler {
 	// Model picker feed (spec §6.9, models.go): the UI's model pickers
 	// list what the host's opencode can run.
 	mux.HandleFunc("GET /v1/models", a.handleModels)
+	// Speech proxy (spec §6.13, speech.go).
+	mux.HandleFunc("GET /v1/speech/config", a.handleSpeechConfig)
+	mux.HandleFunc("GET /v1/speech/{path...}", a.handleSpeechProxy)
+	mux.HandleFunc("POST /v1/speech/{path...}", a.handleSpeechProxy)
 	// Settings panel (spec §6.9, 2026-11-15 amendment, settings.go):
 	// role-default models, persisted here and pulled by foremen.
 	mux.HandleFunc("GET /v1/settings", a.handleGetSettings)

@@ -486,6 +486,20 @@
     border-radius: 4px; font: 10.5px var(--mono); padding: 1px 6px; }
   .bubble:hover > .copybtn.msgcopy, .bubble > .copybtn.msgcopy:focus, .bubble > .copybtn.msgcopy.copied { opacity: 1; border-color: var(--border); }
   @media (pointer: coarse) { .bubble > .copybtn.msgcopy { opacity: .7; } pre.has-copy > .copybtn { opacity: 1; } }
+  /* voice input (speech-to-text): mic buttons injected by #voice-wiring */
+  .mic { flex: none; width: 40px; align-self: stretch; min-height: 40px; display: inline-flex; align-items: center; justify-content: center;
+    background: var(--panel); border: 1px solid var(--border); color: var(--dim); border-radius: 8px; cursor: pointer; padding: 0;
+    touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  .mic svg { width: 18px; height: 18px; pointer-events: none; }
+  .mic[hidden] { display: none; }
+  .mic.recording { color: #fff; background: var(--bad); border-color: var(--bad); animation: micpulse 1.2s ease-in-out infinite; }
+  .mic.transcribing { color: var(--accent); border-color: var(--accent); cursor: progress; animation: micspin 1.2s linear infinite; }
+  @keyframes micpulse { 50% { opacity: .6; } }
+  @keyframes micspin { 50% { opacity: .45; } }
+  #p-composer .mic { width: 44px; height: 44px; min-height: 44px; align-self: flex-end; border-radius: 22px; }
+  #voice-toast { position: fixed; left: 50%; bottom: 84px; transform: translateX(-50%); z-index: 100; max-width: 90vw;
+    background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 8px 14px; font-size: 13px; }
+  #voice-toast.err { border-color: var(--bad); color: var(--bad); }
 </style>
 </head>
 <body>
@@ -2785,6 +2799,213 @@ function pInit() {
   pViewport();
   applyLayout();
 }
+</script>
+<script id="voice-client">
+"use strict";
+/* ---------- FactoryVoice: speech-to-text capture client ----------
+ * Self-contained and framework-free (no DOM lookups, no factory globals) so
+ * it can be lifted into a shared voice-client module. Capture logic follows
+ * the voice service page: negotiated MediaRecorder mime, mono audio with
+ * echoCancellation/noiseSuppression, raw-body POST, {text} JSON reply.
+ *
+ *   FactoryVoice.supported()                 getUserMedia + MediaRecorder present
+ *   FactoryVoice.fetchEnabled(configUrl)     Promise<bool> (never rejects)
+ *   FactoryVoice.pickMime()                  best supported recorder mime, "" = default
+ *   FactoryVoice.transcribe(blob, endpoint)  Promise<string>
+ *   FactoryVoice.createRecorder({endpoint, onState(state), onText(text), onError(msg, err)})
+ *       -> {start(), stop(), cancel(), state()}; states: idle|requesting|recording|transcribing
+ */
+window.FactoryVoice = (function () {
+  const MIMES = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/webm", "audio/mp4", "audio/aac"];
+  const MIN_MS = 400; // shorter recordings are treated as accidental taps
+
+  function supported() {
+    return !!(window.MediaRecorder && navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+  }
+  function pickMime() {
+    if (!window.MediaRecorder || !MediaRecorder.isTypeSupported) return "";
+    for (const m of MIMES) if (MediaRecorder.isTypeSupported(m)) return m;
+    return "";
+  }
+  async function fetchEnabled(configUrl) {
+    try {
+      const r = await fetch(configUrl, { cache: "no-store" });
+      if (!r.ok) return false;
+      return !!(await r.json()).enabled;
+    } catch (_) { return false; }
+  }
+  async function transcribe(blob, endpoint, signal) {
+    const type = blob.type || "audio/webm";
+    let r;
+    try {
+      r = await fetch(endpoint, { method: "POST", headers: { "Content-Type": type }, body: blob, signal });
+    } catch (e) {
+      if (e && e.name === "AbortError") throw e;
+      const err = new Error("Speech service unreachable"); err.kind = "down"; throw err;
+    }
+    if (!r.ok) {
+      let detail = "";
+      try { const j = await r.json(); detail = (j.detail && String(j.detail)) || (j.error && j.error.message) || ""; } catch (_) {}
+      const err = new Error(r.status === 404 ? "Speech input is not enabled"
+        : r.status === 413 ? "Recording too long"
+        : r.status >= 500 ? "Speech service unavailable (" + r.status + ")"
+        : "Transcription failed (" + r.status + (detail ? ": " + detail : "") + ")");
+      err.kind = r.status >= 500 ? "down" : "http"; err.status = r.status; throw err;
+    }
+    const j = await r.json();
+    return (j && typeof j.text === "string" ? j.text : "").trim();
+  }
+  function micMessage(e) {
+    switch (e && e.name) {
+      case "NotAllowedError": case "SecurityError": return "Microphone permission denied";
+      case "NotFoundError": case "OverconstrainedError": return "No microphone found";
+      case "NotReadableError": return "Microphone is busy or unavailable";
+      default: return "Microphone error: " + ((e && e.message) || e);
+    }
+  }
+
+  function createRecorder(opts) {
+    const o = Object.assign({ endpoint: "/v1/speech/stt", onState() {}, onText() {}, onError() {} }, opts);
+    let state = "idle", stream = null, rec = null, chunks = [], t0 = 0, wantStop = false, cancelled = false, gen = 0;
+    function set(s) { state = s; try { o.onState(s); } catch (_) {} }
+    function release() {
+      if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+    }
+    async function start() {
+      if (state !== "idle") return;
+      if (!supported()) { o.onError("Microphone not available (needs HTTPS and a modern browser)"); return; }
+      wantStop = false; cancelled = false;
+      const my = ++gen;
+      set("requesting");
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+      } catch (e) { set("idle"); o.onError(micMessage(e), e); return; }
+      if (my !== gen || cancelled || wantStop) { release(); set("idle"); return; } // released during the permission prompt
+      chunks = [];
+      try {
+        const mime = pickMime();
+        rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      } catch (e) { release(); set("idle"); o.onError("Recording not supported: " + e.message, e); return; }
+      const r = rec;
+      r.ondataavailable = (ev) => { if (ev.data && ev.data.size) chunks.push(ev.data); };
+      r.onerror = (ev) => { release(); rec = null; set("idle"); o.onError("Recording failed", ev.error); };
+      r.onstop = () => finish(r, my);
+      r.start(250); t0 = Date.now();
+      set("recording");
+    }
+    async function finish(r, my) {
+      release(); rec = null;
+      const type = r.mimeType || (chunks[0] && chunks[0].type) || "audio/webm";
+      const dur = Date.now() - t0, parts = chunks; chunks = [];
+      if (cancelled || my !== gen) { set("idle"); return; }
+      if (dur < MIN_MS || !parts.length) { set("idle"); o.onError("Hold the button or tap again while you speak", null, "short"); return; }
+      set("transcribing");
+      try {
+        const text = await transcribe(new Blob(parts, { type }), o.endpoint);
+        set("idle");
+        if (!text) o.onError("Didn't catch that", null, "empty"); else o.onText(text);
+      } catch (e) { set("idle"); o.onError(e.message, e); }
+    }
+    function stop() {
+      wantStop = true;
+      if (rec && rec.state !== "inactive") rec.stop();
+    }
+    function cancel() {
+      cancelled = true; wantStop = true;
+      if (rec && rec.state !== "inactive") rec.stop(); else if (state === "requesting") { /* resolved in start() */ }
+    }
+    return { start, stop, cancel, state: () => state };
+  }
+  return { supported, pickMime, fetchEnabled, transcribe, createRecorder };
+})();
+</script>
+<script id="voice-wiring">
+"use strict";
+/* Factory-specific glue: one mic button per composer textarea, shown only
+ * when the server has speech enabled (GET /v1/speech/config) and the browser
+ * can capture audio. Tap to start / tap to stop, or press and hold to talk.
+ * The transcript is inserted into the textarea for editing; never auto-sent. */
+(function () {
+  const V = window.FactoryVoice;
+  const HOLD_MS = 450; // press longer than this = hold-to-talk (release stops)
+  const SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0014 0M12 18v4"/></svg>';
+  const TARGETS = [
+    { ta: "chat-input", before: "chat-send" },
+    { ta: "newtask-input", before: "newtask-send" },
+    { ta: "p-input", before: "p-send" },
+  ];
+  let toastEl = null, toastTimer = 0;
+  function toast(msg, err) {
+    if (!toastEl) { toastEl = document.createElement("div"); toastEl.id = "voice-toast"; toastEl.setAttribute("role", "status"); document.body.appendChild(toastEl); }
+    toastEl.textContent = msg; toastEl.className = err ? "err" : ""; toastEl.hidden = false;
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => { toastEl.hidden = true; }, err ? 5000 : 2000);
+  }
+  function insertText(ta, text) {
+    const v = ta.value;
+    let a = ta.selectionStart, b = ta.selectionEnd;
+    if (typeof a !== "number" || document.activeElement !== ta) a = b = v.length;
+    const pre = v.slice(0, a), post = v.slice(b);
+    const lead = pre && !/\s$/.test(pre) ? " " : "";
+    const trail = post && !/^\s/.test(post) ? " " : "";
+    ta.value = pre + lead + text + trail + post;
+    const pos = (pre + lead + text).length;
+    try { ta.setSelectionRange(pos, pos); } catch (_) {}
+    ta.dispatchEvent(new Event("input", { bubbles: true })); // autosize, drafts
+    try { ta.focus({ preventScroll: true }); } catch (_) {}
+  }
+  function wire(t) {
+    const ta = document.getElementById(t.ta), anchor = document.getElementById(t.before);
+    if (!ta || !anchor) return null;
+    const btn = document.createElement("button");
+    btn.type = "button"; btn.className = "mic"; btn.hidden = true; btn.innerHTML = SVG;
+    btn.setAttribute("aria-label", "Voice input"); btn.title = "Voice input: tap to start/stop, or hold to talk";
+    anchor.parentNode.insertBefore(btn, anchor);
+    const rec = V.createRecorder({
+      onState(s) {
+        btn.classList.toggle("recording", s === "recording");
+        btn.classList.toggle("transcribing", s === "transcribing");
+        btn.setAttribute("aria-pressed", s === "recording" ? "true" : "false");
+        btn.setAttribute("aria-busy", s === "transcribing" ? "true" : "false");
+        btn.title = s === "recording" ? "Recording - tap to stop" : s === "transcribing" ? "Transcribing…" : "Voice input: tap to start/stop, or hold to talk";
+        if (s === "recording") toast("Listening… tap the mic again to stop");
+      },
+      onText(text) { insertText(ta, text); toast("Transcript added - edit and send"); },
+      onError(msg, _e, kind) { toast(msg, kind !== "short"); },
+    });
+    let downAt = 0, active = false;
+    btn.addEventListener("pointerdown", (e) => {
+      if (e.button) return;
+      e.preventDefault();
+      try { btn.setPointerCapture(e.pointerId); } catch (_) {}
+      const s = rec.state();
+      if (s === "recording" || s === "requesting") { active = false; rec.stop(); return; } // tap-to-stop
+      if (s !== "idle") return;
+      active = true; downAt = Date.now(); rec.start();
+    });
+    const up = () => {
+      if (!active) return;
+      active = false;
+      if (Date.now() - downAt >= HOLD_MS) rec.stop(); // hold-to-talk; a short tap leaves it recording
+    };
+    btn.addEventListener("pointerup", up);
+    btn.addEventListener("pointercancel", () => { if (active) { active = false; rec.stop(); } });
+    btn.addEventListener("contextmenu", (e) => e.preventDefault());
+    btn.addEventListener("keydown", (e) => { // keyboard: Enter/Space toggles
+      if (e.key !== "Enter" && e.key !== " ") return;
+      e.preventDefault();
+      if (e.repeat) return;
+      const s = rec.state();
+      if (s === "idle") rec.start(); else if (s === "recording" || s === "requesting") rec.stop();
+    });
+    return btn;
+  }
+  async function init() {
+    if (!V.supported()) return;
+    if (!(await V.fetchEnabled("/v1/speech/config"))) return;
+    for (const t of TARGETS) { const b = wire(t); if (b) b.hidden = false; }
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init); else init();
+})();
 </script>
 </body>
 </html>
