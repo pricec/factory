@@ -79,8 +79,13 @@ func (a *App) handleEnvelope(ctx context.Context, env wire.MessageEnvelope, seen
 		}
 		// Merge jobs never retry (spec §6.11): a re-run could merge or
 		// deploy twice. A failed merge job goes straight to dead, which
-		// closes its request as needs_attention.
+		// closes its request as needs_attention. The one exception: a
+		// default-tier job that failed before merging escalates once to
+		// the hardest tier (escalateMerge).
 		if job.State == jobs.StateFailed && a.isMergeJob(ctx, job.ID) {
+			if a.escalateMerge(ctx, job) {
+				return
+			}
 			if err := a.jobs.MarkDead(ctx, job.ID); err != nil {
 				log.Printf("factoryapp: consumer: dead-letter merge job %s: %v", job.ID, err)
 			}

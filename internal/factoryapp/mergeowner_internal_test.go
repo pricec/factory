@@ -89,6 +89,15 @@ func failMerge(t *testing.T, a *App, want jobs.MergeRequest, summary, stage stri
 		t.Fatal(err)
 	}
 	report(t, a, m.JobID, wire.StatusFailed, summary, stage)
+	// A ci/conflict failure escalates once to the hardest tier (spec
+	// §6.11); fail that job the same way so the routing under test sees
+	// the final failure.
+	if cur := getMerge(t, a, want.ID); cur.State == jobs.MergeMerging && cur.JobID != m.JobID {
+		if err := a.jobs.ApplyEvent(context.Background(), cur.JobID, "started"); err != nil {
+			t.Fatal(err)
+		}
+		report(t, a, cur.JobID, wire.StatusFailed, summary, stage)
+	}
 	return getMerge(t, a, want.ID)
 }
 
