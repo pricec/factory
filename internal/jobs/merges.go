@@ -56,7 +56,8 @@ func MergeTerminal(state string) bool {
 }
 
 // MergeStateForJob maps a merge job's terminal job state to the request's
-// terminal state (spec §6.11): done -> landed; failed|timed_out|dead ->
+// terminal state (spec §6.11): done -> landed only when the result has
+// merged:true (FinishMergeForJob; otherwise needs_attention); failed|timed_out|dead ->
 // needs_attention; cancelled -> cancelled. superseded (an operator replaced
 // the merge job by hand) also needs attention: the queue cannot know
 // whether the replacement merged. ok is false for non-terminal states
@@ -611,7 +612,41 @@ func (s *Store) FinishMergeForJob(ctx context.Context, jobID, jobState string) (
 	if !ok {
 		return mr, false, nil
 	}
-	return s.TransitionMerge(ctx, mr.ID, to, s.mergeOutcome(ctx, jobID, jobState))
+	outcome := s.mergeOutcome(ctx, jobID, jobState)
+	if to == MergeLanded {
+		// done is not enough: the job's structured result must say the
+		// branch merged. Anything else (merged:false, no result, an
+		// untyped result) is visible as not shipped.
+		job, found, err := s.Get(ctx, jobID)
+		if err != nil {
+			return mr, false, err
+		}
+		if !found || !MergeResultMerged(job) {
+			to = MergeNeedsAttention
+			outcome = "not merged (job done without result.merged=true): " + outcome
+		}
+	}
+	return s.TransitionMerge(ctx, mr.ID, to, truncateUTF8(outcome, maxMergeResultBytes))
+}
+
+// MergeResultMerged reports whether the merge job's last reported result
+// carries merged:true (the typed MergeResultSchema). Missing, malformed or
+// untyped results are false.
+func MergeResultMerged(job Job) bool {
+	var results []struct {
+		Result json.RawMessage `json:"result"`
+	}
+	if json.Unmarshal(job.Results, &results) != nil || len(results) == 0 {
+		return false
+	}
+	var body struct {
+		Merged *bool `json:"merged"`
+	}
+	last := results[len(results)-1].Result
+	if len(last) == 0 || json.Unmarshal(last, &body) != nil {
+		return false
+	}
+	return body.Merged != nil && *body.Merged
 }
 
 // mergeOutcome renders the request's result summary from its job: the

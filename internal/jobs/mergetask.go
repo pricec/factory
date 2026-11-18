@@ -46,7 +46,8 @@ func MergeTask(mr MergeRequest) string {
 		"Do every step in order; do not add, skip, or reorder steps; when the procedure says stop, stop. " +
 		"Never work in the operator checkout /home/price/temp/factory.\n\n")
 	b.WriteString("Report with report_result exactly as the procedure's Reporting section says: " +
-		"status done only when the branch is merged AND the deploy is verified healthy; " +
+		"status done only when the branch is merged AND the deploy is verified healthy, with result.merged=true and result.merge_commit; " +
+		"if nothing was merged (conflict or any stop before merging) report status failed with result.merged=false and result.reason; " +
 		"otherwise status failed with the reason (head drift, red checks after the one CI rerun, conflicts, deploy failure) " +
 		"and result.stage set as the Reporting section says - " +
 		"the merge request then goes needs_attention: the factory routes a fixable failure back to the branch's own job " +
@@ -83,11 +84,21 @@ func MergeEscalatable(failed Job) bool {
 	return false
 }
 
+// MergeResultSchema is the typed result_schema of a merge job (spec
+// §6.11): merged is required; merge_commit is set when merged, reason when
+// not (e.g. "conflict"). The queue lands a request only on merged:true.
+var MergeResultSchema = json.RawMessage(`{"type":"object","required":["merged"],"properties":{` +
+	`"merged":{"type":"boolean"},"merge_commit":{"type":"string"},"reason":{"type":"string"},` +
+	`"stage":{"type":"string"},"pr":{"type":"integer"},"deployed_commit":{"type":"string"},` +
+	`"build_id":{"type":"string"},"factory_exe_sha256":{"type":"string"},"evidence_dir":{"type":"string"},` +
+	`"ci_rerun":{"type":"boolean"},"ci_flaked":{"type":"array","items":{"type":"string"}}}}`)
+
 func mergeJobSpec(mr MergeRequest, jobID, foreman, tier string) wire.JobSpec {
 	spec := wire.NewJobSpec(MergeTask(mr), MergeJobCreatedBy)
 	spec.ID = jobID
 	spec.Foreman = foreman
 	spec.Tier = tier
+	spec.ResultSchema = MergeResultSchema
 	spec.TimeoutS = mergeJobTimeoutS
 	spec.IdleTimeoutS = mergeJobIdleTimeoutS
 	spec.Priority = mergeJobPriority

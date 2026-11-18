@@ -94,8 +94,10 @@ func testMergeQueue(t *testing.T, s *stack) {
 	if st := s.do("POST", "/v1/merge-requests/resume", "", map[string]any{}, nil); st != http.StatusOK {
 		t.Fatalf("resume = %d", st)
 	}
-	waitFor(t, "both merges landed", 30*time.Second, func() bool {
-		return s.mergeByID(t, id1).State == jobs.MergeLanded && s.mergeByID(t, id2).State == jobs.MergeLanded
+	// The fake worker exits 0 without report_result, so the harness posts
+	// a done with no typed result: the queue must NOT call that landed.
+	waitFor(t, "both merges closed not-landed", 30*time.Second, func() bool {
+		return s.mergeByID(t, id1).State == jobs.MergeNeedsAttention && s.mergeByID(t, id2).State == jobs.MergeNeedsAttention
 	})
 	close(stop)
 	wg.Wait()
@@ -182,8 +184,8 @@ func testJobOwnedMerge(t *testing.T, s *stack) {
 	if mr.RequestedBy != jobs.RequestedByJob || mr.SourceJobID != spec.ID || mr.Branch != "feat/e2e-owned" || mr.Head != head {
 		t.Fatalf("job-owned request = %+v", mr)
 	}
-	waitFor(t, "job-owned merge landed", 30*time.Second, func() bool {
-		return s.mergeByID(t, id).State == jobs.MergeLanded
+	waitFor(t, "job-owned merge closed (untyped done is not landed)", 30*time.Second, func() bool {
+		return s.mergeByID(t, id).State == jobs.MergeNeedsAttention
 	})
 	if got := s.mergeByID(t, id); got.JobID == "" || got.JobID == spec.ID {
 		t.Fatalf("merge job = %q, want a separate merge job (source %s)", got.JobID, spec.ID)

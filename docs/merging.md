@@ -204,9 +204,10 @@ report.
 Call `report_result` once, at the end:
 
 - **done**: only when the PR is merged and, for `pricec/factory`, the deploy
-  is verified healthy. Summary (240 chars max):
+  is verified healthy. `result.merged` must be `true`; the queue lands the
+  request only then (a `done` without `merged:true` is `needs_attention`). Summary (240 chars max):
   `landed $MR: PR #<n> merged <MERGED:12>; deployed <build id>; exe sha ok, UI 200, journal clean`.
-  `result`: `{pr, merge_commit, deployed_commit, build_id, factory_exe_sha256, evidence_dir}`.
+  `result`: `{merged: true, pr, merge_commit, deployed_commit, build_id, factory_exe_sha256, evidence_dir}`.
   If `cigate` reran and went green, add `ci_rerun: true` and `ci_flaked: [tests]`
   to `result` and append `; CI flake rerun: <tests>` to the summary, so flakes stay visible.
 - **failed**: anything that stopped. The summary starts with the stage, for
@@ -218,6 +219,8 @@ Call `report_result` once, at the end:
   red checks, put the `cigate`
   output (`rerun`, `first_failed`, `second_failed`, `failed_both`) in
   `result` so the alert shows that a rerun happened and what failed.
+  Always set `result.merged: false` and `result.reason` (e.g. `conflict`)
+  when nothing was merged, and report `failed`, never `done`.
   `error`: `{"kind": "other", "message": "<stage>: <detail>"}`. Include
   `pr` / `merge_commit` in `result` when they exist, because a failure after
   the merge (in deploy) means master moved.
