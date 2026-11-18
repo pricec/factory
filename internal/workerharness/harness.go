@@ -384,12 +384,55 @@ func claudeModelArg(model string) string {
 // variants like `...#max` do NOT survive the generated config's `model`
 // field (V2 drops the #variant there), so the flag is the only reliable
 // injection point.
-func runArgs(cfg Config, prompt string) []string {
-	args := []string{"run", "--standalone"}
+//
+// --standalone only exists on opencode V2: older yargs-based builds run
+// strict and answer an unknown flag with their usage text and exit 1, so
+// it is passed only when standalone is true (see supportsStandalone). The
+// prompt follows a `--` terminator so a prompt that is empty or starts
+// with '-' is never parsed as an option.
+func runArgs(cfg Config, prompt string, standalone bool) []string {
+	args := []string{"run"}
+	if standalone {
+		args = append(args, "--standalone")
+	}
 	if cfg.Model != "" {
 		args = append(args, "-m", cfg.Model)
 	}
-	return append(args, prompt)
+	return append(args, "--", prompt)
+}
+
+var standaloneProbe sync.Map // bin -> bool
+
+// supportsStandalone reports whether `<bin> run --help` advertises
+// --standalone. It answers false only when the help text is positively
+// recognized as opencode's `run` usage without the flag (an old build);
+// when the probe fails or is unrecognizable it answers true, preserving
+// the V2 behaviour. Results are cached per binary.
+func supportsStandalone(bin string) bool {
+	if bin != "opencode" {
+		return true // explicitly configured path (wrapper/test double): not probed
+	}
+	if v, ok := standaloneProbe.Load(bin); ok {
+		return v.(bool)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, bin, "run", "--help").CombinedOutput()
+	ok := helpSupportsStandalone(string(out), err)
+	if err == nil || ctx.Err() == nil {
+		standaloneProbe.Store(bin, ok)
+	}
+	return ok
+}
+
+func helpSupportsStandalone(help string, err error) bool {
+	if err != nil && help == "" {
+		return true
+	}
+	if !strings.Contains(help, "opencode run") {
+		return true
+	}
+	return strings.Contains(help, "--standalone")
 }
 
 // claudeArgs builds the Claude Code CLI argument vector (§8.4), verified
@@ -423,7 +466,11 @@ func childCommand(cfg Config, jobDir, prompt string) (string, []string) {
 	if isClaudeModel(cfg.Model) {
 		return cfg.ClaudeBin, claudeArgs(cfg, filepath.Join(jobDir, claudeConfigFileName), prompt)
 	}
-	return cfg.OpenCODEBin, runArgs(cfg, prompt)
+	standalone := supportsStandalone(cfg.OpenCODEBin)
+	if !standalone {
+		log.Printf("worker harness: %s does not support `run --standalone` (old opencode); running without it - upgrade opencode on this foreman, per-job MCP tokens may not apply", cfg.OpenCODEBin)
+	}
+	return cfg.OpenCODEBin, runArgs(cfg, prompt, standalone)
 }
 
 // execChild runs the routed agent child (§8.4) with cwd jobDir:
@@ -712,10 +759,22 @@ func crashMessage(stderr, stdout string, runErr error, claude bool) string {
 	if msg == "" {
 		msg = runErr.Error()
 	}
-	if r := []rune(msg); len(r) > crashMessageLimit {
-		return string(r[:crashMessageLimit])
+	return capCrash(msg)
+}
+
+// capCrash caps msg at crashMessageLimit runes. A head-only cut loses the
+// decisive line of CLI usage dumps (yargs prints the usage first and the
+// rejection - "Unknown argument: ..." - LAST), so an overlong message keeps
+// the head and the tail, joined by an elision marker.
+func capCrash(msg string) string {
+	r := []rune(msg)
+	if len(r) <= crashMessageLimit {
+		return msg
 	}
-	return msg
+	const marker = " ...[truncated]... "
+	tail := crashMessageLimit / 2
+	head := crashMessageLimit - tail - len([]rune(marker))
+	return string(r[:head]) + marker + string(r[len(r)-tail:])
 }
 
 // snippet returns the first 200 chars of s for logging.
