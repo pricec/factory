@@ -307,3 +307,40 @@ func TestNoTaskStore(t *testing.T) {
 		t.Errorf("create_job without a task store reported task_id: %v", sc)
 	}
 }
+
+// TestNotifyOperatorSpoken: the optional `spoken` field is stored in the
+// brain.reply payload, whitespace-collapsed and capped; omitted when empty.
+func TestNotifyOperatorSpoken(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	tk := e.mkTask("voice")
+	payload := func() map[string]any {
+		t.Helper()
+		envs, err := e.svc.Recent(ctx, auth.PlannerMainInbox, 1)
+		if err != nil || len(envs) != 1 {
+			t.Fatalf("Recent: %v %v", envs, err)
+		}
+		var p map[string]any
+		if err := json.Unmarshal(envs[0].Payload, &p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	resultOf(t, e.callTool("notify_operator", map[string]any{"text": "**Done.** Details below.", "task_id": tk.ID, "spoken": "  All done,\n  the merge went through.  "}))
+	if p := payload(); p["text"] != "**Done.** Details below." || p["spoken"] != "All done, the merge went through." {
+		t.Errorf("payload = %v", p)
+	}
+	resultOf(t, e.callTool("notify_operator", map[string]any{"text": "long", "task_id": tk.ID, "spoken": strings.Repeat("word ", 200)}))
+	sp, _ := payload()["spoken"].(string)
+	if n := len([]rune(sp)); n == 0 || n > mcpfactory.MaxSpokenChars {
+		t.Errorf("spoken len = %d, want 1..%d", n, mcpfactory.MaxSpokenChars)
+	}
+	resultOf(t, e.callTool("notify_operator", map[string]any{"text": "plain", "task_id": tk.ID}))
+	if _, ok := payload()["spoken"]; ok {
+		t.Errorf("spoken present without being set: %v", payload())
+	}
+	resultOf(t, e.callTool("notify_operator", map[string]any{"text": "blank", "task_id": tk.ID, "spoken": "   "}))
+	if _, ok := payload()["spoken"]; ok {
+		t.Errorf("blank spoken stored: %v", payload())
+	}
+}

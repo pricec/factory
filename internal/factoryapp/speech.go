@@ -23,6 +23,13 @@ const (
 	EnvSpeechKey = "FACTORY_SPEECH_KEY"
 	// EnvSpeechSTTPath overrides the upstream STT path.
 	EnvSpeechSTTPath = "FACTORY_SPEECH_STT_PATH"
+	// EnvSpeechTTSPath / EnvSpeechTTSPlanPath override the upstream TTS paths.
+	EnvSpeechTTSPath     = "FACTORY_SPEECH_TTS_PATH"
+	EnvSpeechTTSPlanPath = "FACTORY_SPEECH_TTS_PLAN_PATH"
+	// DefaultSpeechTTSPath / DefaultSpeechTTSPlanPath are the upstream paths
+	// /v1/speech/tts and /v1/speech/tts/plan map to.
+	DefaultSpeechTTSPath     = "/v1/tts"
+	DefaultSpeechTTSPlanPath = "/v1/tts/plan"
 	// DefaultSpeechSTTPath is the upstream path /v1/speech/stt maps to. The
 	// voice service serves /api/stt today; it will move to /v1/stt.
 	DefaultSpeechSTTPath = "/api/stt"
@@ -32,6 +39,8 @@ const (
 
 	// MaxSpeechBody caps a proxied request body.
 	MaxSpeechBody = 25 << 20
+	// MaxSpeechTTSBody caps a TTS / TTS-plan request body (text, not audio).
+	MaxSpeechTTSBody = 64 << 10
 	// speechRequestTimeout bounds one proxied request end to end.
 	speechRequestTimeout = 10 * time.Minute
 	// speechHeaderTimeout bounds the wait for upstream response headers.
@@ -43,6 +52,9 @@ type SpeechConfig struct {
 	URL     string // upstream base URL
 	Key     string // optional bearer; empty -> credentials store "speech-key"
 	STTPath string // upstream path for /v1/speech/stt; empty -> DefaultSpeechSTTPath
+
+	TTSPath     string // upstream path for /v1/speech/tts; empty -> DefaultSpeechTTSPath
+	TTSPlanPath string // upstream path for /v1/speech/tts/plan; empty -> DefaultSpeechTTSPlanPath
 }
 
 // LoadSpeechConfig reads the FACTORY_SPEECH_* environment.
@@ -51,16 +63,21 @@ func LoadSpeechConfig() SpeechConfig {
 		URL:     strings.TrimSpace(os.Getenv(EnvSpeechURL)),
 		Key:     strings.TrimSpace(os.Getenv(EnvSpeechKey)),
 		STTPath: strings.TrimSpace(os.Getenv(EnvSpeechSTTPath)),
+
+		TTSPath:     strings.TrimSpace(os.Getenv(EnvSpeechTTSPath)),
+		TTSPlanPath: strings.TrimSpace(os.Getenv(EnvSpeechTTSPlanPath)),
 	}
 }
 
 // speechProxy is the built proxy; nil on App when speech is disabled.
 type speechProxy struct {
-	base    *url.URL
-	key     string
-	sttPath string
-	app     *App
-	rp      *httputil.ReverseProxy
+	base     *url.URL
+	key      string
+	sttPath  string
+	ttsPath  string
+	planPath string
+	app      *App
+	rp       *httputil.ReverseProxy
 }
 
 // newSpeechProxy returns nil (disabled) for an empty or invalid URL.
@@ -73,13 +90,10 @@ func newSpeechProxy(a *App, cfg SpeechConfig) *speechProxy {
 		log.Printf("factoryapp: speech disabled: invalid %s", EnvSpeechURL)
 		return nil
 	}
-	p := &speechProxy{base: base, key: cfg.Key, sttPath: cfg.STTPath, app: a}
-	if p.sttPath == "" {
-		p.sttPath = DefaultSpeechSTTPath
-	}
-	if !strings.HasPrefix(p.sttPath, "/") {
-		p.sttPath = "/" + p.sttPath
-	}
+	p := &speechProxy{base: base, key: cfg.Key, app: a}
+	p.sttPath = absPath(cfg.STTPath, DefaultSpeechSTTPath)
+	p.ttsPath = absPath(cfg.TTSPath, DefaultSpeechTTSPath)
+	p.planPath = absPath(cfg.TTSPlanPath, DefaultSpeechTTSPlanPath)
 	p.rp = &httputil.ReverseProxy{
 		Rewrite:       p.rewrite,
 		FlushInterval: -1, // stream: flush every write
@@ -106,10 +120,26 @@ func newSpeechProxy(a *App, cfg SpeechConfig) *speechProxy {
 	return p
 }
 
+// absPath returns v (or def when empty) with a leading slash.
+func absPath(v, def string) string {
+	if v == "" {
+		v = def
+	}
+	if !strings.HasPrefix(v, "/") {
+		v = "/" + v
+	}
+	return v
+}
+
 // upstreamPath maps the /v1/speech/ remainder to the upstream path.
 func (p *speechProxy) upstreamPath(rest string) string {
-	if rest == "stt" {
+	switch rest {
+	case "stt":
 		return p.sttPath
+	case "tts":
+		return p.ttsPath
+	case "tts/plan":
+		return p.planPath
 	}
 	return "/" + rest
 }
@@ -162,11 +192,15 @@ func (a *App) handleSpeechProxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if r.ContentLength > MaxSpeechBody {
-		writeError(w, http.StatusRequestEntityTooLarge, "too_large", "audio exceeds the speech upload cap")
+	limit := int64(MaxSpeechBody)
+	if rest := r.PathValue("path"); rest == "tts" || rest == "tts/plan" {
+		limit = MaxSpeechTTSBody
+	}
+	if r.ContentLength > limit {
+		writeError(w, http.StatusRequestEntityTooLarge, "too_large", "request exceeds the speech upload cap")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, MaxSpeechBody)
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	ctx, cancel := context.WithTimeout(r.Context(), speechRequestTimeout)
 	defer cancel()
 	p.rp.ServeHTTP(w, r.WithContext(ctx))
