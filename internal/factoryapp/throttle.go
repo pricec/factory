@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pricec/factory/internal/jobs"
 	"github.com/pricec/factory/internal/tasks"
 	"github.com/pricec/factory/internal/throttle"
 	"github.com/pricec/factory/internal/usagewin"
@@ -44,15 +45,28 @@ type ThrottleConfig struct {
 	Off bool
 	// Hysteresis overrides the 10 min level-drop delay (tests).
 	Hysteresis time.Duration
+	// ConflictOff is the FACTORY_CONFLICT=off kill switch: the conflict
+	// coordinator (conflict.go) admits everything.
+	ConflictOff bool
+	// ConflictMaxWait bounds a conflict hold (0 = DefaultConflictMaxWait).
+	ConflictMaxWait time.Duration
 }
 
 // LoadThrottleConfig reads FACTORY_THROTTLE ("off"/"0"/"false" disables).
 func LoadThrottleConfig() ThrottleConfig {
+	var cfg ThrottleConfig
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("FACTORY_THROTTLE"))) {
 	case "off", "0", "false", "no":
-		return ThrottleConfig{Off: true}
+		cfg.Off = true
 	}
-	return ThrottleConfig{}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("FACTORY_CONFLICT"))) {
+	case "off", "0", "false", "no":
+		cfg.ConflictOff = true
+	}
+	if d, err := time.ParseDuration(strings.TrimSpace(os.Getenv("FACTORY_CONFLICT_MAX_WAIT"))); err == nil && d > 0 {
+		cfg.ConflictMaxWait = d
+	}
+	return cfg
 }
 
 // settingsOverrides persists the operator override in the tasks settings
@@ -102,6 +116,14 @@ func (a *App) initThrottle(cfg Config) {
 			a.raiseSystemAlert(ctx, p, title, body, "factory:throttle")
 		},
 	})
+	a.conflictOff = cfg.Throttle.ConflictOff
+	a.conflictMaxWait = cfg.Throttle.ConflictMaxWait
+	if a.conflictMaxWait <= 0 {
+		a.conflictMaxWait = DefaultConflictMaxWait
+	}
+	if a.conflictOff {
+		log.Printf("factoryapp: FACTORY_CONFLICT=off: conflict coordinator disabled")
+	}
 	a.jobs.SetAdmission(a.admitNew)
 	// No dispatch of already-admitted pending jobs or due retries while the
 	// usage-limit pause is active (override off dispatches as usual).
@@ -128,9 +150,13 @@ func (a *App) admitNew(ctx context.Context, spec wire.JobSpec, taskID string) (b
 		}
 		ahead = n
 	}
-	return a.gate.Admit(ctx, spec.ID,
+	if hold, reason := a.gate.Admit(ctx, spec.ID,
 		throttle.Request{Kind: throttle.KindJob, P0: p0, JobPriority: spec.Priority},
-		a.activeNonP0, ahead)
+		a.activeNonP0, ahead); hold {
+		return true, reason // precedence: the usage reason wins
+	}
+	// Second stage: the conflict coordinator (conflict.go).
+	return a.conflictAdmit(ctx, spec, "", taskID, p0, false)
 }
 
 // taskIsP0 reports whether taskID names a task with priority 0. Lookup
@@ -220,6 +246,13 @@ func (a *App) ReleasePass(ctx context.Context) (int, error) {
 			}
 			continue
 		}
+		wasConflict := jobs.HeldKind(j.HeldReason) == "conflict"
+		if hold, reason := a.conflictAdmit(ctx, j.Spec, j.CreatedAt, taskID, p0, true); hold {
+			if err := a.jobs.SetHeldReason(ctx, j.ID, reason); err != nil {
+				return released, fmt.Errorf("refresh held reason %s: %w", j.ID, err)
+			}
+			continue
+		}
 		applied, err := a.jobs.Release(ctx, j.ID)
 		if err != nil {
 			return released, fmt.Errorf("release %s: %w", j.ID, err)
@@ -229,6 +262,10 @@ func (a *App) ReleasePass(ctx context.Context) (int, error) {
 		}
 		released++
 		log.Printf("factoryapp: throttle: released held job %s (priority %d, held since %s)", j.ID, j.Spec.Priority, j.CreatedAt)
+		if wasConflict {
+			a.noteConflict(ctx, taskID, j.ID, conflictReleased, "", "",
+				"job "+j.ID+" is no longer waiting on a conflicting job and was released")
+		}
 		if taskID != "" {
 			a.publishTaskChanged(ctx, taskID)
 		}
@@ -240,6 +277,8 @@ func (a *App) ReleasePass(ctx context.Context) (int, error) {
 type gateView struct {
 	throttle.Eval
 	Held int `json:"held"`
+	// HeldBy breaks Held down by hold kind: usage, conflict, claude_auth.
+	HeldBy map[string]int `json:"held_by,omitempty"`
 }
 
 func (a *App) gateStatus(ctx context.Context) (gateView, error) {
@@ -247,7 +286,11 @@ func (a *App) gateStatus(ctx context.Context) (gateView, error) {
 	if err != nil {
 		return gateView{}, err
 	}
-	return gateView{Eval: a.gate.Evaluate(ctx), Held: n}, nil
+	by, err := a.jobs.CountHeldByKind(ctx)
+	if err != nil {
+		return gateView{}, err
+	}
+	return gateView{Eval: a.gate.Evaluate(ctx), Held: n, HeldBy: by}, nil
 }
 
 // handleGetThrottle serves GET /v1/throttle: the gate block alone.

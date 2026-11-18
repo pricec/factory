@@ -235,8 +235,9 @@ This section is for everyone except the merge job (spec §6.11, "Job-owned
 merges").
 
 **The job that wrote the branch requests its merge.** A code-change job
-works on a branch, gets CI green, pushes, and then calls the worker tool
-`request_merge(branch, head, note?, after?)` itself, before it reports
+works on a branch, merges `origin/master` into it (merge, never rebase;
+resolve conflicts), gets CI green on that merge result, pushes, and then
+calls the worker tool `request_merge(branch, head, note?, after?)` itself, before it reports
 done. The planner does not queue routine merges and does not have to
 remember a follow-up. The operator can still queue a merge by hand (UI,
 `POST /v1/merge-requests`), and the planner has `request_merge` for a
@@ -262,6 +263,12 @@ branch no job queued.
 | failed, fixable by the branch's author: `ci`, `conflict`, `head_drift` | Dispatches a **merge-fix job** on the same branch, on the foreman that ran the requesting job, linked to the same task. It fixes, runs CI, pushes and calls `request_merge` again. No alert, no planner session. |
 | failed, anything else: `deploy`, `preflight`, `merge`, `nothing_to_merge`, no report | P1 alert for the operator, linked to the task, and the planner is woken to coordinate. |
 | failed after 2 merge-fix jobs | The same escalation. The loop is bounded: there is never a third fix job for one chain of requests. |
+
+A job's declared `touches` (spec §6.14) keep conflicting jobs apart: a job
+whose `touches` overlap an active job's is held until that job's merge
+request lands (or is cancelled or needs attention), so merge conflicts
+between concurrent jobs are rare. The merge job itself and merge-fix jobs
+are never held by it.
 
 A request with no requesting job (operator, planner) fails as before: P1
 alert, and re-requesting is the operator's call. Auditor auto-fixes keep

@@ -61,7 +61,7 @@ func (s *Store) Release(ctx context.Context, id string) (applied bool, err error
 		return applied, err
 	}
 	_, err = s.db.ExecContext(ctx,
-		`UPDATE jobs SET held_reason = NULL, updated_at = ? WHERE id = ? AND state = ?`,
+		`UPDATE jobs SET held_reason = NULL, conflict_since = NULL, updated_at = ? WHERE id = ? AND state = ?`,
 		s.now(), id, StatePending)
 	return true, err
 }
@@ -131,13 +131,15 @@ func (s *Store) ActiveJobIDs(ctx context.Context) ([]string, error) {
 	return out, rows.Err()
 }
 
-// CountHeldAhead counts held jobs that would release before a new job of
-// the given priority (same or more urgent priority; all are older), so a
-// fresh create queues behind them instead of jumping the FIFO.
+// CountHeldAhead counts usage-held jobs that would release before a new job
+// of the given priority (same or more urgent priority; all are older), so a
+// fresh create queues behind them instead of jumping the FIFO. Conflict
+// holds are not counted: they wait on files, not on usage.
 func (s *Store) CountHeldAhead(ctx context.Context, priority int) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs WHERE state = ?
-		AND CAST(IFNULL(json_extract(spec, '$.priority'), 5) AS INTEGER) <= ?`, StateHeld, priority).Scan(&n)
+		AND CAST(IFNULL(json_extract(spec, '$.priority'), 5) AS INTEGER) <= ?
+		AND IFNULL(held_reason, '') NOT LIKE ?`, StateHeld, priority, ConflictHoldPrefix+"%").Scan(&n)
 	return n, err
 }
 

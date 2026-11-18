@@ -77,7 +77,7 @@ func Handler(cfg Config) (http.Handler, error) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "list_jobs",
 		Description: "List job summaries: {jobs: [{id, state, summary, usage, over_budget, held_reason?}]}. " +
-			"state held = parked by the usage throttle; it dispatches automatically when usage allows.",
+			"state held = parked (held_reason: usage throttle, or conflict: waits for job_X); it dispatches automatically.",
 	}, listJobsTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "create_job",
@@ -93,6 +93,8 @@ func Handler(cfg Config) (http.Handler, error) {
 			"tier: flash (cheapest, default), default (max-think), hardest (strongest); " +
 			"pick the cheapest that works. model: explicit model id overrides tier. " +
 			"timeout_s: leave unset for code/build jobs (tier ceiling applies); never <1800 if builds/tests run. " +
+			"touches: REQUIRED on code jobs: narrowest repo-relative path globs it edits (** ok), e.g. [\"internal/jobs/**\"]; " +
+			"[\"*\"] = exclusive. Overlapping jobs run one after another (held: \"conflict: waits for job_X\"). " +
 			"When subscription usage is high the job may come back state=held with held_reason: " +
 			"it dispatches automatically (priority 0 is never held); cancel_job works on it.",
 	}, createJobTool(cfg))

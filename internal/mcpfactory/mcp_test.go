@@ -317,8 +317,10 @@ func TestToolsListAndBudget(t *testing.T) {
 	// 4KB surface had 3 bytes of headroom left.
 	// Raised to 5KB (5120) by the job-secrets amendment (2026-11-17): create_job
 	// gains the optional `secrets` argument (schema + one description line).
-	if budget >= 5120 {
-		t.Errorf("description budget = %d bytes, want < 5120", budget)
+	// Raised to 5.5KB (5632) by the conflict coordinator (2026-11-18, §6.14):
+	// create_job gains `touches` (schema + two description lines).
+	if budget >= 5632 {
+		t.Errorf("description budget = %d bytes, want < 5632", budget)
 	}
 	t.Logf("description budget: %d bytes", budget)
 }

@@ -107,6 +107,8 @@ type App struct {
 	usage           *usagewin.Tracker
 	usagePoll       *usagewin.Poller // nil unless Usage.Poll
 	gate            *throttle.Gate   // S3 dispatch gate (throttle.go)
+	conflictOff     bool             // FACTORY_CONFLICT=off (conflict.go)
+	conflictMaxWait time.Duration    // bound on one conflict hold (conflict.go)
 	// S5 pause (pause.go): jobs that hit the limit (job id -> true), and
 	// test seams for the re-probe, jitter and wake poll interval.
 	limitHit    sync.Map

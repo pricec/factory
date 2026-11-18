@@ -220,6 +220,15 @@ func (g *Gate) Admit(ctx context.Context, jobID string, req Request, active func
 	return false, ""
 }
 
+// Unadmit forgets a job the gate admitted but that was then held by a later
+// admission stage (the conflict coordinator): it must not count toward the
+// ORANGE concurrency cap while it is not actually running.
+func (g *Gate) Unadmit(jobID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.inflight, jobID)
+}
+
 // pruneInflight drops in-flight entries that now show as active (counted
 // from the DB) or that aged out.
 func (g *Gate) pruneInflight(now time.Time, active []string) {

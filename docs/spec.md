@@ -253,6 +253,7 @@ a different, fixed curve.)
   "result_schema": {},
   "requires": ["gpu"],
   "secrets": ["github-push"],
+  "touches": ["internal/jobs/**", "docs/spec.md"],
   "foreman": "foreman:server",
   "tier": "flash",
   "model": "",
@@ -301,6 +302,17 @@ reject unknown names loudly, listing them (`unknown_secrets`: MCP tool error
 / `400`), and create nothing - fail at create, never at dispatch (the
 `requires` lesson, §6.7). Schedule templates carry names the same way; a
 name deleted before a later firing fails that job at the handout (§13.2).
+
+`touches` (2026-11-18 conflict-coordinator amendment, §6.14) is the job's
+declared file footprint: an optional list of repo-relative path globs
+(`**` crosses directories; `*` alone means "everything"). Validated by
+`wire` (`wire.ValidateTouches`): at most 32 entries of at most 200 bytes,
+each non-empty, relative (no leading `/`), with no `..` or empty path
+segment and no control characters or backslashes. It rides the same
+create paths as the other fields (MCP `create_job` `touches`, UI
+`POST /v1/jobs` `touches`, schedule templates) and is persisted inside the
+job spec. A violation is a create-time error (MCP tool error / `400`).
+Absent/empty means "no declared footprint".
 
 `parent_job_id` (2026-11-15 sub-spawning amendment, §9.2) appears only on
 child jobs spawned by a worker's `spawn_child` tool and is absent otherwise
@@ -743,7 +755,7 @@ factory planner's list view carries summaries only (#7, #19).
 | Method & path | Notes |
 |---|---|
 | `GET /v1/jobs?state=&foreman=` | filter by state and foreman (#9) |
-| `POST /v1/jobs` | UI twin of the MCP `create_job` tool (§9.4): body `{task, requires[], secrets[]?, result_schema, tier, model?, timeout_s, priority, schedule_cron, foreman?, task_id?}`; runs the same capability match (no match -> `pending`); `201 + {job_id, state, foreman}`. `requires` entries are tag names, validated at creation against the union of registered foremen tag keys (§6.7, 2026-11-15 amendment): unknown tag names -> `400 unknown_requires`; a loud `warnings` array rides the 201 when nothing could be validated (no foremen registered). `foreman` (2026-11-16 foreman-pin amendment, §6.7) pins the job to that foreman (bare or `foreman:{id}` form): the pin wins over the Matcher, requires validation is skipped (requires stay informational), an unknown foreman is `404 unknown_foreman` (the `POST /v1/foremen/{id}/messages` contract), and an offline pin leaves the job `pending` with a `warnings` entry until it returns |
+| `POST /v1/jobs` | UI twin of the MCP `create_job` tool (§9.4): body `{task, requires[], secrets[]?, touches[]?, result_schema, tier, model?, timeout_s, priority, schedule_cron, foreman?, task_id?}`; runs the same capability match (no match -> `pending`); `201 + {job_id, state, foreman}`. `requires` entries are tag names, validated at creation against the union of registered foremen tag keys (§6.7, 2026-11-15 amendment): unknown tag names -> `400 unknown_requires`; a loud `warnings` array rides the 201 when nothing could be validated (no foremen registered). `foreman` (2026-11-16 foreman-pin amendment, §6.7) pins the job to that foreman (bare or `foreman:{id}` form): the pin wins over the Matcher, requires validation is skipped (requires stay informational), an unknown foreman is `404 unknown_foreman` (the `POST /v1/foremen/{id}/messages` contract), and an offline pin leaves the job `pending` with a `warnings` entry until it returns |
 | `GET /v1/models` | UI model-picker feed (2026-11-15 amendment): runs `opencode models` on the factory host and returns `[{id, provider, model}]`, provider-split and sorted (§6.5); empty listing is `[]` and is NOT cached (empty is opencode's degraded mode when its background service is unreachable - the next request retries); non-empty listings cached 5 min (§11); exec failure is `500 internal`; unauthenticated like the rest of the control plane |
 | `GET /v1/speech/config` | speech-to-text flag (§6.13): `{"enabled": bool}`, always `200`, `no-store`; never discloses the upstream URL or key; the UI shows its mic buttons only when `enabled` |
 | `GET\|POST /v1/speech/{path...}` | speech reverse proxy (§6.13): `404 not_found` unless `FACTORY_SPEECH_URL` is set; `/v1/speech/stt` maps to the configured upstream STT path (default `/api/stt`), any other path is forwarded verbatim under the base URL; unauthenticated like the rest of the control plane |
@@ -783,7 +795,8 @@ Request/response shapes and status codes beyond those shown are not pinned.
 ### 6.11 Merge queue (2026-11-17 amendment)
 
 (§6.10 is reserved: code cites it for the token-throttle dispatch gate,
-which this document does not transcribe yet.)
+which this document does not transcribe yet. The second admission stage,
+the conflict coordinator, is §6.14.)
 
 Merges into `master` (and the deploy that follows) go through ONE
 factory-tracked queue, one merge at a time. Ad-hoc "merge and deploy" prose
@@ -1067,6 +1080,79 @@ The factory reverse-proxies `/v1/speech/*` to a speech service so the browser ne
 | `FACTORY_SPEECH_STT_PATH` | upstream path for `/v1/speech/stt`; default `/api/stt` (the voice service today, `https://voice.home.qunify.io`); set `/v1/stt` when the service moves |
 
 Proxy behaviour: query strings are forwarded; request bodies are capped at 25 MiB (`413 too_large`, by `Content-Length` up front and by a limit reader for chunked bodies); response bytes are flushed as written (NDJSON streams work); an unreachable upstream is `502 speech_unavailable`, an upstream that does not answer in time `504 speech_timeout`. The mic is also hidden when the browser lacks `getUserMedia`/`MediaRecorder`. The capture client is a self-contained `window.FactoryVoice` block in `ui.html` intended to be extracted into a shared voice-client module.
+
+### 6.14 Conflict coordinator (2026-11-18 amendment)
+
+Concurrent jobs that edit the same files collide at merge time and cost
+fix-job rework. A job therefore declares its footprint (`touches`, §5.1) and
+the factory serialises jobs whose footprints overlap. It is the **second
+admission stage**, run after the usage gate (§6.10) passes, in both places
+the gate runs: at creation (`jobs.Store.Admit`) and in the releaser
+(`ReleasePass`, every 15 s). It reuses the `held` state (§6.1) and
+`held_reason`; there is no new state.
+
+**Overlap.** Two globs overlap when some repo path could match both
+(`jobs.GlobsOverlap`). `*`, `?` and `[...]` work within one path segment; a
+whole `**` segment matches any number of segments; a character class is
+treated as any single character. A final segment with no file extension may
+name a directory, so it also covers everything beneath it (`internal/jobs`
+overlaps `internal/jobs/jobs.go`); a trailing `/` means the subtree. A glob
+that is exactly `*` (or `**`) overlaps everything, including itself.
+
+**What blocks.** A candidate job is held while some OTHER job with a
+non-empty `touches` that overlaps it is *active*: held, pending,
+dispatched, running or failed-awaiting-retry, or `done` while its merge
+request (§6.11, `source_job_id` = that job) is still `queued` or
+`merging`. The blocker stops blocking when it is terminal without a pending
+merge, or when its merge request reached `landed`, `cancelled` or
+`needs_attention` (the merge-fix job that follows a failed merge inherits the
+chain's `touches`, so the footprint stays blocked until the fix lands).
+Blocking is until the merge **lands**, not until the job is merely done.
+Held and pending jobs count so that two conflicting jobs released in one
+pass cannot both go out.
+
+**Rules.**
+
+- A job with no `touches` is never held and blocks nobody. A job declaring
+  `["*"]` is exclusive: it waits for, and is waited on by, every job that
+  declares any `touches`.
+- A job never waits on a job that sorts after it (deadlock guard): FIFO by
+  `created_at`, then job id. A *held* blocker additionally has to be at
+  least as urgent (`priority`) as the candidate, so release order
+  (priority, then FIFO) is respected and waits form a DAG.
+- Priority-0 tasks skip the check, as they skip the usage gate. Merge jobs
+  (`factory:merge_queue`) and merge-fix jobs (`factory:merge_fix`) are
+  exempt: they exist to land work.
+- **Docs are soft.** An overlap where either glob is a docs glob (anything
+  under `docs/`, or a final segment ending `.md`) never holds, unless the
+  other glob is `*`; it is logged instead. A job that also overlaps on
+  non-docs files is held on those.
+- **Max wait.** A conflict hold lasts at most 60 minutes
+  (`DefaultConflictMaxWait`; `FACTORY_CONFLICT_MAX_WAIT`, a Go duration). The
+  wait starts at the releaser's first observation of the conflict (persisted
+  in `jobs.conflict_since`, so it survives a restart) and is cleared on
+  release. After it the job is released anyway, with a `timed_out` note.
+- **Precedence.** If both the usage gate and the coordinator would hold, the
+  usage reason is shown; the conflict is evaluated once the usage gate
+  passes. Conflict holds do not count as "held ahead" for the usage gate.
+- `FACTORY_CONFLICT=off` disables the stage. Evaluation errors fail open.
+
+**held_reason.** `conflict: waits for job_X (<blocker's overlapping glob>)`.
+Usage holds start `usage `, Claude-auth holds `claude auth: `. `list_jobs`
+(MCP) and `GET /v1/jobs` carry it; the UI marks conflict holds with a
+`conflict` badge, and `GET /v1/throttle` / `GET /v1/usage` (`gate`) carry
+`held_by: {usage, conflict, claude_auth}` next to `held`.
+
+**Task events.** When a job filed under a task is conflict-held, released
+from a conflict hold, or released by the max wait, the factory posts an
+internal, non-waking `notify.conflict` envelope on the task thread
+(`{wake:false, action: waiting|released|timed_out, job_id, waits_for, glob,
+text}`), and logs it. `cancel_job` works on a conflict-held job like on any
+held job.
+
+**Planner and job duties.** The planner fills `touches` on every code job
+with the narrowest globs it reasonably can (`["*"]` only for exclusivity).
+A job merges `origin/master` into its branch before `request_merge` (AGENTS.md).
 
 ## 7. Pairing & scoped auth
 
@@ -1580,7 +1666,7 @@ orphaned, live, and local job ids.
   section (#17, #15).
 - Tool descriptions stay tiny (per-turn token cost for every LLM caller,
   #6); byte budgets asserted by test: worker surface < 2KB total (#17; 2026-11-17 job-owned merges: raised from 1.5KB for `request_merge`, §9.2; earlier 2026-11-17 typed report_result input schema, was 1KB);
-  foreman surface < 1.5KB (#18; 2KB since the 2026-11-16 `raise_alert` tool); factory surface < 5KB (2026-11-17 job secrets; was 4.5KB, merge
+  foreman surface < 1.5KB (#18; 2KB since the 2026-11-16 `raise_alert` tool); factory surface < 5.5KB (2026-11-18 conflict coordinator `touches`; was 5KB after 2026-11-17 job secrets; 4.5KB, merge
   queue: raised from 4KB for `request_merge`, §6.11 - 4093 B were in use;
   earlier: < 4KB since the 2026-11-16
   inbox redesign: raised from 2KB for the task tools of §9.5.2 and
@@ -1971,6 +2057,7 @@ never stored: only `chat.message` and `brain.reply` are operator-visible,
 | `brain.failed` | `foreman:{id}`, `{envelope_id, envelope_type, error}` | yes | yes | a foreman brain session failed on a delegated envelope (§3.3); relayed exactly like `foreman.report`, so a failed delegation is never silent |
 | `notify.job` | `factory`, `{id, state, foreman, last_error, over_budget, summary}` and `job_id`, plus `self_initiated`, plus `merge_requests: [{id, branch, head, state, waiting_on?}]` when the job filed its own merge requests (§6.11) | yes | **yes, when threaded** (2026-11-16 wake-on-terminal) | terminal job transition (done/failed/timed_out/dead/cancelled/superseded); stamped with its task when attributable, else unthreaded; hidden by default, no chips (operator DECISION 2). Wakes the planner on its task so the operator hears the outcome unasked. NO wake when unthreaded (never opens a task) or when `self_initiated` is true (the planner's own `cancel_job`, §9.4: it already knows) |
 | `notify.merge` | `factory`, the §6.11 `notify.merge` payload, and `job_id` = the source job | yes | **yes, when threaded and `wake` is true** | outcome of a job-owned merge request (§6.11): `landed`, `escalated`, `dependency_failed`, `dependency_stalled` wake; `fix_dispatched` and `cancelled` are a record only. Never posted without a task |
+| `notify.conflict` | `factory`, `{wake:false, action, job_id, waits_for, glob, text}` | yes | no | conflict-hold record on the job's task (§6.14): `waiting`, `released`, `timed_out`. Never posted without a task |
 | `task.changed`, `alert.changed` | synthetic, payload = Task / Alert | n/a | no | SSE hints only, NOT persisted (§9.5.2, §9.5.3) |
 | `notify.pending`, `notify.unhandled` | `factory` | yes | no | **legacy**: no longer produced; since the redesign they are P1 and P2 alerts (§9.5.3). Old rows stay readable (backfilled into the legacy task) |
 
@@ -2421,7 +2508,7 @@ outside the `result_schema` subset at validation time (#3).
 | Bearer token | 32B random, stored SHA-256 only | #11 |
 | Long-poll window | `wait_seconds` 0-60 | #1 |
 | Inbox fetch limit | default 50, max 500 | #1 |
-| MCP description budgets | worker < 1.5KB (2026-11-17 typed report_result schema; was 1KB); foreman < 2KB (2026-11-16 raise_alert; was 1.5KB); factory < 5KB (2026-11-17 job secrets; was 4.5KB after merge queue; 4KB, 2KB before 2026-11-16) | #17, #18, #19 |
+| MCP description budgets | worker < 1.5KB (2026-11-17 typed report_result schema; was 1KB); foreman < 2KB (2026-11-16 raise_alert; was 1.5KB); factory < 5.5KB (2026-11-18 `touches`; was 5KB, 2026-11-17 job secrets; 4.5KB after merge queue; 4KB, 2KB before 2026-11-16) | #17, #18, #19 |
 | JobSpec defaults | `timeout_s` 14400 (ceiling); `idle_timeout_s` 900; `priority` 5 (1-9, 9 highest); `budget` `{max_prompt_bytes 32768, max_output_tokens 8192, max_cost_usd 20.0}` | #3 |
 | Long-pending alert | `pending` with no matching online foreman for > 30 min -> one `notify.pending` in `planner:main` (dedupe per job per pending episode); check tick 1 min | 2026-11-15 amendment |
 | Explicit model string | optional; 1-128 printable ASCII chars, no whitespace; overrides the tier mapping | 2026-11-15 amendment |
