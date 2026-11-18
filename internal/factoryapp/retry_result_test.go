@@ -1,6 +1,7 @@
 package factoryapp_test
 
 import (
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -47,9 +48,14 @@ func TestRetryAttemptResultIsNotDroppedAsDuplicate(t *testing.T) {
 	// re-dispatched attempt 1 (state is only observable by polling).
 	var st string
 	var att int
-	waitFor(t, "retry dispatched (see last state in log)", 60*time.Second, func() bool {
+	seen := map[string]bool{}
+	waitFor(t, "retry dispatched (see states in log)", 60*time.Second, func() bool {
 		e.clock.Advance(time.Minute)
 		st, att = state()
+		if k := fmt.Sprintf("%s/%d", st, att); !seen[k] {
+			seen[k] = true
+			t.Logf("state=%s attempts=%d", st, att)
+		}
 		return att == 1 && (st == "dispatched" || st == "running")
 	})
 	t.Logf("retry state=%s attempts=%d", st, att)
