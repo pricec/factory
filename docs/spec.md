@@ -1719,7 +1719,7 @@ orphaned, live, and local job ids.
   section (#17, #15).
 - Tool descriptions stay tiny (per-turn token cost for every LLM caller,
   #6); byte budgets asserted by test: worker surface < 2KB total (#17; 2026-11-17 job-owned merges: raised from 1.5KB for `request_merge`, §9.2; earlier 2026-11-17 typed report_result input schema, was 1KB);
-  foreman surface < 1.5KB (#18; 2KB since the 2026-11-16 `raise_alert` tool); factory surface < 6.5KB (2026-11-18 standing Planner chat: `create_task`, `update_standing_summary`, §9.5.7; was 6KB after host facts; 5.5KB, 2026-11-18 conflict coordinator `touches`; was 5KB after 2026-11-17 job secrets; 4.5KB, merge
+  foreman surface < 1.5KB (#18; 2KB since the 2026-11-16 `raise_alert` tool); factory surface < 7KB (2026-11-18 task links: `create_task` `follow_up_of`/`parent_task_id`/`message`, `list_tasks` `parent_task_id`, §9.5.1; was 6.5KB, 2026-11-18 standing Planner chat: `create_task`, `update_standing_summary`, §9.5.7; was 6KB after host facts; 5.5KB, 2026-11-18 conflict coordinator `touches`; was 5KB after 2026-11-17 job secrets; 4.5KB, merge
   queue: raised from 4KB for `request_merge`, §6.11 - 4093 B were in use;
   earlier: < 4KB since the 2026-11-16
   inbox redesign: raised from 2KB for the task tools of §9.5.2 and

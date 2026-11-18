@@ -245,8 +245,12 @@ func buildTaskWakePrompt(w PlannerWake) string {
 	for _, l := range []struct {
 		label string
 		ids   []string
-	}{{"follow_up_of", nonEmpty(t.FollowUpOf)}, {"parent_task_id", nonEmpty(t.ParentTaskID)},
-		{"follow_up_task_ids", t.FollowUpTaskIDs}, {"child_task_ids", t.ChildTaskIDs}} {
+	}{
+		{"follow_up_of", nonEmpty(t.FollowUpOf)},
+		{"parent_task_id", nonEmpty(t.ParentTaskID)},
+		{"follow_up_task_ids", t.FollowUpTaskIDs},
+		{"child_task_ids", t.ChildTaskIDs},
+	} {
 		if len(l.ids) > 0 {
 			fmt.Fprintf(&sb, "%s: %s\n", l.label, strings.Join(l.ids, ", "))
 		}
