@@ -196,7 +196,7 @@ func TestFinishMergeForJob(t *testing.T) {
 		jobState string
 		want     string
 	}{
-		{StateDone, MergeLanded},
+		{StateDone, MergeNeedsAttention}, // driveTo's done carries no typed result
 		{StateFailed, MergeNeedsAttention},
 		{StateTimedOut, MergeNeedsAttention},
 		{StateDead, MergeNeedsAttention},
@@ -229,6 +229,77 @@ func TestFinishMergeForJob(t *testing.T) {
 	s := openStore(t)
 	if _, applied, err := s.FinishMergeForJob(context.Background(), "job_notamerge", StateDone); applied || err != nil {
 		t.Errorf("non-merge job: applied=%v err=%v", applied, err)
+	}
+}
+
+// TestFinishMergeRequiresMergedResult: a request lands only when the merge
+// job's structured result has merged:true.
+func TestFinishMergeRequiresMergedResult(t *testing.T) {
+	failedErr := &wire.JobError{Kind: wire.KindOther, Message: "conflict: x"}
+	cases := []struct {
+		name   string
+		status string
+		result string
+		err    *wire.JobError
+		want   string
+	}{
+		{"merged true", wire.StatusDone, `{"merged":true,"merge_commit":"abc123"}`, nil, MergeLanded},
+		{"done merged false", wire.StatusDone, `{"merged":false,"reason":"conflict"}`, nil, MergeNeedsAttention},
+		{"failed on conflict", wire.StatusFailed, `{"merged":false,"reason":"conflict"}`, failedErr, MergeNeedsAttention},
+		{"failed even with merged true", wire.StatusFailed, `{"merged":true}`, failedErr, MergeNeedsAttention},
+		{"done untyped result", wire.StatusDone, `{"pr":12}`, nil, MergeNeedsAttention},
+		{"done merged wrong type", wire.StatusDone, `{"merged":"true"}`, nil, MergeNeedsAttention},
+		{"done no result", wire.StatusDone, ``, nil, MergeNeedsAttention},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := openStore(t)
+			ctx := context.Background()
+			mr := mustMR(t, s, "feat/x")
+			spec := MergeJobSpec(mr, wire.NewJobID(), "foreman:server")
+			if ok, err := s.ClaimMerge(ctx, mr.ID, spec.ID); !ok || err != nil {
+				t.Fatal(ok, err)
+			}
+			if err := s.Create(ctx, spec); err != nil {
+				t.Fatal(err)
+			}
+			mustDispatch(t, s, spec.ID, "foreman:alpha")
+			mustApplyEvent(t, s, spec.ID, "started")
+			res := wire.JobResult{JobID: spec.ID, Status: tc.status, Summary: "nothing merged", Error: tc.err}
+			if tc.result != "" {
+				res.Result = json.RawMessage(tc.result)
+			}
+			mustApplyResult(t, s, res)
+			job, _, _ := s.Get(ctx, spec.ID)
+			got, applied, err := s.FinishMergeForJob(ctx, spec.ID, job.State)
+			if err != nil || !applied || got.State != tc.want {
+				t.Fatalf("got %s applied=%v err=%v, want %s (job %s)", got.State, applied, err, tc.want, job.State)
+			}
+		})
+	}
+}
+
+// TestMergeJobSpecHasTypedResultSchema: the merge job carries the typed
+// schema, and a done report without merged is rejected by it.
+func TestMergeJobSpecHasTypedResultSchema(t *testing.T) {
+	s := openStore(t)
+	spec := MergeJobSpec(mustMR(t, s, "feat/x"), wire.NewJobID(), "foreman:server")
+	if err := spec.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		result string
+		ok     bool
+	}{
+		{`{"merged":true,"merge_commit":"abc"}`, true},
+		{`{"merged":false,"reason":"conflict"}`, true},
+		{`{"reason":"conflict"}`, false},
+		{`{"merged":"yes"}`, false},
+	} {
+		r := wire.JobResult{JobID: spec.ID, Status: wire.StatusDone, Summary: "s", Result: json.RawMessage(tc.result)}
+		if err := r.Validate(spec.ResultSchema); (err == nil) != tc.ok {
+			t.Errorf("%s: err=%v, want ok=%v", tc.result, err, tc.ok)
+		}
 	}
 }
 

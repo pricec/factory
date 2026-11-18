@@ -91,7 +91,10 @@ func finishJob(t *testing.T, a *App, jobID, status string) {
 	if err := a.jobs.ApplyEvent(ctx, jobID, "started"); err != nil {
 		t.Fatal(err)
 	}
-	res := wire.JobResult{JobID: jobID, Status: status, Summary: "merged and deployed"}
+	res := wire.JobResult{
+		JobID: jobID, Status: status, Summary: "merged and deployed",
+		Result: json.RawMessage(`{"merged":true,"merge_commit":"abc1234"}`),
+	}
 	if status == wire.StatusFailed {
 		res.Summary = "head drift: origin has 89abcdef"
 		res.Error = &wire.JobError{Kind: wire.KindOther, Message: "head drift"}
@@ -397,4 +400,36 @@ func TestMergeQueueOfflineForeman(t *testing.T) {
 		t.Fatalf("second dispatch %q", id)
 	}
 	assertOneMerging(t, a, 1)
+}
+
+// TestMergeQueueDoneWithoutMergedIsNotLanded: a merge job that ends done
+// but without result.merged=true (merged:false, or no typed result) must
+// not land its request (the false-landed regression).
+func TestMergeQueueDoneWithoutMergedIsNotLanded(t *testing.T) {
+	for _, tc := range []struct{ name, result string }{
+		{"merged false", `{"merged":false,"reason":"conflict"}`},
+		{"untyped", ``},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newMergeApp(t)
+			ctx := context.Background()
+			mr := queueMerge(t, a, "feat/conflicted")
+			pass(t, a)
+			m := getMerge(t, a, mr.ID)
+			if err := a.jobs.ApplyEvent(ctx, m.JobID, "started"); err != nil {
+				t.Fatal(err)
+			}
+			res := wire.JobResult{JobID: m.JobID, Status: wire.StatusDone, Summary: "nothing merged: conflicts with master"}
+			if tc.result != "" {
+				res.Result = json.RawMessage(tc.result)
+			}
+			payload, _ := json.Marshal(res)
+			a.handleEnvelope(ctx, wire.MessageEnvelope{Type: "job.result", JobID: m.JobID, Payload: payload}, map[string]bool{})
+			if got := getMerge(t, a, mr.ID); got.State == jobs.MergeLanded {
+				t.Fatalf("request landed on a done job without merged:true: %+v", got)
+			} else if got.State != jobs.MergeNeedsAttention {
+				t.Fatalf("state = %s, want needs_attention", got.State)
+			}
+		})
+	}
 }

@@ -850,7 +850,10 @@ the planner has `request_merge` (§9.4) for a branch no job queued.
   Any other failure (`head_drift`, `merge`, `deploy`, `preflight`, no
   report, timeout) closes `needs_attention` as below.
 - **Closing.** The merge job's terminal transition (the §6.1 terminal hook)
-  closes the request: `done -> landed`; `failed | timed_out | dead ->
+  closes the request: `done -> landed` only if the job's structured
+  result (the merge job's typed `result_schema`: `merged` bool required,
+  `merge_commit`, `reason`) has `merged: true`, otherwise a `done` job
+  (merged false, missing or untyped result) closes `needs_attention`; `failed | timed_out | dead ->
   needs_attention`; `cancelled -> cancelled`; `superseded ->
   needs_attention` (the queue cannot know whether a hand-made replacement
   merged). `result` = `job <id> <state>: <last summary> (error: <last
