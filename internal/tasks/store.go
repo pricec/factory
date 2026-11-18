@@ -166,7 +166,14 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	// needs_operator (spec §9.5.2): added after the first release, so
 	// existing databases get it by ALTER (additive, idempotent).
-	return s.addColumnIfMissing(ctx, "tasks", "needs_operator", "INTEGER NOT NULL DEFAULT 0")
+	if err := s.addColumnIfMissing(ctx, "tasks", "needs_operator", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	// standing: flags the one well-known standing planner chat (additive).
+	if err := s.addColumnIfMissing(ctx, "tasks", "standing", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	return s.EnsureStanding(ctx)
 }
 
 // addColumnIfMissing runs ALTER TABLE ... ADD COLUMN unless the column is

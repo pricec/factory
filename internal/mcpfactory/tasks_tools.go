@@ -50,6 +50,14 @@ type (
 		// needs_operator flag; omitted leaves it alone.
 		NeedsOperator *bool `json:"needs_operator,omitempty"`
 	}
+	createTaskArgs struct {
+		Title    string `json:"title"`
+		Priority *int   `json:"priority,omitempty"`
+	}
+	updateStandingSummaryArgs struct {
+		Summary        string `json:"summary"`
+		ThroughMessage string `json:"through_message_id"`
+	}
 	setPriorityCriteriaArgs struct {
 		Text string `json:"text"`
 	}
@@ -74,6 +82,14 @@ func addTaskTools(srv *mcp.Server, cfg Config) {
 		Description: "Retitle, reprioritise (0 = most urgent), set status open|closed (+reason), or set needs_operator " +
 			"(true while blocked on an operator decision/approval; operator reply/close clears it).",
 	}, updateTaskTool(cfg))
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "create_task",
+		Description: "New open task -> {task}. Standing Planner chat: create the task first, then create_job task_id=it.",
+	}, createTaskTool(cfg))
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "update_standing_summary",
+		Description: "Standing chat only: store the merged running summary (<=4000 bytes) of older messages up to through_message_id.",
+	}, updateStandingSummaryTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "set_priority_criteria",
 		Description: "Store the operator's task-ranking criteria (shown on every wake).",
@@ -120,7 +136,64 @@ func jobTask(ctx context.Context, cfg Config, req *mcp.CallToolRequest, explicit
 	if cfg.Tasks == nil {
 		return "", nil
 	}
-	return resolveTask(ctx, cfg, req, explicit)
+	id, err := resolveTask(ctx, cfg, req, explicit)
+	if err != nil || id == "" {
+		return id, err
+	}
+	// The standing Planner chat never owns jobs: a session woken there
+	// (or an explicit task_id naming it) must file the work under a task
+	// of its own (create_task), so create_job never defaults to it.
+	if id == tasks.StandingID {
+		return "", fmt.Errorf("the standing Planner chat cannot own jobs: call create_task for this work, then create_job with that task_id (or pass an existing task's id)")
+	}
+	return id, nil
+}
+
+func createTaskTool(cfg Config) mcp.ToolHandlerFor[createTaskArgs, any] {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, in createTaskArgs) (*mcp.CallToolResult, any, error) {
+		title := titleFrom(in.Title)
+		if strings.TrimSpace(in.Title) == "" {
+			return nil, nil, fmt.Errorf("title: required")
+		}
+		prio := tasks.DefaultPriority
+		if in.Priority != nil {
+			if *in.Priority < 0 {
+				return nil, nil, fmt.Errorf("priority: must be >= 0 (0 = most urgent)")
+			}
+			prio = *in.Priority
+		}
+		t, err := cfg.Tasks.CreateTask(ctx, title, prio)
+		if err != nil {
+			return nil, nil, err
+		}
+		cfg.taskChanged(ctx, t.ID)
+		return structuredResult(map[string]any{"task": t}), nil, nil
+	}
+}
+
+func updateStandingSummaryTool(cfg Config) mcp.ToolHandlerFor[updateStandingSummaryArgs, any] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, in updateStandingSummaryArgs) (*mcp.CallToolResult, any, error) {
+		if wokenTask(req) != tasks.StandingID {
+			return nil, nil, fmt.Errorf("update_standing_summary is only for the standing Planner chat session")
+		}
+		if strings.TrimSpace(in.Summary) == "" {
+			return nil, nil, fmt.Errorf("summary: required")
+		}
+		if strings.TrimSpace(in.ThroughMessage) == "" {
+			return nil, nil, fmt.Errorf("through_message_id: required")
+		}
+		env, ok, err := cfg.Inbox.GetMessage(ctx, in.ThroughMessage)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !ok || env.ThreadID != tasks.StandingID {
+			return nil, nil, fmt.Errorf("through_message_id %q is not a message of the standing chat", in.ThroughMessage)
+		}
+		if err := cfg.Tasks.SetStandingSummary(ctx, in.Summary, in.ThroughMessage); err != nil {
+			return nil, nil, err
+		}
+		return structuredResult(map[string]any{"ok": true}), nil, nil
+	}
 }
 
 // titleFrom derives a fallback task title: whitespace collapsed, the
