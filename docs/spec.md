@@ -966,7 +966,27 @@ planner did not come back to it.)
   | any other `needs_attention` | the P1 alert, linked to the task and saying why no fix job ran, and `notify.merge` (`escalated`, waking) |
   | `cancelled` | `notify.merge` (`cancelled`, not waking) |
 
-  A waking note never reopens a closed task (it is recorded, not waking).
+  Merge events never create a task (no "Merge mr_..." housekeeping
+  tasks). They are posted on the owning task's thread and the planner
+  there files any fix or rebase job:
+  - **Closed owner task.** A note that needs the planner (`escalated`,
+    `dependency_failed`, `dependency_stalled`) **reopens** the task and
+    says so in its `text`; `landed` and `cancelled` on a closed task are
+    recorded without waking or reopening.
+  - **Dedupe.** A note identical to one already on the thread (same
+    request, `action`, `state`, `failure`, `fix_round` and `text`) is not
+    posted, so a repeated event never wakes the planner again. An event
+    for a request that is already `landed` or `cancelled` (and is not
+    that outcome) is ignored.
+  - **No owning task** (the source job resolves to no task). The note goes
+    to the standing Planner chat when it exists; else a P1 alert is raised
+    for events that wake (escalations and stalls already have theirs). A
+    merge job's own report that cannot be attributed is filed under the
+    standing chat, else alerted; it never opens a task.
+  - A merge job's terminal `notify.job` carries `merge_job: true` and
+    never wakes the planner (the `notify.merge` is the signal).
+  - Replying to a merge alert that is linked to a task continues that task
+    (reopening it if closed) instead of creating one.
   Requests without a source job keep the alert-only behavior; auditor
   requests keep §6.12.
 - **The merge-fix job** is built by code (`jobs.MergeFixJobSpec`):
@@ -2120,8 +2140,8 @@ never stored: only `chat.message` and `brain.reply` are operator-visible,
 | `brain.reply` | `factory:brain` or `factory`, `{text, spoken?}` | no | no | the planner's `notify_operator` (§9.4), the planner-failure note, and the alert seed of §9.5.3 |
 | `foreman.report` | `foreman:{id}`, free-form (typically `{text}`) | yes | yes | relayed verbatim from `factory:main`, stamped with its task (§9.5.2 relay stamping) |
 | `brain.failed` | `foreman:{id}`, `{envelope_id, envelope_type, error}` | yes | yes | a foreman brain session failed on a delegated envelope (§3.3); relayed exactly like `foreman.report`, so a failed delegation is never silent |
-| `notify.job` | `factory`, `{id, state, foreman, last_error, over_budget, summary}` and `job_id`, plus `self_initiated`, plus `merge_requests: [{id, branch, head, state, waiting_on?}]` when the job filed its own merge requests (§6.11) | yes | **yes, when threaded** (2026-11-16 wake-on-terminal) | terminal job transition (done/failed/timed_out/dead/cancelled/superseded); stamped with its task when attributable, else unthreaded; hidden by default, no chips (operator DECISION 2). Wakes the planner on its task so the operator hears the outcome unasked. NO wake when unthreaded (never opens a task) or when `self_initiated` is true (the planner's own `cancel_job`, §9.4: it already knows) |
-| `notify.merge` | `factory`, the §6.11 `notify.merge` payload, and `job_id` = the source job | yes | **yes, when threaded and `wake` is true** | outcome of a job-owned merge request (§6.11): `landed`, `escalated`, `dependency_failed`, `dependency_stalled` wake; `fix_dispatched` and `cancelled` are a record only. Never posted without a task |
+| `notify.job` | `factory`, `{id, state, foreman, last_error, over_budget, summary}` and `job_id`, plus `self_initiated`, plus `merge_requests: [{id, branch, head, state, waiting_on?}]` when the job filed its own merge requests (§6.11) | yes | **yes, when threaded** (2026-11-16 wake-on-terminal) | terminal job transition (done/failed/timed_out/dead/cancelled/superseded); stamped with its task when attributable, else unthreaded; hidden by default, no chips (operator DECISION 2). Wakes the planner on its task so the operator hears the outcome unasked. NO wake when unthreaded (never opens a task), when `merge_job` is true (a merge-queue job; its outcome is the `notify.merge`), or when `self_initiated` is true (the planner's own `cancel_job`, §9.4: it already knows) |
+| `notify.merge` | `factory`, the §6.11 `notify.merge` payload, and `job_id` = the source job | yes | **yes, when threaded and `wake` is true** | outcome of a job-owned merge request (§6.11): `landed`, `escalated`, `dependency_failed`, `dependency_stalled` wake; `fix_dispatched` and `cancelled` are a record only. Deduped; goes to the standing chat when no task owns the job; reopens a closed task only when it needs the planner (§6.11) |
 | `notify.conflict` | `factory`, `{wake:false, action, job_id, waits_for, glob, text}` | yes | no | conflict-hold record on the job's task (§6.14): `waiting`, `released`, `timed_out`. Never posted without a task |
 | `task.changed`, `alert.changed` | synthetic, payload = Task / Alert | n/a | no | SSE hints only, NOT persisted (§9.5.2, §9.5.3) |
 | `notify.pending`, `notify.unhandled` | `factory` | yes | no | **legacy**: no longer produced; since the redesign they are P1 and P2 alerts (§9.5.3). Old rows stay readable (backfilled into the legacy task) |

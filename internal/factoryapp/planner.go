@@ -92,7 +92,7 @@ func wakesPlanner(env wire.MessageEnvelope) bool {
 	case "chat.message", foremanReportType, brainFailedType, taskClosedByOperatorType:
 		return true
 	case notifyJobType:
-		return env.ThreadID != "" && !selfInitiatedJob(env)
+		return env.ThreadID != "" && !selfInitiatedJob(env) && !mergeJobNote(env)
 	case notifyMergeType:
 		// Job-owned merge outcomes (spec §6.11): only the ones that
 		// leave something to say or coordinate wake (mergeowner.go).
@@ -103,6 +103,15 @@ func wakesPlanner(env wire.MessageEnvelope) bool {
 
 // notifyJobType is the terminal-job envelope type (spec §9.5).
 const notifyJobType = "notify.job"
+
+// mergeJobNote reports whether a notify.job payload is a merge job's own
+// terminal record (see notifyOperatorJob): never a wake.
+func mergeJobNote(env wire.MessageEnvelope) bool {
+	var p struct {
+		MergeJob bool `json:"merge_job"`
+	}
+	return json.Unmarshal(env.Payload, &p) == nil && p.MergeJob
+}
 
 // selfInitiatedJob reports whether a notify.job payload is marked as the
 // planner's own cancel_job (nothing new to tell the operator).
@@ -206,7 +215,8 @@ const (
 	reasonMerge = "planner: a job-owned merge request on this task changed state (notify.merge; its text says what happened). " +
 		"landed: tell the operator the work is merged and deployed, and close the task if nothing else is open. " +
 		"escalated, dependency_failed or dependency_stalled: the automatic fix path is exhausted or branches of different jobs need sequencing - " +
-		"this is your coordination job: decide the next step (a job, a re-request, or the operator's decision), do it, and tell the operator"
+		"this is your coordination job: decide the next step (a fix or rebase job filed on THIS task, a re-request, or the operator's decision), do it, and tell the operator. " +
+		"Merge events never get a task of their own: work them here, on the task that owns the branch (it may have been reopened for this)"
 )
 
 // wakeReason names why a task session wakes, from the batch's envelope types.
@@ -351,6 +361,12 @@ func (a *App) notifyOperatorJob(ctx context.Context, jobID string) {
 	// must not queue or chase them again.
 	if reqs := a.jobMergeSummaries(ctx, job.ID); len(reqs) > 0 {
 		payload["merge_requests"] = reqs
+	}
+	// A merge job's outcome reaches the owning task as notify.merge
+	// (mergeowner.go); its own notify.job is a record only, so one merge
+	// never wakes the planner twice or opens a task.
+	if a.isMergeQueueJob(ctx, job.ID) {
+		payload["merge_job"] = true
 	}
 	a.notifyOperatorThreaded(ctx, a.jobThread(ctx, job.ID), job.ID, notifyJobType, payload)
 }

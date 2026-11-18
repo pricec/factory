@@ -289,6 +289,16 @@ branch no job queued.
 | failed, anything else: `deploy`, `preflight`, `merge`, `nothing_to_merge`, no report | P1 alert for the operator, linked to the task, and the planner is woken to coordinate. |
 | failed after 2 merge-fix jobs | The same escalation. The loop is bounded: there is never a third fix job for one chain of requests. |
 
+**Merge events never create tasks.** A failure, conflict or stalled
+dependency is posted on the owning task's thread as an internal
+`notify.merge`; the planner there files a fix or rebase job. The same
+event twice posts nothing (no repeated wake), and events for a request
+already landed or cancelled are ignored. If the owning task is closed it
+is **reopened** with a note when the event needs the planner (landed and
+cancelled stay recorded only). If no task owns the job, the note goes to
+the standing Planner chat when it exists, else a P1 alert is raised;
+still no task is created. Spec §6.11.
+
 A job's declared `touches` (spec §6.14) keep conflicting jobs apart: a job
 whose `touches` overlap an active job's is held until that job's merge
 request lands (or is cancelled or needs attention), so merge conflicts
