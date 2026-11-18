@@ -339,3 +339,38 @@ func openTemp(t *testing.T) *Service {
 	t.Cleanup(func() { svc.Close() })
 	return svc
 }
+
+// A retry re-dispatches the same job id; ReleaseResult must free the dedupe
+// slot for the new attempt's result, but only once the old one is acked.
+func TestReleaseResultFreesSlotForRetryAttempt(t *testing.T) {
+	svc := openTemp(t)
+	defer svc.Close()
+	ctx := context.Background()
+
+	first, err := svc.Post(ctx, "inbox:main", testEnvelope(t, "job.result", "job_r", `{"status":"failed"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Unacked: not released.
+	if n, err := svc.ReleaseResult(ctx, "inbox:main", "job_r"); err != nil || n != 0 {
+		t.Fatalf("release of unacked = %d, %v; want 0, nil", n, err)
+	}
+	if err := svc.Ack(ctx, "inbox:main", []string{first.ID}); err != nil {
+		t.Fatal(err)
+	}
+	// Other inbox / other job untouched.
+	if n, _ := svc.ReleaseResult(ctx, "inbox:other", "job_r"); n != 0 {
+		t.Fatalf("released %d rows from another inbox", n)
+	}
+	if n, err := svc.ReleaseResult(ctx, "inbox:main", "job_r"); err != nil || n != 1 {
+		t.Fatalf("release = %d, %v; want 1, nil", n, err)
+	}
+	if _, err := svc.Post(ctx, "inbox:main", testEnvelope(t, "job.result", "job_r", `{"status":"done"}`)); err != nil {
+		t.Fatalf("retry attempt result rejected: %v", err)
+	}
+	// Dedupe within one attempt still holds.
+	var dup *DuplicateError
+	if _, err := svc.Post(ctx, "inbox:main", testEnvelope(t, "job.result", "job_r", `{"status":"done"}`)); !errors.As(err, &dup) {
+		t.Fatalf("same-attempt duplicate: got %v, want *DuplicateError", err)
+	}
+}

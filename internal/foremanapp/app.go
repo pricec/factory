@@ -553,6 +553,10 @@ func (a *App) handleBatch(ctx context.Context, envs []wire.MessageEnvelope, ack 
 				log.Printf("foremanapp: job.request %s deferred: draining for auto-update (not acked; redelivered)", env.ID)
 				continue
 			}
+			// A retry re-dispatches the same job id: free the previous
+			// attempt's job.result slot so this attempt's result is not
+			// dropped as a duplicate (inbox.ReleaseResult).
+			a.releasePriorResults(ctx, env.JobID)
 			err := a.router.Handle(ctx, env)
 			a.gate.endDispatch()
 			if err != nil {
@@ -906,4 +910,20 @@ func (a *App) ackRemote(ctx context.Context, ids []string) error {
 	return postJSON(ctx,
 		a.factoryURL+"/v1/inboxes/"+url.PathEscape(a.inboxID)+"/ack",
 		a.paired.Bearer, map[string]any{"ids": ids})
+}
+
+// releasePriorResults frees the job.result dedupe slots a new attempt of
+// jobID would collide with: the foreman's own inbox and, for a spawned
+// child, the parent's per-job inbox. Failures are logged only; the worst
+// case is the old behaviour (reconcile reaps the job).
+func (a *App) releasePriorResults(ctx context.Context, jobID string) {
+	inboxes := []string{a.inboxID}
+	if parent, ok := a.childParentOf(jobID); ok {
+		inboxes = append(inboxes, "job:"+parent)
+	}
+	for _, id := range inboxes {
+		if _, err := a.inbox.ReleaseResult(ctx, id, jobID); err != nil {
+			log.Printf("foremanapp: release prior result of %s in %s: %v", jobID, id, err)
+		}
+	}
 }

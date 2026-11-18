@@ -203,6 +203,25 @@ func (s *Service) hookFunc() func(inboxID string, env wire.MessageEnvelope) {
 	return s.hook
 }
 
+// ReleaseResult frees the job.result dedupe slot of (inboxID, jobID) for a
+// new attempt. A retry re-dispatches the SAME job id (spec §6.4), so without
+// this the retry attempt's result collides with the previous attempt's
+// stored one, is dropped as a duplicate, and the job sits running until
+// reconcile reaps it. Only ACKED results are removed: an unacked one has not
+// been consumed yet. Returns how many rows were removed.
+func (s *Service) ReleaseResult(ctx context.Context, inboxID, jobID string) (int64, error) {
+	if jobID == "" {
+		return 0, nil
+	}
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM messages WHERE inbox_id = ? AND job_id = ? AND type = 'job.result' AND acked = 1`,
+		inboxID, jobID)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 func (s *Service) existingResult(ctx context.Context, inboxID, jobID string) (id string, dup bool, err error) {
 	err = s.db.QueryRowContext(ctx,
 		`SELECT id FROM messages WHERE inbox_id = ? AND job_id = ? AND type = 'job.result'`,
