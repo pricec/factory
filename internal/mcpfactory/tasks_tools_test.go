@@ -374,6 +374,7 @@ func TestStandingChatTools(t *testing.T) {
 	}
 	e.wokenTask = id
 	toolError(t, "update_standing_summary", e.callTool("update_standing_summary", args))
+}
 
 // TestNotifyOperatorSpoken: the optional `spoken` field is stored in the
 // brain.reply payload, whitespace-collapsed and capped; omitted when empty.
