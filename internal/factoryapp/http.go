@@ -23,6 +23,7 @@ type pairRequest struct {
 	Self         struct {
 		ID           string            `json:"id"`
 		Capabilities map[string]string `json:"capabilities"`
+		Host         json.RawMessage   `json:"host,omitempty"`
 	} `json:"self"`
 }
 
@@ -52,6 +53,11 @@ func (a *App) handlePair(w http.ResponseWriter, r *http.Request) {
 	if err := a.upsertCaps(r.Context(), inboxID, req.Self.Capabilities); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
+	}
+	if h, ok := registry.ParseHost(req.Self.Host); ok {
+		if err := a.jobs.SetForemanHost(r.Context(), inboxID, h); err != nil {
+			log.Printf("factoryapp: pair: store host for %s: %v", inboxID, err)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"bearer":     bearer,

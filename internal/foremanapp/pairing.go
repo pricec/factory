@@ -74,6 +74,7 @@ func pairWithFactory(ctx context.Context, a *App) (pairingRecord, error) {
 		"self": map[string]any{
 			"id":           a.id,
 			"capabilities": detectCapabilities(a.cfg.Harness),
+			"host":         a.hostFacts(),
 		},
 	}
 	data, err := json.Marshal(body)

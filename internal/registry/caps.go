@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/pricec/factory/internal/wire"
 )
 
 // Capabilities is a foreman's flat tag map (spec §6.7): tag name -> value.
@@ -84,7 +86,13 @@ type refreshBody struct {
 	// ClaudeAuth is the foreman's Claude CLI auth health report (spec
 	// §13.3); absent from older foremen.
 	ClaudeAuth json.RawMessage `json:"claude_auth,omitempty"`
+	// Host is the foreman's structured host facts (spec §6.7.1); absent
+	// from older foremen. Never part of capabilities.
+	Host json.RawMessage `json:"host,omitempty"`
 }
+
+// HostFunc stores a foreman's sanitized host report (spec §6.7.1).
+type HostFunc func(ctx context.Context, identity string, host wire.HostInfo) error
 
 // ExtensionFunc sees the refresh's optional `claude_auth` report (nil
 // when absent) after the upsert and returns extra top-level fields for
@@ -129,6 +137,26 @@ func RefreshHandlerReconciling(authz AuthzFunc, upsert func(ctx context.Context,
 // hook (spec §13.3): ext's fields join the response body, which turns a
 // 204 into a 200 when the advert is empty but ext has something to say.
 func RefreshHandlerExtended(authz AuthzFunc, upsert func(ctx context.Context, identity string, caps map[string]string) error, advert AdvertFunc, reconcile ReconcileFunc, ext ExtensionFunc) http.Handler {
+	return RefreshHandlerHosted(authz, upsert, advert, reconcile, ext, nil)
+}
+
+// ParseHost decodes and sanitizes a reported host object. ok is false for
+// an absent, malformed or id-less report (treated as "no host info").
+func ParseHost(raw json.RawMessage) (wire.HostInfo, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return wire.HostInfo{}, false
+	}
+	var h wire.HostInfo
+	if err := json.Unmarshal(raw, &h); err != nil || !h.Sanitize() {
+		return wire.HostInfo{}, false
+	}
+	return h, true
+}
+
+// RefreshHandlerHosted is RefreshHandlerExtended plus host-fact storage:
+// when the body carries a usable `host`, hostFn stores it after the upsert.
+// A bad host report is logged and ignored; it never fails the refresh.
+func RefreshHandlerHosted(authz AuthzFunc, upsert func(ctx context.Context, identity string, caps map[string]string) error, advert AdvertFunc, reconcile ReconcileFunc, ext ExtensionFunc, hostFn HostFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "POST required", false)
@@ -151,6 +179,15 @@ func RefreshHandlerExtended(authz AuthzFunc, upsert func(ctx context.Context, id
 		if err := upsert(r.Context(), identity, body.Capabilities); err != nil {
 			writeError(w, http.StatusInternalServerError, "internal", err.Error(), true)
 			return
+		}
+		if hostFn != nil && len(body.Host) > 0 {
+			if h, ok := ParseHost(body.Host); ok {
+				if err := hostFn(r.Context(), identity, h); err != nil {
+					log.Printf("registry: store host for %s: %v", identity, err)
+				}
+			} else {
+				log.Printf("registry: ignoring unusable host report from %s", identity)
+			}
 		}
 		if reconcile != nil && body.ActiveJobs != nil {
 			if err := reconcile(r.Context(), identity, *body.ActiveJobs); err != nil {

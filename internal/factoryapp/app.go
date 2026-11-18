@@ -484,7 +484,7 @@ func buildMux(a *App, mcpH http.Handler) http.Handler {
 	mux.HandleFunc("POST /v1/pairing-tokens", a.handlePairingTokens)
 	mux.Handle("/v1/inboxes/", inbox.NewHandler(a.inbox, a.authn))
 	mux.Handle("GET /v1/inboxes/{id}/stream", notify.StreamHandler(a.hub, a.authn))
-	mux.Handle("/v1/foreman/capabilities", registry.RefreshHandlerExtended(a.refreshAuthz(), a.upsertCaps, registry.NewAdvertiser(a.downloadsDir).Advert, a.reconcileForeman, a.claudeCapsExt))
+	mux.Handle("/v1/foreman/capabilities", registry.RefreshHandlerHosted(a.refreshAuthz(), a.upsertCaps, registry.NewAdvertiser(a.downloadsDir).Advert, a.reconcileForeman, a.claudeCapsExt, a.jobs.SetForemanHost))
 	// Claude CLI auth (spec §13.3, claudeauth.go): the token handout to
 	// paired foremen (the second value-returning route), and the
 	// operator's status / re-check surface.

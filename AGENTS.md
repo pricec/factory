@@ -34,6 +34,13 @@ Reproducible release builds: `make release-docker` (pinned golang image);
 - Never work in the operator checkout (`/home/price/temp/factory`); it holds uncommitted work. Use your own worktree.
 - Finished work is always pushed before reporting.
 
+## Host access
+
+Before asking the operator for SSH or host access, call `list_foremen`
+(its `hosts` view groups foremen by machine). If the target hostname or IP
+is a foreman's host, pin a job to that foreman (`create_job foreman=`)
+instead of asking for SSH (spec §6.7.1).
+
 ## Owning a change through to the merge
 
 A job that changes code owns it until the merge is requested. Do not hand

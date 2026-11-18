@@ -743,6 +743,37 @@ factory planner's list view carries summaries only (#7, #19).
 - Refresh: `POST /v1/foreman/capabilities` (foreman token) upserts tags and
   bumps `last_seen`.
 
+### 6.7.1 Host facts (2026-11-18)
+
+Foremen report where they run so the planner never asks the operator for
+SSH to a machine that already hosts a foreman. Facts travel as a structured
+`host` object - NOT in `capabilities` (capabilities are for job matching;
+host facts are descriptive and never matched on).
+
+- Wire: `host` rides `self.host` in `POST /v1/pair` and top-level `host` in
+  every `POST /v1/foreman/capabilities` push (so volatile parts - IPs, free
+  disk, available memory, uptime - refresh every 60s). Absent from older
+  foremen; the factory then keeps no host for them. A report without
+  `host_id` or with malformed JSON is logged and ignored; it never fails
+  the push. Strings are clipped (256 bytes), `ips` to 64, `disks` to 16.
+- Fields: `host_id` (first 12 hex of sha256 of `/etc/machine-id`, else
+  `/var/lib/dbus/machine-id`, else the hostname - the raw id is never sent;
+  foremen on one machine share it), `hostname`, `ips: [{iface, addr,
+  virtual?}]` (non-loopback, non-link-local; docker/br-/veth/virbr/cni...
+  interfaces are kept but marked `virtual: true`), `os` (os-release
+  PRETTY_NAME), `kernel`, `arch`, `cpus`, `mem_total_bytes`,
+  `mem_avail_bytes`, `disks: [{path, total_bytes, free_bytes}]` (`/` and the
+  foreman data dir), `uptime_s`, `reported_at` (set by the factory).
+- Storage: `foremen.host` (nullable JSON column, added by migration).
+- MCP: `list_foremen` returns `host` per foreman (omitted when none) and a
+  `hosts` array grouping foremen by `host_id`:
+  `{foremen: [{id, online, capabilities, host?}], hosts: [{host_id,
+  hostname, ips, os, kernel, arch, cpus, ..., foremen: ["foreman:a", ...]}]}`
+  (facts from the most recently reporting member).
+- Planner rule: before asking the operator for SSH or host access, check
+  `list_foremen`. If the target hostname or IP matches a foreman's host, do
+  the work by pinning a job to that foreman (`create_job foreman=`).
+
 ### 6.8 Schedules (#8)
 
 - Factory-owned scheduling, single writer; no distributed locks in v1 (#8).
@@ -1886,7 +1917,7 @@ planner never formats raw HTTP or picks hosts itself (#19).
 
 Tools (exact):
 
-- `list_foremen()` - `{foremen: [{id, online, capabilities}]}` (record-
+- `list_foremen()` - `{foremen: [{id, online, capabilities, host?}], hosts: [...]}` (§6.7.1; record-
   wrapped; 2026-11-14 amendment: MCP structured content is an object -
   bare arrays are rejected by client harnesses).
 - `list_jobs(state?, limit=50)` - `{jobs: [{id, state, summary, usage,

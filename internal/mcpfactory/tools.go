@@ -88,20 +88,29 @@ func listForemenTool(cfg Config) mcp.ToolHandlerFor[listForemenArgs, any] {
 			return nil, nil, err
 		}
 		out := make([]map[string]any, 0, len(foremen))
+		hosted := make([]registry.HostedForeman, 0, len(foremen))
 		for _, f := range foremen {
+			hosted = append(hosted, registry.HostedForeman{ID: f.ID, Host: f.Host})
 			caps := json.RawMessage(f.Capabilities)
 			if len(caps) == 0 {
 				caps = json.RawMessage("{}")
 			}
-			out = append(out, map[string]any{
+			entry := map[string]any{
 				"id":           f.ID,
 				"online":       f.Online,
 				"capabilities": caps,
-			})
+			}
+			// host is absent for foremen that never reported one (older
+			// builds); it is descriptive, never matched on.
+			if f.Host != "" && f.Host != "null" {
+				entry["host"] = json.RawMessage(f.Host)
+			}
+			out = append(out, entry)
 		}
 		// Record-wrapped ({"foremen": [...]}): MCP structured content is
 		// an object - a bare array is rejected by client harnesses.
-		return structuredResult(map[string]any{"foremen": out}), nil, nil
+		// hosts groups foremen sharing a machine (same host_id).
+		return structuredResult(map[string]any{"foremen": out, "hosts": registry.GroupHosts(hosted)}), nil, nil
 	}
 }
 
