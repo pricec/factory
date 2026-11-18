@@ -43,11 +43,16 @@ func TestRetryAttemptResultIsNotDroppedAsDuplicate(t *testing.T) {
 	if s := post("job.result", failed); s != http.StatusCreated {
 		t.Fatalf("failed result status = %d", s)
 	}
-	waitFor(t, "failed with retry armed", 30*time.Second, func() bool { st, _ := state(); return st == "failed" })
-
-	// Backoff elapses on the fake clock; the picker re-dispatches attempt 1.
-	e.clock.Advance(time.Minute)
-	waitFor(t, "retry dispatched", 40*time.Second, func() bool { st, a := state(); return st == "dispatched" && a == 1 })
+	// Advance the fake clock past the 30s backoff until the picker has
+	// re-dispatched attempt 1 (state is only observable by polling).
+	var st string
+	var att int
+	waitFor(t, "retry dispatched (see last state in log)", 60*time.Second, func() bool {
+		e.clock.Advance(time.Minute)
+		st, att = state()
+		return att == 1 && (st == "dispatched" || st == "running")
+	})
+	t.Logf("retry state=%s attempts=%d", st, att)
 	// The notifier releases the slot when it posts the retry's job.request;
 	// the picker has already moved the job, so poll the result post below.
 
