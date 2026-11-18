@@ -54,12 +54,18 @@ mkdir -p "$EV"
 
 ```sh
 gh auth status && go version && sudo -n true
-# Build the account selector from factory master (public repo: any account can read it).
-rm -rf "$EV/ghas-src" && git clone -q --depth 1 https://github.com/pricec/factory "$EV/ghas-src" &&
-  (cd "$EV/ghas-src" && go build -o "$EV/ghas" ./cmd/ghas) && rm -rf "$EV/ghas-src"
+# Build the merge tools from factory master (public repo: any account can read it).
+# $WORK is a clone of $REPO, which is usually NOT the factory repo, so the
+# tools are built here once and run as binaries; never `go run ./cmd/...` in $WORK.
+rm -rf "$EV/factory-src" && git clone -q --depth 1 https://github.com/pricec/factory "$EV/factory-src" &&
+  (cd "$EV/factory-src" && go build -o "$EV/ghas" ./cmd/ghas && go build -o "$EV/cigate" ./cmd/cigate) &&
+  rm -rf "$EV/factory-src"
 GHAS="$EV/ghas -repo $REPO"
 $GHAS -login | tee "$EV/gh-account"     # the account every later step acts as
 ```
+
+`cigate` is built the same way and takes the repo from `-repo`, so it gates
+`$REPO`'s own CI runs, whatever their names.
 
 `ghas` (`cmd/ghas`, `internal/ghaccount`) lists the accounts in
 `gh auth status`, tries the repo owner's own account first, then the active
@@ -142,7 +148,7 @@ once (`gh run rerun <id> --failed`), waits for the fresh attempt, and only
 then decides:
 
 ```sh
-$GHAS go run ./cmd/cigate -repo "$REPO" -sha "$FULL" | tee "$EV/cigate.json"   # exit 0 green, 1 red/no checks/timeout
+$GHAS "$EV/cigate" -repo "$REPO" -sha "$FULL" | tee "$EV/cigate.json"   # exit 0 green, 1 red/no checks/timeout
 $GHAS gh pr view "$PR" -R "$REPO" --json mergeable,mergeStateStatus
 ```
 
@@ -157,7 +163,7 @@ If `cigate` reports `red` (red in the rerun too), or the PR conflicts:
 - **Small and clearly in scope.** The failure or conflict is in files the
   branch already changes, and the fix is a few lines with no contract or
   behavior change. Fix it in `$WORK` on the branch. Bring master in with
-  `git merge origin/master`, never a rebase. Run `make ci`, then push the
+  `git merge origin/master`, never a rebase. Run the repo's own checks (`make ci` if it has a Makefile ci target, else its documented test command), then push the
   branch normally (`$GHAS git push`, no force). Go back to the start of step 5. Each extra
   commit goes in the report.
 - **Anything else: STOP** (`checks red after rerun: <tests that failed both
@@ -174,8 +180,9 @@ $GHAS git fetch origin && git merge-base --is-ancestor "$MERGED" origin/master
 If `gh pr merge` refuses (branch protection, the branch moved), **STOP**.
 Never retry with admin flags.
 
-Only `pricec/factory` has a deploy procedure. For any other repo, skip to
-step 8.
+Only `pricec/factory` has a deploy procedure. For any other repo, step 7 is
+skipped (nothing is deployed): go to step 8 and report `done` with
+`merged: true` once the merge is verified.
 
 ## 7. Deploy master
 
@@ -188,7 +195,8 @@ before the manifest) are part of this step. A deploy failure means
 
 ## 8. Verify and report
 
-For `pricec/factory`, re-check right before reporting:
+For any other repo there is nothing to check beyond step 6's ancestor check;
+report. For `pricec/factory`, re-check right before reporting:
 
 ```sh
 systemctl is-active factory
@@ -204,10 +212,13 @@ report.
 Call `report_result` once, at the end:
 
 - **done**: only when the PR is merged and, for `pricec/factory`, the deploy
-  is verified healthy. `result.merged` must be `true`; the queue lands the
+  is verified healthy. For any other repo, `done` means merged, with the deploy
+  skipped. `result.merged` must be `true`; the queue lands the
   request only then (a `done` without `merged:true` is `needs_attention`). Summary (240 chars max):
   `landed $MR: PR #<n> merged <MERGED:12>; deployed <build id>; exe sha ok, UI 200, journal clean`.
   `result`: `{merged: true, pr, merge_commit, deployed_commit, build_id, factory_exe_sha256, evidence_dir}`.
+  For a non-factory repo the summary is `landed $MR: PR #<n> merged <MERGED:12>; no deploy (<repo>)`
+  and `result` is `{merged: true, pr, merge_commit, deployed: false, evidence_dir}`.
   If `cigate` reran and went green, add `ci_rerun: true` and `ci_flaked: [tests]`
   to `result` and append `; CI flake rerun: <tests>` to the summary, so flakes stay visible.
 - **failed**: anything that stopped. The summary starts with the stage, for
