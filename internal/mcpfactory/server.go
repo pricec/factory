@@ -86,14 +86,15 @@ func Handler(cfg Config) (http.Handler, error) {
 			"tools:<tool>, or a bare tag name (os, arch, tools); NEVER bare values like linux " +
 			"or amd64 (rejected as unknown_requires). " +
 			"secrets: optional credential NAMES (must exist in the store); reach the worker as env vars. " +
-			"foreman: optional explicit pin (bare or foreman:-prefixed id) - wins over requires " +
-			"matching; unknown foreman errors; offline pin pends until it returns. " +
+			"foreman: optional pin (bare or foreman:-prefixed id), wins over requires; " +
+			"unknown foreman errors; offline pin pends till it returns. " +
 			"Work on the factory repo (pricec/factory or its worktrees) MUST pin foreman=foreman:server; " +
 			"an unpinned job that mentions it is rejected (factory_repo_needs_pin). " +
-			"tier: flash (cheapest, default), default (Flash max-thinking), hardest (strongest); " +
-			"pick the cheapest that works. model: explicit model id (provider/model or claude-*) overrides tier. " +
+			"tier: flash (cheapest, default), default (max-think), hardest (strongest); " +
+			"pick the cheapest that works. model: explicit model id overrides tier. " +
+			"timeout_s: leave unset for code/build jobs (tier ceiling applies); never <1800 if builds/tests run. " +
 			"When subscription usage is high the job may come back state=held with held_reason: " +
-			"it is queued and dispatches automatically (task priority 0 is never held); cancel_job works on it.",
+			"it dispatches automatically (priority 0 is never held); cancel_job works on it.",
 	}, createJobTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "read_result",
