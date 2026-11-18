@@ -55,6 +55,13 @@ type Config struct {
 	// MergeQueued, when set, is called after request_merge queues a merge
 	// request (the factory kicks its merge-queue loop, spec §6.11).
 	MergeQueued func()
+	// TaskPriorityChanged, when set, is called after update_task changes a
+	// task's priority (the factory re-evaluates that task's held jobs).
+	TaskPriorityChanged func(ctx context.Context, taskID string)
+	// JobPriorityChanged, when set, is called after set_job_priority
+	// changed a job's priority: the factory records the event with reason
+	// and re-evaluates the throttle hold.
+	JobPriorityChanged func(ctx context.Context, jobID string, oldPrio, newPrio int, reason string)
 }
 
 // Handler builds the factory planner MCP endpoint (spec §9.4): the five-tool
@@ -118,6 +125,7 @@ func Handler(cfg Config) (http.Handler, error) {
 	}, notifyOperatorTool(cfg))
 	addTaskTools(srv, cfg) // spec §9.5.2 (tasks_tools.go)
 
+	addSetJobPriorityTool(srv, cfg)
 	addRaiseAlertTool(srv, cfg)
 	addRequestMergeTool(srv, cfg) // spec §6.11 merge queue (merge_tool.go)
 

@@ -2,7 +2,9 @@ package jobs
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/pricec/factory/internal/wire"
@@ -160,4 +162,45 @@ func (s *Store) RequeueHeld(ctx context.Context, id, reason string) (applied boo
 	}
 	n, err := res.RowsAffected()
 	return n > 0, err
+}
+
+// SetPriority sets a non-terminal job's priority override (0 = P0, else
+// 1-9) in place and returns the previous effective spec priority. The
+// override column keeps the raw value (P0 is not a valid JobSpec priority);
+// spec.priority is rewritten clamped to 1-9 so the held queue's release
+// order (ListHeld, CountHeldAhead) sees the new priority. ok is false when
+// the job is unknown or already terminal.
+func (s *Store) SetPriority(ctx context.Context, id string, priority int) (old int, ok bool, err error) {
+	if priority < 0 || priority > wire.MaxPriority {
+		return 0, false, fmt.Errorf("priority: must be 0-%d, got %d", wire.MaxPriority, priority)
+	}
+	j, found, err := s.Get(ctx, id)
+	if err != nil || !found {
+		return 0, false, err
+	}
+	old = j.Spec.Priority
+	j.Spec.Priority = min(max(priority, wire.MinPriority), wire.MaxPriority)
+	specJSON, err := json.Marshal(j.Spec)
+	if err != nil {
+		return 0, false, err
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE jobs SET spec = ?, priority_override = ? WHERE id = ? AND state NOT IN (?, ?, ?, ?, ?)`,
+		string(specJSON), priority, id,
+		StateDone, StateTimedOut, StateDead, StateCancelled, StateSuperseded)
+	if err != nil {
+		return 0, false, err
+	}
+	n, err := res.RowsAffected()
+	return old, n > 0, err
+}
+
+// PriorityOverride returns the job's priority override (0-9), if set.
+func (s *Store) PriorityOverride(ctx context.Context, id string) (int, bool, error) {
+	var p sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT priority_override FROM jobs WHERE id = ?`, id).Scan(&p)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && !p.Valid) {
+		return 0, false, nil
+	}
+	return int(p.Int64), err == nil, err
 }

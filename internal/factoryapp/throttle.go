@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pricec/factory/internal/auth"
 	"github.com/pricec/factory/internal/jobs"
 	"github.com/pricec/factory/internal/tasks"
 	"github.com/pricec/factory/internal/throttle"
@@ -142,6 +143,9 @@ func (a *App) admitNew(ctx context.Context, spec wire.JobSpec, taskID string) (b
 		return true, reason // its foreman's Claude CLI is logged out (§13.3)
 	}
 	p0 := a.taskIsP0(ctx, taskID)
+	if o, ok := ctx.Value(prioOverrideKey{}).(int); ok {
+		p0 = o == 0 // merge job inheriting its source job's override
+	}
 	ahead := 0
 	if !p0 {
 		n, err := a.jobs.CountHeldAhead(ctx, spec.Priority)
@@ -175,13 +179,61 @@ func (a *App) taskIsP0(ctx context.Context, taskID string) bool {
 	return t.Priority == 0
 }
 
-// jobIsP0 resolves a job's task and reports whether it is P0.
+// jobIsP0 resolves a job's task and reports whether the job is P0: a
+// job-level priority override (set_job_priority) wins over its task's.
 func (a *App) jobIsP0(ctx context.Context, jobID string) (taskID string, p0 bool) {
 	taskID, ok, err := a.tasks.TaskForJob(ctx, jobID)
 	if err != nil || !ok {
+		taskID = ""
+	}
+	if o, set, err := a.jobs.PriorityOverride(ctx, jobID); err == nil && set {
+		return taskID, o == 0
+	}
+	if taskID == "" {
 		return "", false
 	}
 	return taskID, a.taskIsP0(ctx, taskID)
+}
+
+// releaseNow re-evaluates the held queue after a priority change and pumps
+// the pending picker, so a job just released dispatches without waiting for
+// the next releaser/picker tick.
+func (a *App) releaseNow(ctx context.Context) {
+	if _, err := a.ReleasePass(ctx); err != nil {
+		log.Printf("factoryapp: throttle: release after priority change: %v", err)
+		return
+	}
+	if _, err := a.pending.Pump(ctx); err != nil {
+		log.Printf("factoryapp: throttle: pump after priority change: %v", err)
+	}
+}
+
+// taskPriorityChanged is the update_task hook: a task's priority change
+// re-evaluates its held jobs immediately.
+func (a *App) taskPriorityChanged(ctx context.Context, taskID string) {
+	a.releaseNow(ctx)
+	a.publishTaskChanged(ctx, taskID)
+}
+
+// jobPriorityChanged is the set_job_priority hook: it records the change
+// (with the planner's reason) on the job's task thread and re-evaluates the
+// throttle hold at once.
+func (a *App) jobPriorityChanged(ctx context.Context, jobID string, oldPrio, newPrio int, reason string) {
+	text := fmt.Sprintf("job %s priority set to P%d (was %d): %s", jobID, newPrio, oldPrio, reason)
+	log.Printf("factoryapp: %s", text)
+	if taskID, ok, err := a.tasks.TaskForJob(ctx, jobID); err == nil && ok && a.inbox != nil {
+		data, _ := json.Marshal(map[string]any{
+			"wake": false, "action": "priority", "job_id": jobID,
+			"priority": newPrio, "old_priority": oldPrio, "reason": reason, "text": text,
+		})
+		if _, err := a.inbox.Post(ctx, auth.PlannerMainInbox, wire.MessageEnvelope{
+			Type: notifyConflictType, From: "factory", Payload: data, JobID: jobID, ThreadID: taskID,
+		}); err != nil {
+			log.Printf("factoryapp: priority note for %s: %v", jobID, err)
+		}
+		a.publishTaskChanged(ctx, taskID)
+	}
+	a.releaseNow(ctx)
 }
 
 // activeNonP0 lists dispatched/running jobs not filed under a P0 task (the

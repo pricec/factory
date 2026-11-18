@@ -156,6 +156,11 @@ CREATE INDEX IF NOT EXISTS idx_secret_grants_job ON secret_grants(job_id);
 	if err := addColumnIfMissing(db, "jobs", "conflict_since", "TEXT"); err != nil {
 		return err
 	}
+	// priority_override: planner-set job priority (0-9, 0 = P0); NULL
+	// means the job inherits its task's priority.
+	if err := addColumnIfMissing(db, "jobs", "priority_override", "INTEGER"); err != nil {
+		return err
+	}
 	if _, err := db.Exec(mergeDDL); err != nil {
 		return err
 	}
