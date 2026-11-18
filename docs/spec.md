@@ -832,11 +832,23 @@ the planner has `request_merge` (§9.4) for a branch no job queued.
   merge-job behavior** (it is not inlined, so it cannot drift). It also
   states the reporting contract and quotes the note as data. Payload
   `{merge_request_id, repo, branch, head, note, procedure}`; tier
-  `hardest`; `timeout_s` 7200; `idle_timeout_s` 1800; priority 3;
+  `default` (2026-11-18 amendment; was `hardest`: most merge jobs finish
+  small), escalating once to `hardest` (see **Escalation** below);
+  `timeout_s` 7200; `idle_timeout_s` 1800; priority 3;
   `created_by` `factory:merge_queue`. It is **pinned** (§6.7 foreman pin) to
   the integration foreman: `foreman:server`, overridable with
   `FACTORY_MERGE_FOREMAN`. It goes through the token-throttle dispatch gate
   like every job (it may be `held`). An offline pin pends, and the long-pending alert covers it.
+- **Escalation (2026-11-18 amendment).** Merge jobs otherwise never
+  retry. The one exception: a merge job on a tier below `hardest` that
+  fails with `result.stage` `ci` or `conflict` (it stopped before the PR
+  merged, so a re-run cannot merge or deploy twice) is re-run once on
+  `hardest`. The request stays `merging`: its `job_id` is swapped to a
+  fresh hardest-tier job (same payload, same pin) and the failed job is
+  dead-lettered without closing the request. The escalated job is on
+  `hardest`, so a second failure is never escalated: at most one retry.
+  Any other failure (`head_drift`, `merge`, `deploy`, `preflight`, no
+  report, timeout) closes `needs_attention` as below.
 - **Closing.** The merge job's terminal transition (the §6.1 terminal hook)
   closes the request: `done -> landed`; `failed | timed_out | dead ->
   needs_attention`; `cancelled -> cancelled`; `superseded ->
@@ -2394,7 +2406,7 @@ outside the `result_schema` subset at validation time (#3).
 | Explicit model string | optional; 1-128 printable ASCII chars, no whitespace; overrides the tier mapping | 2026-11-15 amendment |
 | Models listing cache | `GET /v1/models` re-execs `opencode models` at most every 5 min (non-empty listings only); one exec bounded at 10s | 2026-11-15 amendment |
 | Settings pull interval | foremen re-read `GET /v1/settings` at startup and every 60s (fetch bounded at 10s) | 2026-11-15 amendment |
-| Merge queue | one `merging` at a time; tick 5s + kicks; merge job tier `hardest`, `timeout_s` 7200, `idle_timeout_s` 1800, priority 3, pinned `foreman:server` (`FACTORY_MERGE_FOREMAN`), never retried; needs_attention alert P1 source `factory:merge_queue` | 2026-11-17 amendment, §6.11 |
+| Merge queue | one `merging` at a time; tick 5s + kicks; merge job tier `default` (escalates once to `hardest` on a `ci`/`conflict` failure, 2026-11-18), `timeout_s` 7200, `idle_timeout_s` 1800, priority 3, pinned `foreman:server` (`FACTORY_MERGE_FOREMAN`), never retried; needs_attention alert P1 source `factory:merge_queue` | 2026-11-17 amendment, §6.11 |
 | Foreman orphan recovery | startup pass before any loop; listing 1000 rows per owner spelling; 5 attempts, 2s apart; orphan result kind `crash` | 2026-11-16 orphan-recovery amendment, §8.7 |
 
 ## 12. Foreman auto-update (v1) (2026-11-16 amendment)

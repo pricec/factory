@@ -100,6 +100,82 @@ func finishJob(t *testing.T, a *App, jobID, status string) {
 	a.handleEnvelope(ctx, wire.MessageEnvelope{Type: "job.result", JobID: jobID, Payload: payload}, map[string]bool{})
 }
 
+// finishJobStage fails jobID with a report whose result.stage is stage.
+func finishJobStage(t *testing.T, a *App, jobID, stage string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := a.jobs.ApplyEvent(ctx, jobID, "started"); err != nil {
+		t.Fatal(err)
+	}
+	res := wire.JobResult{
+		JobID: jobID, Status: wire.StatusFailed, Summary: stage + ": stopped",
+		Result: json.RawMessage(`{"stage":"` + stage + `"}`),
+		Error:  &wire.JobError{Kind: wire.KindOther, Message: stage + ": stopped"},
+	}
+	payload, _ := json.Marshal(res)
+	a.handleEnvelope(ctx, wire.MessageEnvelope{Type: "job.result", JobID: jobID, Payload: payload}, map[string]bool{})
+}
+
+// TestMergeQueueEscalation: merge jobs start on the default tier; a CI
+// failure retries exactly once on hardest (same request, still merging, one
+// live job); a second failure is not retried and needs attention.
+func TestMergeQueueEscalation(t *testing.T) {
+	a := newMergeApp(t)
+	ctx := context.Background()
+	first := queueMerge(t, a, "feat/one")
+	pass(t, a)
+	m := getMerge(t, a, first.ID)
+	j1, _, _ := a.jobs.Get(ctx, m.JobID)
+	if j1.Spec.Tier != wire.TierDefault {
+		t.Fatalf("first merge job tier = %q, want default", j1.Spec.Tier)
+	}
+
+	finishJobStage(t, a, j1.ID, "ci")
+	m = getMerge(t, a, first.ID)
+	if m.State != jobs.MergeMerging || m.JobID == j1.ID {
+		t.Fatalf("after default-tier ci failure: state=%s job=%s, want merging on a new job", m.State, m.JobID)
+	}
+	j2, _, _ := a.jobs.Get(ctx, m.JobID)
+	if j2.Spec.Tier != wire.TierHardest || j2.Spec.Foreman != DefaultMergeForeman {
+		t.Fatalf("escalated job tier=%q pin=%q, want hardest on the merge foreman", j2.Spec.Tier, j2.Spec.Foreman)
+	}
+	if old, _, _ := a.jobs.Get(ctx, j1.ID); old.State != jobs.StateDead {
+		t.Fatalf("failed job state = %s, want dead", old.State)
+	}
+	assertOneMerging(t, a, 1)
+	if n := len(mergeAlerts(t, a)); n != 0 {
+		t.Fatalf("escalation raised %d alerts, want 0", n)
+	}
+
+	finishJobStage(t, a, j2.ID, "ci")
+	m = getMerge(t, a, first.ID)
+	if m.State != jobs.MergeNeedsAttention || m.JobID != j2.ID {
+		t.Fatalf("after hardest failure: state=%s job=%s, want needs_attention on %s", m.State, m.JobID, j2.ID)
+	}
+	if d, _, _ := a.jobs.Get(ctx, j2.ID); d.State != jobs.StateDead {
+		t.Fatalf("hardest job state = %s, want dead (no further retry)", d.State)
+	}
+	assertOneMerging(t, a, 0)
+	if n := len(mergeAlerts(t, a)); n != 1 {
+		t.Fatalf("alerts = %d, want 1", n)
+	}
+}
+
+// TestMergeQueueNoEscalationAfterMerge: stages where a re-run is unsafe or
+// pointless (merge, deploy) never escalate.
+func TestMergeQueueNoEscalationAfterMerge(t *testing.T) {
+	for _, stage := range []string{"merge", "deploy", "head_drift"} {
+		a := newMergeApp(t)
+		first := queueMerge(t, a, "feat/one")
+		pass(t, a)
+		m := getMerge(t, a, first.ID)
+		finishJobStage(t, a, m.JobID, stage)
+		if got := getMerge(t, a, first.ID); got.State != jobs.MergeNeedsAttention || got.JobID != m.JobID {
+			t.Errorf("%s: state=%s job=%s, want needs_attention on the original job", stage, got.State, got.JobID)
+		}
+	}
+}
+
 func mergeAlerts(t *testing.T, a *App) []tasks.Alert {
 	t.Helper()
 	all, err := a.tasks.ListAlerts(context.Background(), tasks.AlertFilter{})

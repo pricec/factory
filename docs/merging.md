@@ -201,8 +201,9 @@ Call `report_result` once, at the end:
   `pr` / `merge_commit` in `result` when they exist, because a failure after
   the merge (in deploy) means master moved.
 
-The merge request closes from this job's terminal state. Merge jobs never
-retry, and a merge job never fixes more than step 5 allows.
+The merge request closes from this job's terminal state. Merge jobs start on the default tier; a `ci` or `conflict` failure is
+re-run once on the hardest tier by the factory (spec §6.11). Merge jobs never
+otherwise retry, and a merge job never fixes more than step 5 allows.
 
 ## Who requests merges, and what happens when one fails
 
