@@ -208,6 +208,17 @@ func (a *App) relayToPlanner(ctx context.Context, env wire.MessageEnvelope) {
 	if relay.ThreadID == "" {
 		relay.ThreadID = hint.taskID
 	}
+	if relay.ThreadID == "" && a.isMergeQueueJob(ctx, env.JobID) {
+		// A merge job's report never opens a task of its own (spec
+		// §6.11): file it under the standing Planner chat, else alert.
+		relay.ThreadID = a.knownTask(ctx, tasks.StandingID)
+		if relay.ThreadID == "" {
+			a.raiseSystemAlert(ctx, alertPriorityUnattributed, "Unattributed "+env.Type+" from merge job "+env.JobID,
+				"A merge job's "+env.Type+" is not linked to any task and there is no standing Planner chat; no task was opened.\n"+payloadText(env.Payload),
+				"factory:relay")
+			return
+		}
+	}
 	if relay.ThreadID == "" {
 		t, err := a.openTaskFor(ctx, env)
 		if err != nil {

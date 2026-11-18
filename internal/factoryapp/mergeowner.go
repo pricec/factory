@@ -86,26 +86,100 @@ func wakingMerge(env wire.MessageEnvelope) bool {
 	return json.Unmarshal(env.Payload, &p) == nil && p.Wake
 }
 
-// notifyMerge posts a notify.merge for mr onto the task of its source
-// job. Without a task there is nobody to tell: the note is dropped (an
-// escalation still has its alert).
-func (a *App) notifyMerge(ctx context.Context, mr jobs.MergeRequest, action, text string, wake bool, fixJobID string) {
-	taskID := a.jobThread(ctx, mr.SourceJobID)
-	if taskID == "" {
-		return
+// mergeActionActionable reports whether a note asks the planner to do
+// something (as opposed to tell the operator or record): only these
+// reopen a closed task.
+func mergeActionActionable(action string) bool {
+	switch action {
+	case mergeActionEscalated, mergeActionDependencyFailed, mergeActionDependencyStall:
+		return true
 	}
-	if wake {
-		// A closed task is not reopened by a merge outcome: the operator
-		// closed it. The note is still recorded on its thread.
-		if t, err := a.tasks.GetTask(ctx, taskID); err != nil || t.Status == tasks.StatusClosed {
-			wake = false
+	return false
+}
+
+// mergeNoteDuplicate reports whether the thread already carries a
+// notify.merge for the same request, action, state, failure and text: the
+// same event again (a re-run reconcile, a repeated escalation) must not
+// wake the planner twice.
+func (a *App) mergeNoteDuplicate(ctx context.Context, taskID string, n mergeNote) bool {
+	rows, err := a.inbox.DB().QueryContext(ctx,
+		`SELECT payload FROM messages WHERE thread_id = ? AND type = ?`, taskID, notifyMergeType)
+	if err != nil {
+		log.Printf("factoryapp: merge queue: dedupe lookup on %s: %v", taskID, err)
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw string
+		var prev mergeNote
+		if rows.Scan(&raw) != nil || json.Unmarshal([]byte(raw), &prev) != nil {
+			continue
+		}
+		if prev.MergeRequestID == n.MergeRequestID && prev.Action == n.Action && prev.State == n.State &&
+			prev.Failure == n.Failure && prev.FixRound == n.FixRound && prev.Text == n.Text {
+			return true
 		}
 	}
-	data, err := json.Marshal(mergeNote{
+	return false
+}
+
+// notifyMerge routes a merge event for mr to the task that owns its
+// source job (never a new task):
+//
+//   - no-op events are dropped: the request is already landed/cancelled
+//     and the event is neither, or the same event was already posted;
+//   - a closed owner task is reopened (with a note in the text) when the
+//     event needs the planner to act, and only recorded otherwise;
+//   - when no task owns the job, the standing Planner chat gets the note
+//     if it exists, else (for events that wake) an alert is raised.
+func (a *App) notifyMerge(ctx context.Context, mr jobs.MergeRequest, action, text string, wake bool, fixJobID string) {
+	if cur, ok, err := a.jobs.GetMergeRequest(ctx, mr.ID); err == nil && ok &&
+		(cur.State == jobs.MergeLanded || cur.State == jobs.MergeCancelled) &&
+		action != mergeActionLanded && action != mergeActionCancelled {
+		return // finished already: nothing left to act on
+	}
+	taskID := a.jobThread(ctx, mr.SourceJobID)
+	fallback := false
+	if taskID != "" {
+		if _, err := a.tasks.GetTask(ctx, taskID); err != nil {
+			taskID = ""
+		}
+	}
+	if taskID == "" {
+		if mr.SourceJobID == "" || a.knownTask(ctx, tasks.StandingID) == "" {
+			if wake && mr.SourceJobID != "" && action != mergeActionEscalated && action != mergeActionDependencyStall {
+				a.raiseSystemAlert(ctx, alertPriorityMerge, "Merge "+mr.ID+" ("+mr.Branch+") has no owning task", text, mergeAlertSource)
+			}
+			return // an escalation or stall has its own alert
+		}
+		taskID, fallback = tasks.StandingID, true
+		text = "No task owns the job behind this merge request (" + orDefault(mr.SourceJobID, "no source job") + "). " + text
+	}
+	t, err := a.tasks.GetTask(ctx, taskID)
+	if err != nil {
+		return
+	}
+	if t.Status == tasks.StatusClosed && !fallback {
+		if wake && mergeActionActionable(action) {
+			if _, err := a.reopenTask(ctx, taskID); err != nil {
+				log.Printf("factoryapp: merge queue: reopen %s for %s: %v", taskID, mr.ID, err)
+				wake = false
+			} else {
+				text = "Task reopened by the factory because this merge needs the planner (the task was closed; no new task is filed for merges). " + text
+			}
+		} else {
+			wake = false // record only: the operator closed the task
+		}
+	}
+	note := mergeNote{
 		Wake: wake, Action: action, MergeRequestID: mr.ID, Repo: mr.Repo, Branch: mr.Branch, Head: mr.Head,
 		State: mr.State, Failure: mr.Failure, Result: mr.Result, SourceJobID: mr.SourceJobID,
 		FixRound: mr.FixRound, FixJobID: fixJobID, WaitingOn: mr.WaitingOn, Text: text,
-	})
+	}
+	if a.mergeNoteDuplicate(ctx, taskID, note) {
+		return
+	}
+	data, err := json.Marshal(note)
 	if err != nil {
 		log.Printf("factoryapp: merge queue: note for %s: %v", mr.ID, err)
 		return

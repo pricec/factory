@@ -324,6 +324,19 @@ func (a *App) escalateMerge(ctx context.Context, failed jobs.Job) bool {
 	return true
 }
 
+// isMergeQueueJob reports whether jobID is a merge-queue job (by request
+// or by creator, so an escalated or orphaned merge job still counts).
+func (a *App) isMergeQueueJob(ctx context.Context, jobID string) bool {
+	if jobID == "" {
+		return false
+	}
+	if a.isMergeJob(ctx, jobID) {
+		return true
+	}
+	j, ok, err := a.jobs.Get(ctx, jobID)
+	return err == nil && ok && j.Spec.CreatedBy == jobs.MergeJobCreatedBy
+}
+
 // isMergeJob reports whether jobID is a merge-queue job.
 func (a *App) isMergeJob(ctx context.Context, jobID string) bool {
 	_, ok, err := a.jobs.MergeRequestForJob(ctx, jobID)

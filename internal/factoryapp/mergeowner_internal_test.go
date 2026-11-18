@@ -239,7 +239,7 @@ func TestJobOwnedMergeEscalations(t *testing.T) {
 		{"deploy failure", "deploy: health check failed; rolled back: yes", "deploy", false, jobs.MergeFailureDeploy, "not something the branch's job can fix", true},
 		{"preflight", "preflight: gh auth status failed", "", false, jobs.MergeFailurePreflight, "not something the branch's job can fix", true},
 		{"unclassified", "the worker gave up", "", false, jobs.MergeFailureOther, "not something the branch's job can fix", true},
-		{"closed task", "checks red after rerun: TestX", "ci", true, jobs.MergeFailureCI, "is closed", false},
+		{"closed task", "checks red after rerun: TestX", "ci", true, jobs.MergeFailureCI, "is closed", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -272,8 +272,10 @@ func TestJobOwnedMergeEscalations(t *testing.T) {
 					t.Fatalf("a fix job was created: %s", j.ID)
 				}
 			}
-			if cur, _ := a.tasks.GetTask(ctx, task.ID); tc.closeTask && cur.Status != tasks.StatusClosed {
-				t.Fatal("a merge outcome reopened a closed task")
+			// A closed owner task is reopened (not replaced by a new task)
+			// when the merge needs the planner.
+			if cur, _ := a.tasks.GetTask(ctx, task.ID); tc.closeTask && (cur.Status != tasks.StatusOpen || !strings.Contains(note.Text, "reopened")) {
+				t.Fatalf("closed owner task not reopened: %+v", cur)
 			}
 		})
 	}
@@ -498,5 +500,105 @@ func TestOwnsMergePinsCreators(t *testing.T) {
 		if got := workerharness.OwnsMerge(wire.NewJobSpec("x", tc.createdBy)); got != tc.want {
 			t.Errorf("OwnsMerge(created_by %q) = %v, want %v", tc.createdBy, got, tc.want)
 		}
+	}
+}
+
+func countTasks(t *testing.T, a *App) int {
+	t.Helper()
+	all, err := a.tasks.ListTasks(context.Background(), tasks.TaskFilter{IncludeStanding: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(all)
+}
+
+// TestMergeEventsRouteToOwnerWithoutNewTasks: a failed job-owned merge
+// notifies the owning task and never creates a task; the same event again
+// is deduped; events for a finished request are ignored.
+func TestMergeEventsRouteToOwnerWithoutNewTasks(t *testing.T) {
+	a := newMergeApp(t)
+	ctx := context.Background()
+	src, task := ownedJob(t, a, "owner")
+	mr := ownMerge(t, a, src.ID, "feat/owner")
+	report(t, a, src.ID, wire.StatusDone, "queued", "")
+	before := countTasks(t, a)
+
+	failed := failMerge(t, a, mr, "deploy: health check failed; rolled back: yes", "deploy")
+	note, env := lastNote(t, a, task.ID)
+	if note.Action != mergeActionEscalated || note.MergeRequestID != mr.ID || !wakesPlanner(env) {
+		t.Fatalf("note = %+v", note)
+	}
+	if n := countTasks(t, a); n != before {
+		t.Fatalf("tasks %d -> %d: a merge event created a task", before, n)
+	}
+
+	// Duplicate: the same event again posts nothing.
+	notes, _ := mergeNotes(t, a, task.ID)
+	a.routeMergeOutcome(ctx, failed)
+	a.routeMergeOutcome(ctx, failed)
+	if again, _ := mergeNotes(t, a, task.ID); len(again) != len(notes) {
+		t.Fatalf("duplicate events posted %d notes, want %d", len(again), len(notes))
+	}
+
+	// No-op: the request was cancelled meanwhile; a stale failure event is ignored.
+	mr2 := ownMerge(t, a, src.ID, "feat/owner2")
+	cancelled, err := a.jobs.CancelMergeRequest(ctx, mr2.ID, "operator cancelled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	notes, _ = mergeNotes(t, a, task.ID)
+	a.notifyMerge(ctx, cancelled, mergeActionEscalated, "stale failure", true, "")
+	if again, _ := mergeNotes(t, a, task.ID); len(again) != len(notes) {
+		t.Fatalf("event for a cancelled request posted a note")
+	}
+	if n := countTasks(t, a); n != before {
+		t.Fatalf("tasks %d -> %d", before, n)
+	}
+}
+
+// TestMergeEventWithoutOwnerFallsBack: no owning task means the standing
+// chat hears of it (no new task), else an alert.
+func TestMergeEventWithoutOwnerFallsBack(t *testing.T) {
+	a := newMergeApp(t)
+	ctx := context.Background()
+	mr, err := a.jobs.CreateMergeRequest(ctx, jobs.NewMergeRequest{Branch: "feat/orphan", Head: mqHead, JobID: "job_missing"})
+	if err != nil {
+		// Unknown source jobs may be rejected; fall back to the operator form.
+		t.Skip("unknown source job rejected: " + err.Error())
+	}
+	before := countTasks(t, a)
+	a.notifyMerge(ctx, mr, mergeActionDependencyFailed, "dep failed", true, "")
+	notes, _ := mergeNotes(t, a, tasks.StandingID)
+	if len(notes) != 1 || !strings.Contains(notes[0].Text, "No task owns") {
+		t.Fatalf("standing notes = %+v", notes)
+	}
+	if n := countTasks(t, a); n != before {
+		t.Fatalf("a task was created")
+	}
+}
+
+// TestMergeJobReportOpensNoTask: a merge job with no owning task (operator
+// request) that reports to the planner is filed under the standing chat,
+// never as a new "Merge mr_..." task; its terminal notify.job never wakes.
+func TestMergeJobReportOpensNoTask(t *testing.T) {
+	a := newMergeApp(t)
+	ctx := context.Background()
+	mr := queueMerge(t, a, "feat/by-hand")
+	if id := pass(t, a); id != mr.ID {
+		t.Fatalf("dispatched %q", id)
+	}
+	jobID := getMerge(t, a, mr.ID).JobID
+	before := countTasks(t, a)
+	a.relayToPlanner(ctx, wire.MessageEnvelope{Type: foremanReportType, From: ownerForeman, JobID: jobID, Payload: json.RawMessage(`{"text":"merge stuck"}`)})
+	if n := countTasks(t, a); n != before {
+		t.Fatalf("tasks %d -> %d: a merge job report opened a task", before, n)
+	}
+	thread, err := a.inbox.ThreadMessages(ctx, tasks.StandingID, 50)
+	if err != nil || len(thread) == 0 || thread[len(thread)-1].Type != foremanReportType {
+		t.Fatalf("standing thread = %+v (%v)", thread, err)
+	}
+	env := wire.MessageEnvelope{Type: notifyJobType, ThreadID: "task_x", Payload: json.RawMessage(`{"merge_job":true}`)}
+	if wakesPlanner(env) {
+		t.Fatal("a merge job's notify.job woke the planner")
 	}
 }

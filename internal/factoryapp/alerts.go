@@ -289,6 +289,14 @@ func (a *App) handleReplyAlert(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// A merge alert linked to its owning task is answered on that task
+	// (reopened if closed), not on a new "Merge mr_..." task.
+	if alert.Source == mergeAlertSource {
+		if owner := a.knownTask(ctx, alert.TaskID); owner != "" {
+			a.replyOnAlertTask(w, r, alert, owner, in.Text)
+			return
+		}
+	}
 	title := alert.Title
 	if len(title) > 60 {
 		title = title[:60]
@@ -344,4 +352,30 @@ func (a *App) mountAlertRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/alerts", a.handleListAlerts)
 	mux.HandleFunc("POST /v1/alerts/{id}/ack", a.handleAckAlert)
 	mux.HandleFunc("POST /v1/alerts/{id}/reply", a.handleReplyAlert)
+}
+
+// replyOnAlertTask posts the operator's reply to a merge alert into the
+// alert's existing task, reopening it when closed, and marks the alert
+// replied. No task is created.
+func (a *App) replyOnAlertTask(w http.ResponseWriter, r *http.Request, alert tasks.Alert, taskID, text string) {
+	ctx := r.Context()
+	if t, err := a.tasks.GetTask(ctx, taskID); err == nil && t.Status == tasks.StatusClosed {
+		if _, err := a.reopenTask(ctx, taskID); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+	}
+	data, _ := json.Marshal(map[string]any{"text": text})
+	if _, err := a.postToTask(ctx, taskID, wire.MessageEnvelope{
+		Type: tasks.TypeChatMessage, From: auth.HumanOperatorIdentity, Payload: data,
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	updated, err := a.tasks.TransitionAlert(ctx, alert.ID, []string{tasks.AlertOpen}, tasks.AlertReplied)
+	if err != nil {
+		updated = alert
+	}
+	a.publishAlertChanged(updated)
+	writeJSON(w, http.StatusCreated, map[string]any{"alert": updated, "task_id": taskID})
 }
