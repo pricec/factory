@@ -318,7 +318,7 @@ job's own id. `spawn_child` is the only writer of the field.
   "summary": "1-240 chars, REQUIRED",
   "result": {},
   "error": {
-    "kind": "validation|timeout|crash|llm|other|superseded",
+    "kind": "validation|timeout|crash|llm|other|auth|superseded",
     "message": "..."
   },
   "usage": {
@@ -330,7 +330,11 @@ job's own id. `spawn_child` is the only writer of the field.
 ```
 
 - `status`: `done` | `failed`.
-- `error.kind`: `validation` | `timeout` | `crash` | `llm` | `other` | `superseded`.
+- `error.kind`: `validation` | `timeout` | `crash` | `llm` | `other` | `auth` | `superseded`.
+  `auth` (2026-11-18 amendment): the runner is not authenticated (`Not logged
+  in · Please run /login`, invalid API key, 401). The harness classifies crash
+  messages matching known auth / unknown-model / unknown-route / missing-CLI
+  patterns as `auth` / `validation` instead of `crash`.
   `superseded` (2026-11-17 amendment): the worker stands down because the
   job is a duplicate of, or superseded by, another job. With `status=failed`
   the factory moves the job to the terminal `superseded` state (the same
@@ -451,7 +455,7 @@ payload and `GET /v1/jobs/{id}`.
 - Terminal-idempotency: applying a `job.result` to an already-terminal job is
   a no-op (log). Envelope-level dedupe (409) lives in the inbox (#1).
 - Retry policy (normative), by `error.kind`: `validation` -> no retry;
-  `timeout` -> 1 retry; `crash | llm | other` -> 2 retries; `superseded` ->
+  `timeout` -> 1 retry, except `reason=ceiling` (hit the `timeout_s` wall clock; a rerun hits it again) -> 0; `auth` -> no retry (2026-11-18 amendment); `crash | llm | other` -> 2 retries unless the message is a known deterministic auth/model/route error (reclassified as `auth`/`validation`, 0 retries); `superseded` ->
   never retried (2026-11-17 amendment): the result lands the job in the
   terminal `superseded` state, not `failed`. A late result, or a retry timer
   firing, for a job already terminal (`cancelled`, `superseded`, `done`,
@@ -828,11 +832,23 @@ the planner has `request_merge` (§9.4) for a branch no job queued.
   merge-job behavior** (it is not inlined, so it cannot drift). It also
   states the reporting contract and quotes the note as data. Payload
   `{merge_request_id, repo, branch, head, note, procedure}`; tier
-  `hardest`; `timeout_s` 7200; `idle_timeout_s` 1800; priority 3;
+  `default` (2026-11-18 amendment; was `hardest`: most merge jobs finish
+  small), escalating once to `hardest` (see **Escalation** below);
+  `timeout_s` 7200; `idle_timeout_s` 1800; priority 3;
   `created_by` `factory:merge_queue`. It is **pinned** (§6.7 foreman pin) to
   the integration foreman: `foreman:server`, overridable with
   `FACTORY_MERGE_FOREMAN`. It goes through the token-throttle dispatch gate
   like every job (it may be `held`). An offline pin pends, and the long-pending alert covers it.
+- **Escalation (2026-11-18 amendment).** Merge jobs otherwise never
+  retry. The one exception: a merge job on a tier below `hardest` that
+  fails with `result.stage` `ci` or `conflict` (it stopped before the PR
+  merged, so a re-run cannot merge or deploy twice) is re-run once on
+  `hardest`. The request stays `merging`: its `job_id` is swapped to a
+  fresh hardest-tier job (same payload, same pin) and the failed job is
+  dead-lettered without closing the request. The escalated job is on
+  `hardest`, so a second failure is never escalated: at most one retry.
+  Any other failure (`head_drift`, `merge`, `deploy`, `preflight`, no
+  report, timeout) closes `needs_attention` as below.
 - **Closing.** The merge job's terminal transition (the §6.1 terminal hook)
   closes the request: `done -> landed`; `failed | timed_out | dead ->
   needs_attention`; `cancelled -> cancelled`; `superseded ->
@@ -1582,7 +1598,7 @@ named `inbox`, the agent sees `inbox_report_result`, `inbox_ask_parent`,
   `{"ok": true}`.
   - Contract (2026-11-17 amendment): the advertised input schema is the
     contract. `error` is the object form `{kind, message}`, `kind` one of
-    `validation|timeout|crash|llm|other|superseded`; the schema pins that shape and
+    `validation|timeout|crash|llm|other|auth|superseded`; the schema pins that shape and
     is what new agent prompts and code target. The server MUST accept the
     normalized forms below and rewrite them before `wire.JobResult.Validate`:
     - `error` as a JSON string -> `{kind: other, message: <string>}`;
@@ -2372,7 +2388,7 @@ outside the `result_schema` subset at validation time (#3).
 | Jobs sweeper tick | 10s | #9 |
 | Retry picker tick | 10s | #10 |
 | Job timeout grace | `timeout_s` (ceiling) `+ 60s` -> `timed_out` | #9 |
-| Retries by error kind | validation 0; superseded 0; timeout 1; crash/llm/other 2 | #10 |
+| Retries by error kind | validation 0; auth 0; superseded 0; timeout 1 (ceiling 0); crash/llm/other 2 (deterministic messages 0) | #10 |
 | Retry backoff curve | 30s, 2m, 8m (attempt n waits `backoff[n-1]`) | #10 |
 | SSE reconnect backoff | 1s, 2s, 4s, ... max 60s, +-25% jitter | #2 |
 | Question SLA / `ask_parent` default wait | 60s; default answer "proceed with your best judgment" | #4, #17 |
@@ -2390,7 +2406,7 @@ outside the `result_schema` subset at validation time (#3).
 | Explicit model string | optional; 1-128 printable ASCII chars, no whitespace; overrides the tier mapping | 2026-11-15 amendment |
 | Models listing cache | `GET /v1/models` re-execs `opencode models` at most every 5 min (non-empty listings only); one exec bounded at 10s | 2026-11-15 amendment |
 | Settings pull interval | foremen re-read `GET /v1/settings` at startup and every 60s (fetch bounded at 10s) | 2026-11-15 amendment |
-| Merge queue | one `merging` at a time; tick 5s + kicks; merge job tier `hardest`, `timeout_s` 7200, `idle_timeout_s` 1800, priority 3, pinned `foreman:server` (`FACTORY_MERGE_FOREMAN`), never retried; needs_attention alert P1 source `factory:merge_queue` | 2026-11-17 amendment, §6.11 |
+| Merge queue | one `merging` at a time; tick 5s + kicks; merge job tier `default` (escalates once to `hardest` on a `ci`/`conflict` failure, 2026-11-18), `timeout_s` 7200, `idle_timeout_s` 1800, priority 3, pinned `foreman:server` (`FACTORY_MERGE_FOREMAN`), never retried; needs_attention alert P1 source `factory:merge_queue` | 2026-11-17 amendment, §6.11 |
 | Foreman orphan recovery | startup pass before any loop; listing 1000 rows per owner spelling; 5 attempts, 2s apart; orphan result kind `crash` | 2026-11-16 orphan-recovery amendment, §8.7 |
 
 ## 12. Foreman auto-update (v1) (2026-11-16 amendment)

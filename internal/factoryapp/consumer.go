@@ -79,8 +79,13 @@ func (a *App) handleEnvelope(ctx context.Context, env wire.MessageEnvelope, seen
 		}
 		// Merge jobs never retry (spec §6.11): a re-run could merge or
 		// deploy twice. A failed merge job goes straight to dead, which
-		// closes its request as needs_attention.
+		// closes its request as needs_attention. The one exception: a
+		// default-tier job that failed before merging escalates once to
+		// the hardest tier (escalateMerge).
 		if job.State == jobs.StateFailed && a.isMergeJob(ctx, job.ID) {
+			if a.escalateMerge(ctx, job) {
+				return
+			}
 			if err := a.jobs.MarkDead(ctx, job.ID); err != nil {
 				log.Printf("factoryapp: consumer: dead-letter merge job %s: %v", job.ID, err)
 			}
@@ -89,12 +94,9 @@ func (a *App) handleEnvelope(ctx context.Context, env wire.MessageEnvelope, seen
 		// Arm the retry only when the job actually failed and the result
 		// carried an error kind (spec §6.4).
 		if job.State == jobs.StateFailed && res.Error != nil {
-			retryKind := string(res.Error.Kind)
-			if r := res.Error.Reason; r == wire.ReasonBudget || r == wire.ReasonLoop {
-				// Re-running would just spend/loop again: unknown kind =
-				// zero retries = dead-letter immediately (§6.4).
-				retryKind = r
-			}
+			// Deterministic failures (auth, bad model/route, budget, loop,
+			// ceiling timeout) get zero retries (§6.4).
+			retryKind := jobs.RetryKind(string(res.Error.Kind), res.Error.Reason, res.Error.Message)
 			if err := a.jobs.MarkFailedForRetry(ctx, job.ID, retryKind); err != nil {
 				log.Printf("factoryapp: consumer: retry scheduling for %s: %v", job.ID, err)
 			}

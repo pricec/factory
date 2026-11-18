@@ -288,7 +288,7 @@ func TestMergeTaskBuilder(t *testing.T) {
 			t.Errorf("task inlines procedure step %q", banned)
 		}
 	}
-	if spec.Foreman != "foreman:server" || spec.CreatedBy != MergeJobCreatedBy || spec.Tier != wire.TierHardest {
+	if spec.Foreman != "foreman:server" || spec.CreatedBy != MergeJobCreatedBy || spec.Tier != wire.TierDefault {
 		t.Errorf("spec shape = %+v", spec)
 	}
 	if err := spec.Validate(); err != nil {

@@ -253,6 +253,41 @@ func (a *App) alertMerge(ctx context.Context, mr jobs.MergeRequest, why string) 
 		mergeAlertSource, a.knownTask(ctx, a.jobThread(ctx, mr.SourceJobID)))
 }
 
+// escalateMerge gives a failed merge job its one retry on the hardest tier
+// (spec §6.11): when jobs.MergeEscalatable, the request is re-pointed at a
+// fresh hardest-tier job (same request, same pin) and the failed job is
+// dead-lettered. The request stays merging throughout, so the queue never
+// sees a gap. The escalated job runs on the hardest tier, so a second
+// failure is never escalated: there is no retry loop. Returns whether the
+// failure was handled here.
+func (a *App) escalateMerge(ctx context.Context, failed jobs.Job) bool {
+	if !jobs.MergeEscalatable(failed) {
+		return false
+	}
+	mr, ok, err := a.jobs.MergeRequestForJob(ctx, failed.ID)
+	if err != nil || !ok || mr.State != jobs.MergeMerging {
+		return false
+	}
+	a.mergeMu.Lock()
+	defer a.mergeMu.Unlock()
+	newID := wire.NewJobID()
+	if swapped, err := a.jobs.SwapMergeJob(ctx, mr.ID, failed.ID, newID); err != nil || !swapped {
+		return false
+	}
+	// The request no longer points at the failed job, so its terminal
+	// hook closes nothing.
+	if err := a.jobs.MarkDead(ctx, failed.ID); err != nil {
+		log.Printf("factoryapp: merge queue: dead-letter escalated merge job %s: %v", failed.ID, err)
+	}
+	mr.JobID = newID
+	if err := a.createPinnedJob(ctx, jobs.MergeEscalatedJobSpec(mr, newID, a.mergeForeman)); err != nil {
+		a.mergeNeedsAttention(ctx, mr.ID, "could not create escalated merge job "+newID+": "+err.Error())
+		return true
+	}
+	log.Printf("factoryapp: merge queue: %s escalated from %s to hardest-tier job %s", mr.ID, failed.ID, newID)
+	return true
+}
+
 // isMergeJob reports whether jobID is a merge-queue job.
 func (a *App) isMergeJob(ctx context.Context, jobID string) bool {
 	_, ok, err := a.jobs.MergeRequestForJob(ctx, jobID)

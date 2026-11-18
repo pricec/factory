@@ -547,6 +547,20 @@ func (s *Store) ClaimMerge(ctx context.Context, id, jobID string) (claimed bool,
 	return n > 0, err
 }
 
+// SwapMergeJob points a merging request at its escalation job newJobID,
+// compare-and-swapping on the failed job oldJobID. swapped is false when
+// the request is no longer merging that job (spec §6.11 escalation).
+func (s *Store) SwapMergeJob(ctx context.Context, id, oldJobID, newJobID string) (swapped bool, err error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE merge_requests SET job_id = ?, updated_at = ? WHERE id = ? AND state = ? AND job_id = ?`,
+		newJobID, s.now(), id, MergeMerging, oldJobID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 // TransitionMerge applies from -> to for request id if legal, with a
 // compare-and-swap on the observed state, recording result when non-empty.
 // Illegal transitions are logged and not applied (the jobs model, §6.1).

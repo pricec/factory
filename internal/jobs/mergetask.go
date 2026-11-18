@@ -14,8 +14,10 @@ import (
 const MergeProcedureDoc = "docs/merging.md"
 
 // Merge job shape (spec §6.11). A merge job is high-stakes and long
-// (CI watch, release build, deploy): the strongest tier, a 2h ceiling, and
-// a 30m idle limit so a quiet `gh pr checks --watch` is not idle-killed.
+// (CI watch, release build, deploy): a 2h ceiling and a 30m idle limit so a
+// quiet `gh pr checks --watch` is not idle-killed. It starts on the default
+// tier (most merges finish small); one pre-merge CI/conflict failure
+// escalates to the hardest tier (MergeEscalatable, MergeEscalatedJobSpec).
 const (
 	MergeJobCreatedBy    = "factory:merge_queue"
 	mergeJobTimeoutS     = 7200
@@ -56,10 +58,36 @@ func MergeTask(mr MergeRequest) string {
 // foreman:{id} form) and carrying the request as its payload (spec §6.11).
 // The caller sets nothing else: the shape is fixed here.
 func MergeJobSpec(mr MergeRequest, jobID, foreman string) wire.JobSpec {
+	return mergeJobSpec(mr, jobID, foreman, wire.TierDefault)
+}
+
+// MergeEscalatedJobSpec is the one retry of a failed default-tier merge
+// job: the same job on the hardest tier.
+func MergeEscalatedJobSpec(mr MergeRequest, jobID, foreman string) wire.JobSpec {
+	return mergeJobSpec(mr, jobID, foreman, wire.TierHardest)
+}
+
+// MergeEscalatable reports whether failed (a merge job in state failed)
+// gets its one retry on the hardest tier: it ran below the hardest tier,
+// and it stopped at a stage before the PR merged (red checks or a
+// conflict), so a re-run cannot merge or deploy twice. Everything else
+// (head drift, merge, deploy, no report) stays never-retried (spec §6.11).
+func MergeEscalatable(failed Job) bool {
+	if failed.Spec.Tier == wire.TierHardest {
+		return false
+	}
+	switch ClassifyMergeFailure(failed) {
+	case MergeFailureCI, MergeFailureConflict:
+		return true
+	}
+	return false
+}
+
+func mergeJobSpec(mr MergeRequest, jobID, foreman, tier string) wire.JobSpec {
 	spec := wire.NewJobSpec(MergeTask(mr), MergeJobCreatedBy)
 	spec.ID = jobID
 	spec.Foreman = foreman
-	spec.Tier = wire.TierHardest
+	spec.Tier = tier
 	spec.TimeoutS = mergeJobTimeoutS
 	spec.IdleTimeoutS = mergeJobIdleTimeoutS
 	spec.Priority = mergeJobPriority

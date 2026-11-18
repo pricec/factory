@@ -691,7 +691,12 @@ func fallbackResult(spec wire.JobSpec, stdout, stderr string, runErr error, clau
 		return res
 	}
 	res.Status = wire.StatusFailed
-	res.Error = &wire.JobError{Kind: wire.KindCrash, Message: crashMessage(stderr, stdout, runErr, claude)}
+	msg := crashMessage(stderr, stdout, runErr, claude)
+	kind := wire.KindCrash
+	if k := wire.ClassifyMessage(msg); k != "" {
+		kind = k // deterministic (auth, bad model/route): not a generic crash
+	}
+	res.Error = &wire.JobError{Kind: kind, Message: msg}
 	return res
 }
 
