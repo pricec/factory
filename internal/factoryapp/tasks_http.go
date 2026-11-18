@@ -81,6 +81,10 @@ func (a *App) handleRenameTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "unknown_task", "unknown task "+r.PathValue("id"))
 		return
 	}
+	if errors.Is(err, tasks.ErrInvalid) {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
@@ -127,6 +131,10 @@ func (a *App) handleCloseTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	if t.Standing {
+		writeError(w, http.StatusBadRequest, "standing_chat", "the standing Planner chat cannot be closed")
 		return
 	}
 	if t.Status != tasks.StatusClosed {

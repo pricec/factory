@@ -34,6 +34,10 @@ type Task struct {
 	// flag (spec §9.5.2): set by the planner (update_task), cleared when
 	// the operator posts on the task or the task is closed.
 	NeedsOperator bool `json:"needs_operator"`
+	// Standing marks the one well-known standing planner chat (StandingID):
+	// a task row that is never closed, never listed with ordinary tasks and
+	// never "awaiting"/"needs you". See EnsureStanding.
+	Standing bool `json:"standing,omitempty"`
 	// JobIDs are the linked jobs (task_jobs), in link order. Never nil on
 	// tasks returned by the store.
 	JobIDs []string `json:"job_ids"`
@@ -52,6 +56,9 @@ type TaskFilter struct {
 	Query string
 	// Limit caps the result; <= 0 means unbounded.
 	Limit int
+	// IncludeStanding also returns the standing planner chat; by default
+	// it is excluded from every listing.
+	IncludeStanding bool
 }
 
 // TaskUpdate is a partial update; nil fields are left alone.
@@ -84,7 +91,7 @@ func (s *Store) CreateTask(ctx context.Context, title string, priority int) (Tas
 }
 
 const taskSelect = `
-SELECT id, title, status, priority, created_at, updated_at, closed_at, close_reason, needs_operator, last_act FROM (
+SELECT id, title, status, priority, created_at, updated_at, closed_at, close_reason, needs_operator, standing, last_act FROM (
 	SELECT t.*, MAX(t.updated_at, IFNULL(
 		(SELECT m.ts FROM messages m WHERE m.thread_id = t.id ORDER BY m.seq DESC LIMIT 1), '')) AS last_act
 	FROM tasks t
@@ -96,7 +103,7 @@ func scanTask(r rowScanner) (Task, error) {
 		created, updated, lastAct string
 		closed                    sql.NullString
 	)
-	if err := r.Scan(&t.ID, &t.Title, &t.Status, &t.Priority, &created, &updated, &closed, &t.CloseReason, &t.NeedsOperator, &lastAct); err != nil {
+	if err := r.Scan(&t.ID, &t.Title, &t.Status, &t.Priority, &created, &updated, &closed, &t.CloseReason, &t.NeedsOperator, &t.Standing, &lastAct); err != nil {
 		return t, err
 	}
 	var err error
@@ -144,6 +151,9 @@ func (s *Store) ListTasks(ctx context.Context, f TaskFilter) ([]Task, error) {
 		where []string
 		args  []any
 	)
+	if !f.IncludeStanding {
+		where = append(where, `standing = 0`)
+	}
 	switch f.Status {
 	case "", "all":
 	case StatusOpen, StatusClosed:
@@ -237,13 +247,29 @@ func (s *Store) UpdateTask(ctx context.Context, id string, u TaskUpdate) (Task, 
 	}
 	defer tx.Rollback()
 
-	var status string
-	err = tx.QueryRowContext(ctx, `SELECT status FROM tasks WHERE id = ?`, id).Scan(&status)
+	var (
+		status   string
+		standing bool
+	)
+	err = tx.QueryRowContext(ctx, `SELECT status, standing FROM tasks WHERE id = ?`, id).Scan(&status, &standing)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Task{}, ErrNotFound
 	}
 	if err != nil {
 		return Task{}, err
+	}
+	if standing {
+		// The standing chat is permanent: it cannot be closed, retitled or
+		// flagged as waiting on the operator.
+		if u.Status != nil && *u.Status == StatusClosed {
+			return Task{}, errInvalid("the standing planner chat cannot be closed")
+		}
+		if u.Title != nil {
+			return Task{}, errInvalid("the standing planner chat cannot be renamed")
+		}
+		if u.NeedsOperator != nil && *u.NeedsOperator {
+			return Task{}, errInvalid("the standing planner chat cannot need the operator")
+		}
 	}
 	now := formatTS(s.now())
 	sets := []string{`updated_at = ?`}
@@ -311,6 +337,9 @@ func (s *Store) LinkJob(ctx context.Context, taskID, jobID string) error {
 	if jobID == "" {
 		return errInvalid("job_id: required")
 	}
+	if taskID == StandingID {
+		return errInvalid("jobs cannot be linked to the standing planner chat; create a task for the work")
+	}
 	res, err := s.db.ExecContext(ctx,
 		`INSERT OR IGNORE INTO task_jobs (task_id, job_id)
 		 SELECT id, ? FROM tasks WHERE id = ?`, jobID, taskID)
@@ -370,6 +399,30 @@ func mustAffect(res sql.Result) error {
 	}
 	if n == 0 {
 		return ErrNotFound
+	}
+	return nil
+}
+
+// Standing chat (the operator's permanent planner conversation).
+const (
+	// StandingID is the well-known id of the standing planner chat task.
+	StandingID = "task_standing"
+	// StandingTitle is its fixed title.
+	StandingTitle = "Planner"
+)
+
+// EnsureStanding creates the standing chat task when missing and repairs
+// it when an older row somehow lost its flag or got closed. Idempotent;
+// called by New, so it exists on every start.
+func (s *Store) EnsureStanding(ctx context.Context) error {
+	now := formatTS(s.now())
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO tasks (id, title, status, priority, created_at, updated_at, standing)
+		 VALUES (?, ?, 'open', 0, ?, ?, 1)
+		 ON CONFLICT(id) DO UPDATE SET standing = 1, status = 'open', closed_at = NULL,
+		   close_reason = '', needs_operator = 0, title = excluded.title`,
+		StandingID, StandingTitle, now, now); err != nil {
+		return err
 	}
 	return nil
 }

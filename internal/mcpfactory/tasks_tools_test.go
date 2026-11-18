@@ -321,6 +321,74 @@ func TestNoTaskStore(t *testing.T) {
 	}
 }
 
+// TestStandingChatTools: create_job never defaults to (or accepts) the
+// standing chat; create_task makes the task to file work under; the
+// standing summary tool is standing-session only; update_task refuses to
+// close the standing chat.
+func TestStandingChatTools(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+
+	// Woken on the standing chat: create_job without task_id is refused.
+	e.wokenTask = tasks.StandingID
+	jobsBefore, _ := e.store.List(ctx, "", "", 100)
+	msg := toolError(t, "create_job", e.callTool("create_job", map[string]any{"task": "do work"}))
+	if !strings.Contains(msg, "create_task") {
+		t.Errorf("default create_job error = %q", msg)
+	}
+	// Explicitly naming it is refused too.
+	msg = toolError(t, "create_job", e.callTool("create_job", map[string]any{"task": "do work", "task_id": tasks.StandingID}))
+	if !strings.Contains(msg, "standing") {
+		t.Errorf("explicit create_job error = %q", msg)
+	}
+	if after, _ := e.store.List(ctx, "", "", 100); len(after) != len(jobsBefore) {
+		t.Error("a refused create_job still created a job")
+	}
+
+	// create_task -> create_job task_id=<new>.
+	sc := structured(t, resultOf(t, e.callTool("create_task", map[string]any{"title": "Fix the thing", "priority": 1})))
+	tk := sc["task"].(map[string]any)
+	id := tk["id"].(string)
+	if id == tasks.StandingID || tk["title"] != "Fix the thing" || tk["priority"] != float64(1) {
+		t.Fatalf("create_task = %v", tk)
+	}
+	sc = structured(t, resultOf(t, e.callTool("create_job", map[string]any{"task": "do work", "task_id": id})))
+	if sc["task_id"] != id {
+		t.Errorf("create_job on new task = %v", sc)
+	}
+	toolError(t, "create_task", e.callTool("create_task", map[string]any{"title": "  "}))
+
+	// update_task cannot close the standing chat.
+	toolError(t, "update_task", e.callTool("update_task", map[string]any{"task_id": tasks.StandingID, "status": "closed"}))
+	if got, _ := e.tasks.GetTask(ctx, tasks.StandingID); got.Status != tasks.StatusOpen {
+		t.Errorf("standing status = %q", got.Status)
+	}
+
+	// list_tasks (any status) hides it.
+	sc = structured(t, resultOf(t, e.callTool("list_tasks", map[string]any{"status": "all"})))
+	for _, x := range sc["tasks"].([]any) {
+		if x.(map[string]any)["id"] == tasks.StandingID {
+			t.Error("list_tasks lists the standing chat")
+		}
+	}
+
+	// Summary tool: standing session only, and the through message must be in the chat.
+	m, err := e.svc.Post(ctx, "planner:main", wire.MessageEnvelope{
+		Type: "chat.message", From: "human:operator", Payload: json.RawMessage(`{"text":"hi"}`), ThreadID: tasks.StandingID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := map[string]any{"summary": "op said hi", "through_message_id": m.ID}
+	toolError(t, "update_standing_summary", e.callTool("update_standing_summary", map[string]any{"summary": "x", "through_message_id": "msg_nope"}))
+	structured(t, resultOf(t, e.callTool("update_standing_summary", args)))
+	if s, th, _ := e.tasks.StandingSummary(ctx); s != "op said hi" || th != m.ID {
+		t.Errorf("summary = %q %q", s, th)
+	}
+	e.wokenTask = id
+	toolError(t, "update_standing_summary", e.callTool("update_standing_summary", args))
+}
+
 // TestNotifyOperatorSpoken: the optional `spoken` field is stored in the
 // brain.reply payload, whitespace-collapsed and capped; omitted when empty.
 func TestNotifyOperatorSpoken(t *testing.T) {

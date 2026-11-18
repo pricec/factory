@@ -268,15 +268,15 @@ func TestToolsListAndBudget(t *testing.T) {
 	_, out = e.rpc(e.planner, "tools/list", nil)
 	res := resultOf(t, out)
 	tools, ok := res["tools"].([]any)
-	if !ok || len(tools) != 14 {
-		t.Fatalf("tools/list: want 14 tools, got %v", res["tools"])
+	if !ok || len(tools) != 16 {
+		t.Fatalf("tools/list: want 16 tools, got %v", res["tools"])
 	}
 	want := map[string]bool{
 		"list_foremen": false, "list_jobs": false, "create_job": false,
 		"read_result": false, "cancel_job": false, "message_foreman": false,
 		"notify_operator": false, "raise_alert": false,
 		"list_tasks": false, "get_task": false, "update_task": false, "set_priority_criteria": false,
-		"request_merge": false, "get_message": false,
+		"request_merge": false, "get_message": false, "create_task": false, "update_standing_summary": false,
 	}
 	var budget int
 	for _, tl := range tools {
@@ -321,8 +321,10 @@ func TestToolsListAndBudget(t *testing.T) {
 	// create_job gains `touches` (schema + two description lines).
 	// Raised to 6KB (6144) by host facts (2026-11-18, §6.7.1): list_foremen
 	// gains `host`/`hosts` and the no-SSH-to-foreman-hosts rule.
-	if budget >= 6144 {
-		t.Errorf("description budget = %d bytes, want < 6144", budget)
+	// Raised to 6.5KB (6656) by the standing Planner chat (2026-11-18):
+	// create_task and update_standing_summary.
+	if budget >= 6656 {
+		t.Errorf("description budget = %d bytes, want < 6656", budget)
 	}
 	t.Logf("description budget: %d bytes", budget)
 }
