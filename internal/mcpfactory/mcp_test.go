@@ -268,15 +268,15 @@ func TestToolsListAndBudget(t *testing.T) {
 	_, out = e.rpc(e.planner, "tools/list", nil)
 	res := resultOf(t, out)
 	tools, ok := res["tools"].([]any)
-	if !ok || len(tools) != 15 {
-		t.Fatalf("tools/list: want 15 tools, got %v", res["tools"])
+	if !ok || len(tools) != 16 {
+		t.Fatalf("tools/list: want 16 tools, got %v", res["tools"])
 	}
 	want := map[string]bool{
 		"list_foremen": false, "list_jobs": false, "create_job": false,
 		"read_result": false, "cancel_job": false, "message_foreman": false,
 		"notify_operator": false, "raise_alert": false,
 		"list_tasks": false, "get_task": false, "update_task": false, "set_priority_criteria": false,
-		"request_merge": false, "create_task": false, "update_standing_summary": false,
+		"request_merge": false, "get_message": false, "create_task": false, "update_standing_summary": false,
 	}
 	var budget int
 	for _, tl := range tools {

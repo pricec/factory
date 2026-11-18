@@ -232,7 +232,7 @@ func TestTaskTools(t *testing.T) {
 	}
 
 	// get_task: thread with internal flags, 2KB-capped payloads.
-	big := strings.Repeat("x", 3000)
+	big := strings.Repeat("x", 6000)
 	for _, env := range []wire.MessageEnvelope{
 		{Type: "chat.message", From: "human:operator", Payload: json.RawMessage(`{"text":"ship alpha"}`)},
 		{Type: "foreman.report", From: "foreman:alpha", JobID: "job_1", Payload: json.RawMessage(`{"text":"` + big + `"}`)},
@@ -257,7 +257,7 @@ func TestTaskTools(t *testing.T) {
 	if m0["internal"] != false || m0["payload"] != `{"text":"ship alpha"}` {
 		t.Errorf("message 0 = %v", m0)
 	}
-	if p := m1["payload"].(string); m1["internal"] != true || m1["job_id"] != "job_1" || len(p) > 2200 || !strings.Contains(p, "truncated") {
+	if p := m1["payload"].(string); m1["internal"] != true || m1["job_id"] != "job_1" || len(p) > 4400 || !strings.Contains(p, "truncated") || !strings.Contains(p, "get_message message_id=") {
 		t.Errorf("message 1 internal=%v job=%v len=%d", m1["internal"], m1["job_id"], len(p))
 	}
 	if msg := toolError(t, "get_task", e.callTool("get_task", map[string]any{"task_id": "task_nope"})); !strings.Contains(msg, "unknown task") {
@@ -265,6 +265,19 @@ func TestTaskTools(t *testing.T) {
 	}
 	if msg := toolError(t, "get_task", e.callTool("get_task", map[string]any{"task_id": ""})); !strings.Contains(msg, "required") {
 		t.Errorf("get_task empty = %q", msg)
+	}
+
+	// get_message: the truncated row's full text, by the id in the marker.
+	id1 := m1["id"].(string)
+	gm := structured(t, resultOf(t, e.callTool("get_message", map[string]any{"message_id": id1})))
+	if p, _ := gm["payload"].(string); !strings.Contains(p, big) || strings.Contains(p, "truncated") || gm["internal"] != true {
+		t.Errorf("get_message payload len=%d internal=%v", len(p), gm["internal"])
+	}
+	if msg := toolError(t, "get_message", e.callTool("get_message", map[string]any{"message_id": "msg_nope"})); !strings.Contains(msg, "unknown message") {
+		t.Errorf("get_message unknown = %q", msg)
+	}
+	if msg := toolError(t, "get_message", e.callTool("get_message", map[string]any{"message_id": ""})); !strings.Contains(msg, "required") {
+		t.Errorf("get_message empty = %q", msg)
 	}
 
 	// set_priority_criteria round trip.
