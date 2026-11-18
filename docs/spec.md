@@ -834,7 +834,7 @@ the planner has `request_merge` (§9.4) for a branch no job queued.
   `FACTORY_MERGE_FOREMAN`. It goes through the token-throttle dispatch gate
   like every job (it may be `held`). An offline pin pends, and the long-pending alert covers it.
 - **Closing.** The merge job's terminal transition (the §6.1 terminal hook)
-  closes the request: `done -> landed`; `failed | timed_out | dead ->
+  closes the request: `done -> landed` only when the job's structured result has `merged: true` (the merge job's `result_schema` requires `merged` boolean, plus `merge_commit` when merged, `reason`/`stage` when not; `done` without `merged: true` -> `needs_attention`); `failed | timed_out | dead ->
   needs_attention`; `cancelled -> cancelled`; `superseded ->
   needs_attention` (the queue cannot know whether a hand-made replacement
   merged). `result` = `job <id> <state>: <last summary> (error: <last

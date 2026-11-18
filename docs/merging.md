@@ -185,10 +185,16 @@ Call `report_result` once, at the end:
 - **done**: only when the PR is merged and, for `pricec/factory`, the deploy
   is verified healthy. Summary (240 chars max):
   `landed $MR: PR #<n> merged <MERGED:12>; deployed <build id>; exe sha ok, UI 200, journal clean`.
-  `result`: `{pr, merge_commit, deployed_commit, build_id, factory_exe_sha256, evidence_dir}`.
+  `result`: `{merged: true, pr, merge_commit, deployed_commit, build_id, factory_exe_sha256, evidence_dir}`.
+  The job's `result_schema` requires `merged` (boolean); the merge request
+  lands **only** when `result.merged` is `true`.
   If `cigate` reran and went green, add `ci_rerun: true` and `ci_flaked: [tests]`
   to `result` and append `; CI flake rerun: <tests>` to the summary, so flakes stay visible.
-- **failed**: anything that stopped. The summary starts with the stage, for
+- **failed**: anything that stopped, including a conflict or any stop
+  before the merge. Never report `done` for a job that did not merge. Set
+  `result.merged: false` and `result.reason` (e.g. `conflict`) too.
+  (A `done` report with `merged: false` or no result is also not a landing:
+  the request goes `needs_attention`.) The summary starts with the stage, for
   example `head drift: …`, `checks red after rerun: <tests failed both
   times>`, `conflict: …`, `deploy: …`. Also set **`result.stage`** to the
   stage that stopped, exactly one of `preflight`, `head_drift`,

@@ -11,7 +11,8 @@
 //     foreman, from the code-generated task (jobs.MergeJobSpec).
 //
 // The merge job's terminal transition (onTerminal -> finishMerge) closes
-// the request: done -> landed; failed|timed_out|dead -> needs_attention
+// the request: done with result.merged:true -> landed (done otherwise ->
+// needs_attention); failed|timed_out|dead -> needs_attention
 // (plus an operator alert, source factory:merge_queue); cancelled ->
 // cancelled - and kicks the loop so the next request dispatches at once.
 //

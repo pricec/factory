@@ -212,7 +212,13 @@ func TestFinishMergeForJob(t *testing.T) {
 			if ok, err := s.ClaimMerge(ctx, mr.ID, spec.ID); !ok || err != nil {
 				t.Fatal(ok, err)
 			}
-			driveTo(t, s, spec, StateDone)
+			driveTo(t, s, spec, StateRunning)
+			res := wire.JobResult{JobID: spec.ID, Status: wire.StatusDone, Summary: "ok", Result: json.RawMessage(`{"merged":true,"merge_commit":"abc"}`)}
+			if tc.jobState != StateDone {
+				res.Status, res.Error = wire.StatusFailed, &wire.JobError{Kind: wire.KindOther, Message: "x"}
+				res.Result = nil
+			}
+			mustApplyResult(t, s, res)
 			got, applied, err := s.FinishMergeForJob(ctx, spec.ID, tc.jobState)
 			if err != nil || !applied || got.State != tc.want {
 				t.Fatalf("got %+v applied=%v err=%v, want %s", got, applied, err, tc.want)
@@ -397,5 +403,91 @@ func TestDeadLetterRefusesMergeJob(t *testing.T) {
 	}
 	if st := state(t, s, spec.ID); st != StateDead {
 		t.Fatalf("state = %s, want dead", st)
+	}
+}
+
+// TestMergeLandsOnlyOnMergedTrue: a done merge job lands its request only
+// when its structured result has merged:true (spec §6.11); done without it,
+// and failed jobs, leave the request needs_attention.
+func TestMergeLandsOnlyOnMergedTrue(t *testing.T) {
+	failed := func(id string) wire.JobResult {
+		return wire.JobResult{
+			JobID: id, Status: wire.StatusFailed, Summary: "conflict: PR conflicts with master",
+			Error:  &wire.JobError{Kind: wire.KindOther, Message: "conflict: x"},
+			Result: json.RawMessage(`{"merged":false,"reason":"conflict","stage":"conflict"}`),
+		}
+	}
+	done := func(result string) func(string) wire.JobResult {
+		return func(id string) wire.JobResult {
+			r := wire.JobResult{JobID: id, Status: wire.StatusDone, Summary: "nothing was merged due to conflicts"}
+			if result != "" {
+				r.Result = json.RawMessage(result)
+			}
+			return r
+		}
+	}
+	cases := []struct {
+		name    string
+		res     func(string) wire.JobResult
+		want    string
+		failure string
+	}{
+		{"merged true lands", done(`{"merged":true,"merge_commit":"abc123"}`), MergeLanded, ""},
+		{"done merged false", done(`{"merged":false,"reason":"conflict"}`), MergeNeedsAttention, MergeFailureConflict},
+		{"failed on conflict", failed, MergeNeedsAttention, MergeFailureConflict},
+		{"done with no result", done(""), MergeNeedsAttention, MergeFailureOther},
+		{"done with untyped result", done(`{"pr":12}`), MergeNeedsAttention, MergeFailureOther},
+		{"merged wrong type", done(`{"merged":"true"}`), MergeNeedsAttention, MergeFailureOther},
+		{"done with non-object result", done(`"merged"`), MergeNeedsAttention, MergeFailureOther},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := openStore(t)
+			ctx := context.Background()
+			mr := mustMR(t, s, "feat/x")
+			spec := MergeJobSpec(mr, wire.NewJobID(), "foreman:server")
+			if ok, err := s.ClaimMerge(ctx, mr.ID, spec.ID); !ok || err != nil {
+				t.Fatal(ok, err)
+			}
+			driveTo(t, s, spec, StateRunning)
+			res := tc.res(spec.ID)
+			mustApplyResult(t, s, res)
+			job, _, _ := s.Get(ctx, spec.ID)
+			got, applied, err := s.FinishMergeForJob(ctx, spec.ID, job.State)
+			if err != nil || !applied || got.State != tc.want {
+				t.Fatalf("state = %s applied=%v err=%v, want %s (job %s, results %s)", got.State, applied, err, tc.want, job.State, job.Results)
+			}
+			if tc.want == MergeNeedsAttention {
+				if job.State == StateDone && !strings.Contains(got.Result, "NOT merged") {
+					t.Errorf("result = %q, want it to say not merged", got.Result)
+				}
+				if f := ClassifyMergeFailure(job); f != tc.failure {
+					t.Errorf("failure = %s, want %s", f, tc.failure)
+				}
+			}
+		})
+	}
+}
+
+// TestMergeJobSpecResultSchema: the merge job carries the typed schema
+// (merged required) and it accepts / rejects the right reports.
+func TestMergeJobSpecResultSchema(t *testing.T) {
+	spec := MergeJobSpec(MergeRequest{ID: "mr_1", Repo: "pricec/factory", Branch: "feat/x", Head: testHead}, "job_01ABC", "foreman:server")
+	if err := spec.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		result string
+		ok     bool
+	}{
+		{`{"merged":true,"merge_commit":"abc"}`, true},
+		{`{"merged":false,"reason":"conflict"}`, true},
+		{`{"reason":"conflict"}`, false},
+		{`{"merged":"yes"}`, false},
+	} {
+		r := wire.JobResult{JobID: spec.ID, Status: wire.StatusDone, Summary: "s", Result: json.RawMessage(tc.result)}
+		if err := r.Validate(spec.ResultSchema); (err == nil) != tc.ok {
+			t.Errorf("result %s: err = %v, want ok=%v", tc.result, err, tc.ok)
+		}
 	}
 }
