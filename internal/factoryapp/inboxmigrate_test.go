@@ -57,7 +57,7 @@ func TestBootMigratesLegacyInbox(t *testing.T) {
 	defer db.Close()
 	var n int
 	var id, title, status, reason string
-	if err := db.QueryRow(`SELECT COUNT(*), MAX(id), MAX(title), MAX(status), MAX(close_reason) FROM tasks`).
+	if err := db.QueryRow(`SELECT COUNT(*), MAX(id), MAX(title), MAX(status), MAX(close_reason) FROM tasks WHERE standing = 0`).
 		Scan(&n, &id, &title, &status, &reason); err != nil {
 		t.Fatal(err)
 	}

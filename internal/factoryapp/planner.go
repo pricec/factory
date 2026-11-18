@@ -154,7 +154,11 @@ func (a *App) runTaskWake(ctx context.Context, taskID string, wakers []wire.Mess
 	if err != nil {
 		return fmt.Errorf("load task %s: %w", taskID, err)
 	}
-	thread, err := a.inbox.ThreadMessages(ctx, taskID, plannerThreadCap)
+	cap := plannerThreadCap
+	if t.Standing {
+		cap = standingWindow
+	}
+	thread, err := a.inbox.ThreadMessages(ctx, taskID, cap)
 	if err != nil {
 		log.Printf("factoryapp: planner: thread %s: %v", taskID, err)
 		thread = nil
@@ -163,15 +167,25 @@ func (a *App) runTaskWake(ctx context.Context, taskID string, wakers []wire.Mess
 	if err != nil {
 		log.Printf("factoryapp: planner: priority criteria: %v", err)
 	}
-	reason := wakeReason(wakers)
-	return a.planner.HandleTask(ctx, PlannerWake{
-		Reason:   reason,
+	w := PlannerWake{
+		Reason:   wakeReason(wakers),
 		Task:     t,
 		Criteria: criteria,
 		Thread:   thread,
 		Triggers: wakers,
-	})
+	}
+	if t.Standing {
+		w.Reason = reasonStanding
+		w.Summary, w.SummaryThrough, err = a.tasks.StandingSummary(ctx)
+		if err != nil {
+			log.Printf("factoryapp: planner: standing summary: %v", err)
+		}
+	}
+	return a.planner.HandleTask(ctx, w)
 }
+
+// reasonStanding is the wake reason of the standing Planner chat.
+const reasonStanding = "planner: the operator wrote in the standing Planner chat and needs a reply"
 
 // closedByOperatorReason is the wake reason of an operator close (spec
 // §9.5.2): stop the task's work, do not reopen it.

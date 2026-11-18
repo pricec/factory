@@ -1202,13 +1202,24 @@ async function loadTasks() {
   renderTasks();
 }
 
+const STANDING_ID = "task_standing"; // the standing Planner chat (internal/tasks StandingID)
+// standingRowHTML is the pinned "Planner" entry at the top of the task list.
+function standingRowHTML() {
+  return '<div class="task standing' + (st.selected === STANDING_ID ? " selected" : "") + '" data-id="' + STANDING_ID + '" data-testid="standing-row">' +
+    '<div class="thead"><span class="ttitle">Planner</span> <span class="badge">standing chat</span></div>' +
+    '<div class="tprev">ask about status, or tell it what to do</div></div>';
+}
+
 function renderTasks() {
   const box = $("tasklist");
   if (!st.tasksAvailable) { box.innerHTML = '<div class="empty">tasks not available on this factory yet - showing the legacy log</div>'; return; }
+  const pin = standingRowHTML();
   if (!st.tasks.length) {
-    box.innerHTML = '<div class="empty">' + (st.q ? "no matching tasks" : st.needsInput ? "nothing needs your input" : st.onlyActive ? "no active tasks" : "no tasks yet") + "</div>"; return;
+    box.innerHTML = pin + '<div class="empty">' + (st.q ? "no matching tasks" : st.needsInput ? "nothing needs your input" : st.onlyActive ? "no active tasks" : "no tasks yet") + "</div>";
+    for (const el of box.querySelectorAll(".task")) el.onclick = () => { if (st.mode === "focus") { st.mode = "list"; renderFocusBar(); } selectTask(el.dataset.id); };
+    return;
   }
-  box.innerHTML = st.tasks.map(t =>
+  box.innerHTML = pin + st.tasks.map(t =>
     '<div class="task' + (t.id === st.selected ? " selected" : "") + (t.status === "closed" ? " closed" : "") + '" data-id="' + esc(t.id) + '">' +
     '<div class="thead">' + prioBadge(t.priority) + ' <span class="ttitle">' + esc(t.title) + "</span>" +
     (t.status === "open" && t.needs_operator ? '<span class="needs" title="the planner flagged this as waiting on you (needs_operator)">● needs input</span> <span class="badge flagged" title="the planner flagged this as waiting on you (needs_operator)">needs you</span>' : "") + "</div>" +
@@ -1274,7 +1285,7 @@ function renderThread() {
   if (rendered && atBottom) log.scrollTop = log.scrollHeight;
   const last = shown[shown.length - 1];
   $("typing").style.display = last && last.from === "human:operator" && t.status === "open" ? "block" : "none";
-  $("chat-input").placeholder = t.status === "closed" ? "reply to reopen this task…" : "reply in this task…";
+  $("chat-input").placeholder = t.standing ? "ask the planner, or tell it what to do…" : t.status === "closed" ? "reply to reopen this task…" : "reply in this task…";
 }
 
 /* ----- in-place task rename (PATCH /v1/tasks/{id}) -----
@@ -1291,6 +1302,10 @@ function renderTitle(t) {
     titleEdit = null;                  // switched task: drop it
   }
   const box = $("thread-title");
+  if (t.standing) { // the standing chat has a fixed title and no status
+    box.innerHTML = '<span class="ttl" data-testid="standing-title">Planner</span> <span class="badge">standing chat</span>';
+    return;
+  }
   box.innerHTML = prioBadge(t.priority) + ' <span class="ttl" role="button" tabindex="0" title="Rename task" aria-label="Task title: ' +
     esc(t.title) + '. Activate to rename" id="title-text">' + esc(t.title) + "</span>" +
     '<button type="button" class="editbtn" id="title-edit" title="Rename task" aria-label="Rename task">&#9998;</button>' +
@@ -2538,7 +2553,10 @@ function pRenderInbox() {
   const alerts = [...P.alerts].sort((a, b) => a.priority - b.priority || Date.parse(b.created_at) - Date.parse(a.created_at));
   const open = P.tasks.filter(t => t.status === "open");
   const needs = open.filter(needsYou), rest = open.filter(t => !needsYou(t)), closed = P.tasks.filter(t => t.status !== "open");
-  let h = '<div class="p-chips"><button class="p-chip' + (P.showClosed ? "" : " on") + '" data-act="closed-off">Open</button>' +
+  let h = pList(['<div class="p-row"><div class="p-item" data-go="task/' + STANDING_ID + '" data-testid="standing-row">' +
+    '<span class="p-dot"></span><div class="p-title">Planner</div>' +
+    '<div class="p-prev">Standing chat: ask about status, or tell it what to do</div></div></div>']) +
+    '<div class="p-chips"><button class="p-chip' + (P.showClosed ? "" : " on") + '" data-act="closed-off">Open</button>' +
     '<button class="p-chip' + (P.showClosed ? " on" : "") + '" data-act="closed-on">Include closed</button></div>' + pErr();
   if (!alerts.length && !needs.length && !P.q) h += '<div class="p-zero">All caught up: nothing needs you.</div>';
   if (alerts.length) h += pSec("Alerts", alerts.length) + pList(alerts.map(pAlertRow));
@@ -2558,19 +2576,19 @@ function pRenderThreadView(th, focus) {
   if (th.missing) { pTop(focus ? "Inbox" : "Task not found", focus ? pUsageChip() : ""); $("p-body").innerHTML = '<div class="p-empty">This task no longer exists.</div>'; return; }
   const t = th.task, msgs = th.messages || [];
   if (document.visibilityState === "visible") markSeen(t);
-  pTop(esc(t.title), (focus ? pUsageChip() : "") + '<button class="p-icon" data-act="task-menu" aria-label="Task actions">' + P_ICON.more + "</button>");
+  pTop(t.standing ? "Planner" : esc(t.title), (focus ? pUsageChip() : "") + '<button class="p-icon" data-act="task-menu" aria-label="Task actions">' + P_ICON.more + "</button>");
   const shown = P.showInternal ? msgs : msgs.filter(m => !isInternalEnv(m));
   const last = shown[shown.length - 1];
   const typing = !!(last && last.from === "human:operator" && t.status === "open");
   const sig = [t.id, t.title, t.status, t.priority, shown.length, last ? last.id : "", P.showInternal, typing, P.err].join("|");
-  $("p-input").placeholder = t.status === "closed" ? "Reply to reopen…" : "Reply…";
+  $("p-input").placeholder = t.standing ? "Ask the planner…" : t.status === "closed" ? "Reply to reopen…" : "Reply…";
   if (sig === P.threadSig) return; // nothing new: keep the scroll position and avoid flicker
   const first = !P.threadSig;
   const atBottom = first || window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 120;
   if (selectionIn($("p-body"))) { htmlDeferred = true; return; } // keep the user's selection; re-render once it clears
   P.threadSig = sig;
   $("p-body").innerHTML = pErr() +
-    '<div class="p-thead">' + prioBadge(t.priority) + ' <span class="st ' + (t.status === "open" ? "running" : "") + '">' + esc(t.status) + "</span>" +
+    '<div class="p-thead">' + (t.standing ? '<span class="badge">standing chat</span>' : prioBadge(t.priority) + ' <span class="st ' + (t.status === "open" ? "running" : "") + '">' + esc(t.status) + "</span>") +
     "<span class=\"sid\">" + esc(t.id) + "</span>" + (P.showInternal ? '<span class="badge">showing internal</span>' : "") + "</div>" +
     '<div class="p-log">' + (shown.length ? shown.map(m => (isInternalEnv(m) ? '<div class="internal">' + bubble(m) + "</div>" : bubble(m))).join("")
       : '<div class="p-empty">no messages in this task yet</div>') +
@@ -2839,8 +2857,8 @@ function pTaskMenu() {
   const jobs = t.job_ids || [];
   const sh = pSheet('<div class="p-menu">' +
     '<button class="p-btn" data-act="toggle-internal">' + (P.showInternal ? "Hide" : "Show") + " internal messages (jobs, reports)</button>" +
-    (t.status === "open" ? '<button class="p-btn" data-act="close" data-id="' + esc(t.id) + '">Close task</button>' : "") +
-    '<button class="p-btn" data-act="mark-unread" data-id="' + esc(t.id) + '">Mark unread and go back</button>' +
+    (t.status === "open" && !t.standing ? '<button class="p-btn" data-act="close" data-id="' + esc(t.id) + '">Close task</button>' : "") +
+    (t.standing ? "" : '<button class="p-btn" data-act="mark-unread" data-id="' + esc(t.id) + '">Mark unread and go back</button>') +
     '<button class="p-btn" data-act="copy-id" data-id="' + esc(t.id) + '">Copy task id</button>' +
     (jobs.length ? pSec("Linked jobs", jobs.length) + jobs.map(j => '<button class="p-btn" style="font-family:var(--mono)" data-go="job/' + esc(j) + '">' + esc(j) + "</button>").join("") : "") +
     "</div>");

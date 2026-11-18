@@ -158,6 +158,11 @@ type PlannerWake struct {
 	Thread []wire.MessageEnvelope
 	// Triggers are the envelopes that caused this wake.
 	Triggers []wire.MessageEnvelope
+	// Summary / SummaryThrough: the standing chat's running summary of
+	// older messages and the id of the newest message it covers (only set
+	// for the standing task).
+	Summary        string
+	SummaryThrough string
 }
 
 // plannerTaskKey carries the woken task id on the session context.
@@ -187,7 +192,11 @@ func (b *PlannerBrain) HandleTask(ctx context.Context, w PlannerWake) error {
 		}()
 	}
 	ctx = context.WithValue(ctx, plannerTaskKey{}, w.Task.ID)
-	stdout, err := sb.exec()(ctx, buildTaskWakePrompt(w))
+	prompt := buildTaskWakePrompt(w)
+	if w.Task.Standing {
+		prompt = buildStandingWakePrompt(w)
+	}
+	stdout, err := sb.exec()(ctx, prompt)
 	if err != nil {
 		return fmt.Errorf("planner session for task %s (%d envelope(s)): %w", w.Task.ID, len(w.Triggers), err)
 	}

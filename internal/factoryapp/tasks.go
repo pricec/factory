@@ -220,6 +220,9 @@ func (a *App) reopenTask(ctx context.Context, id string) (tasks.Task, error) {
 func (a *App) taskView(ctx context.Context, t tasks.Task) taskView {
 	preview, typ, ts := a.taskLastVisible(ctx, t.ID)
 	v := taskView{Task: t, Preview: preview, PreviewFrom: previewFrom(typ), Awaiting: tasks.Awaiting(t.Status, typ)}
+	if t.Standing {
+		v.Awaiting = tasks.AwaitingFactory // never "needs you"
+	}
 	if v.Awaiting == tasks.AwaitingOperator {
 		v.AwaitingSince = ts
 	}

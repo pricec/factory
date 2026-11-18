@@ -820,7 +820,7 @@ host facts are descriptive and never matched on).
 | `GET /v1/inboxes/{id}/recent` | recent envelopes for one inbox, acked included (UI; §4.1) |
 | `POST /v1/chat` | `{text, task_id?}` -> chat.message envelope in the operator inbox, filed under a task (new without `task_id`; 404 for an unknown one); wakes the LLM planner (§9.5, §9.5.2) |
 | `GET /v1/tasks`, `GET /v1/tasks/{id}`, `POST /v1/tasks`, `PATCH /v1/tasks/{id}` | task list, task + thread, the "new task" alias of chat, and operator rename `{title}` (§9.5.2) |
-| `POST /v1/tasks/{id}/close` | operator closes a task from the UI; clears `needs_operator` and wakes the planner with `task.closed_by_operator` (§9.5.2) |
+| `POST /v1/tasks/{id}/close` | (400 `standing_chat` for the standing chat, §9.5.7) operator closes a task from the UI; clears `needs_operator` and wakes the planner with `task.closed_by_operator` (§9.5.2) |
 | `GET /v1/alerts`, `POST /v1/alerts/{id}/ack`, `POST /v1/alerts/{id}/reply` | open alerts, ack, and reply-creates-a-task (§9.5.3) |
 | `GET /v1/inboxes/planner:main/stream` | permissive SSE stream of the operator inbox for the chat UI (§9.5) |
 | `GET /` | operator web UI (single page; §4.1) |
@@ -1719,7 +1719,7 @@ orphaned, live, and local job ids.
   section (#17, #15).
 - Tool descriptions stay tiny (per-turn token cost for every LLM caller,
   #6); byte budgets asserted by test: worker surface < 2KB total (#17; 2026-11-17 job-owned merges: raised from 1.5KB for `request_merge`, §9.2; earlier 2026-11-17 typed report_result input schema, was 1KB);
-  foreman surface < 1.5KB (#18; 2KB since the 2026-11-16 `raise_alert` tool); factory surface < 5.5KB (2026-11-18 conflict coordinator `touches`; was 5KB after 2026-11-17 job secrets; 4.5KB, merge
+  foreman surface < 1.5KB (#18; 2KB since the 2026-11-16 `raise_alert` tool); factory surface < 6.5KB (2026-11-18 standing Planner chat: `create_task`, `update_standing_summary`, §9.5.7; was 6KB after host facts; 5.5KB, 2026-11-18 conflict coordinator `touches`; was 5KB after 2026-11-17 job secrets; 4.5KB, merge
   queue: raised from 4KB for `request_merge`, §6.11 - 4093 B were in use;
   earlier: < 4KB since the 2026-11-16
   inbox redesign: raised from 2KB for the task tools of §9.5.2 and
@@ -2006,7 +2006,11 @@ Tools (exact):
   `{task}` (closing defaults `reason` to `planner`; a reopen ignores it;
   `needs_operator` true|false sets or clears the task's "waiting on the
   operator" flag, §9.5.2; a planner close never wakes the planner);
-  `set_priority_criteria(text)` -> `{ok}`.
+  `set_priority_criteria(text)` -> `{ok}`; `create_task(title, priority?)` ->
+  `{task}` (a new open task; the way a standing-chat session files work);
+  `update_standing_summary(summary, through_message_id)` -> `{ok}` (standing
+  chat session only, §9.5.7). `create_job` refuses to file a job under the
+  standing chat (§9.5.7).
 
 Input schemas (2026-11-14 amendment): every tool on this surface
 advertises a typed input schema - argument names and required fields are
@@ -2095,7 +2099,7 @@ by the web UI (§4.1 `GET /`), both stored in the factory's `inbox.db`:
 `planner:main` remains the planner's wake queue: the one inbox that the
 operator's UI streams and the planner loop drains. Sections of this chapter:
 §9.5.1 storage, §9.5.2 task API, relay stamping and per-task wakes,
-§9.5.3 alerts, §9.5.4 cross-slice glue, §9.5.5 UI, §9.5.6 live acceptance. Where an earlier amendment contradicts
+§9.5.3 alerts, §9.5.4 cross-slice glue, §9.5.5 UI, §9.5.6 live acceptance, §9.5.7 the standing Planner chat. Where an earlier amendment contradicts
 this chapter, this chapter wins.
 
 Envelope types in `planner:main` (the "internal" flag is derived from the type,
@@ -2511,6 +2515,61 @@ foreman `raise_alert` shows in `GET /v1/alerts` and acks. Steps (c) and (d)
 need credentials (a foreman bearer, the planner bearer) passed by
 environment, as documented in the script header. The e2e suite
 (`test/e2e/inbox_test.go`) is the automated twin.
+
+#### 9.5.7 The standing Planner chat (2026-11-18)
+
+A permanent operator<->planner conversation that belongs to no unit of
+work, for status questions ("where is task X", "what is held", "what
+merged today") and direct instructions.
+
+- **Representation.** One well-known task row: id `task_standing`, title
+  `Planner`, `tasks.standing = 1` (additive `ALTER TABLE tasks ADD COLUMN
+  standing INTEGER NOT NULL DEFAULT 0`, §9.5.1 style). `tasks.New` calls
+  `EnsureStanding` on every start: it inserts the row when missing and
+  repairs it (reopen, re-flag) if it was ever closed or unflagged. Its
+  messages are ordinary thread rows (`thread_id = task_standing`), so
+  `POST /v1/chat {task_id:"task_standing"}`, `GET /v1/tasks/task_standing`,
+  SSE and the wake dispatcher need no special routes. The Task JSON carries
+  `"standing": true` for it (omitted otherwise).
+- **Invariants.** It can never be closed: `UpdateTask(status=closed)` (so
+  `update_task`), `POST /v1/tasks/{id}/close` (400 `standing_chat`) and the
+  reaper (skips it) all refuse; renaming it and setting `needs_operator`
+  are refused too. It is excluded from `ListTasks` (and so `GET /v1/tasks`
+  in every filter, the Needs-you list, the reaper, `list_tasks`) unless
+  `TaskFilter.IncludeStanding`; its `awaiting` is always `factory`. Jobs
+  cannot be linked to it (`LinkJob` refuses), so no job or merge event ever
+  wakes it: only operator chat does.
+- **Wake.** Operator chat on it wakes a planner session exactly like any
+  task wake (same dispatcher, same MCP surface and tools, session bound to
+  `task_standing`), but with a standing prompt (`plannerstanding.go`): the
+  session is told it is the standing factory chat, must answer status
+  questions with the read tools, must open a NEW task (`create_task`) for
+  real work (or route it to an existing task by id), give the operator the
+  task id, and may act directly (cancel_job, update_task, request_merge,
+  set_priority_criteria, message_foreman, raise_alert). `create_job` never
+  defaults to the standing chat: from a standing session, or with
+  `task_id=task_standing`, it is a tool error telling the planner to call
+  `create_task` first.
+- **Bounded context.** A wake never replays the history. The prompt holds
+  the operator's priority criteria, a running summary of older messages
+  (settings keys `standing_summary`, `standing_summary_through`; <= 4000
+  bytes) and the last 20 thread messages minus those the summary already
+  covers (never fewer than the newest 6). When 14 or more shown messages
+  are not yet in the summary, the prompt asks the planner to fold all but
+  the newest 6 into the summary with `update_standing_summary(summary,
+  through_message_id)` (the id is supplied in the prompt; the tool only
+  works from a standing session and only for a message of the standing
+  chat). So a session reads at most 20 short messages plus the summary,
+  whatever the chat's age, and no extra LLM call is made: the planner
+  maintains the summary as part of the wake it was already running. If it
+  skips the fold, the oldest messages simply age out of the 20-message
+  window.
+- **UI.** A pinned "Planner" row tops the desktop task list and the phone
+  Inbox; it opens the thread through the normal task view and composer
+  (no rename, close or mark-unread actions).
+
+Out of scope here: performance/metrics queries (cycle time, failure rate,
+throttle stats).
 
 ## 10. Error model
 

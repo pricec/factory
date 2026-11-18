@@ -75,6 +75,9 @@ func (r *taskReaper) Reap(ctx context.Context) ([]string, error) {
 	cutoff := r.now().Add(-idle)
 	var closed []string
 	for _, t := range open {
+		if t.Standing {
+			continue // the standing chat is never reaped
+		}
 		if t.LastActivityAt.After(cutoff) {
 			continue
 		}
