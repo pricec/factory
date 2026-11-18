@@ -18,11 +18,15 @@ const MergeProcedureDoc = "docs/merging.md"
 // quiet `gh pr checks --watch` is not idle-killed. It starts on the default
 // tier (most merges finish small); one pre-merge CI/conflict failure
 // escalates to the hardest tier (MergeEscalatable, MergeEscalatedJobSpec).
+// DefaultMergeJobPriority is the merge job priority when the request's
+// source job has no task.
+const DefaultMergeJobPriority = 3
+
 const (
 	MergeJobCreatedBy    = "factory:merge_queue"
 	mergeJobTimeoutS     = 7200
 	mergeJobIdleTimeoutS = 1800
-	mergeJobPriority     = 3
+	mergeJobPriority     = DefaultMergeJobPriority
 )
 
 // MergeTask builds the merge job's task text from the request fields
