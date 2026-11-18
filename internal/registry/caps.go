@@ -231,6 +231,9 @@ func DetectTools(dirs []string) map[string]string {
 	return map[string]string{"tools": strings.Join(found, ",")}
 }
 
+// HasTool reports whether an executable named name exists in dirs.
+func HasTool(dirs []string, name string) bool { return toolInDirs(dirs, name) }
+
 func toolInDirs(dirs []string, name string) bool {
 	for _, dir := range dirs {
 		info, err := os.Stat(filepath.Join(dir, name))

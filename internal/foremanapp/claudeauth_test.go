@@ -34,7 +34,7 @@ func claudeTestApp(t *testing.T, verdict *atomic.Value) (*App, *atomic.Int32) {
 		factoryURL: srv.URL,
 		poster:     &Poster{},
 		now:        func() time.Time { return time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC) },
-		modelCfg:   newModelConfig(modelValues{flash: "openrouter/x", standard: "openrouter/y", hardest: "claude-opus-5-5"}),
+		modelCfg:   newModelConfig(modelValues{flash: "openrouter/x", standard: "openrouter/y", hardest: "claude-opus-5-5"}, false),
 		claudeAuth: newClaudeAuth(),
 	}
 	a.paired.Bearer = "paired"

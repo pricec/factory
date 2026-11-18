@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -72,7 +73,7 @@ func pairWithFactory(ctx context.Context, a *App) (pairingRecord, error) {
 		"pairing_token": a.cfg.PairingToken,
 		"self": map[string]any{
 			"id":           a.id,
-			"capabilities": detectCapabilities(),
+			"capabilities": detectCapabilities(a.cfg.Harness),
 		},
 	}
 	data, err := json.Marshal(body)
@@ -109,8 +110,16 @@ func pairWithFactory(ctx context.Context, a *App) (pairingRecord, error) {
 
 // detectCapabilities returns the foreman's startup capability tags (spec
 // §6.7): PATH-detected tools merged with os/arch.
-func detectCapabilities() map[string]string {
-	caps := registry.DetectTools(filepath.SplitList(os.Getenv("PATH")))
+//
+// harness "claude" makes the tools tag reflect the harness in use: the
+// opencode tag is dropped (the foreman never runs it) and claude is
+// advertised when its binary is on PATH.
+func detectCapabilities(harness string) map[string]string {
+	dirs := filepath.SplitList(os.Getenv("PATH"))
+	caps := registry.DetectTools(dirs)
+	if harness == HarnessClaude {
+		caps["tools"] = claudeHarnessTools(caps["tools"], registry.HasTool(dirs, "claude"))
+	}
 	caps["os"] = runtime.GOOS
 	caps["arch"] = runtime.GOARCH
 	return caps
@@ -195,4 +204,27 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	case <-t.C:
 		return true
 	}
+}
+
+// HarnessClaude is the Config.Harness value pinning the Claude Code CLI.
+const HarnessClaude = "claude"
+
+// claudeHarnessTools rewrites a detected tools tag for a claude-pinned
+// foreman: opencode dropped, claude added when installed; sorted.
+func claudeHarnessTools(tools string, haveClaude bool) string {
+	set := map[string]bool{}
+	for _, t := range strings.Split(tools, ",") {
+		if t != "" && t != "opencode" {
+			set[t] = true
+		}
+	}
+	if haveClaude {
+		set["claude"] = true
+	}
+	out := make([]string, 0, len(set))
+	for t := range set {
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	return strings.Join(out, ",")
 }

@@ -26,7 +26,7 @@ func TestModelConfigApply(t *testing.T) {
 		standard: models.WorkerStandard,
 		hardest:  models.WorkerHardest,
 	}
-	m := newModelConfig(seeds)
+	m := newModelConfig(seeds, false)
 
 	// Tier mapping over the seeds (spec §5.1: no-tier runs flash).
 	if got := m.WorkerForTier(""); got != seeds.flash {
@@ -159,7 +159,7 @@ func TestFetchSettings(t *testing.T) {
 // amendment): an applied panel value reaches the next session's runner
 // route (§9.3) without a restart, and clearing it reverts to the seed.
 func TestBrainModelFnPerSession(t *testing.T) {
-	m := newModelConfig(modelValues{brain: models.ForemanBrainDefault})
+	m := newModelConfig(modelValues{brain: models.ForemanBrainDefault}, false)
 	b := &BrainRunner{Model: models.ForemanBrainDefault, ModelFn: m.Brain}
 	if got := b.session().Model; got != models.ForemanBrainDefault {
 		t.Fatalf("seed session model = %q, want %q", got, models.ForemanBrainDefault)

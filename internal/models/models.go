@@ -60,3 +60,14 @@ const WorkerStandard = "openrouter/z-ai/glm-5.3-flash#max"
 // GLM 5.3 (openrouter, ~$0.084/$3.6 per M tokens) for the hardest tasks
 // only.
 const WorkerHardest = "openrouter/z-ai/glm-5.3"
+
+// Claude-harness tier defaults (foreman harness "claude",
+// FACTORY_FOREMAN_HARNESS=claude): what a role resolves to on a foreman
+// pinned to the Claude Code CLI when no claude-* model was configured for
+// it. They match the install script's 05-claude-models.conf drop-in.
+const (
+	ClaudeWorkerFlash    = "claude-haiku-5-5"
+	ClaudeWorkerStandard = "claude-sonnet-5-5"
+	ClaudeWorkerHardest  = "claude-opus-5-5"
+	ClaudeForemanBrain   = "claude-opus-5-5"
+)
