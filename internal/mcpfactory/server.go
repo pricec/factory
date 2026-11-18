@@ -114,7 +114,7 @@ func Handler(cfg Config) (http.Handler, error) {
 	}, messageForemanTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "notify_operator",
-		Description: "Reply to the operator on a task thread (task_id defaults to the woken task); ALWAYS answer this way.",
+		Description: "Reply to the operator on a task thread (task_id defaults to the woken task); ALWAYS answer this way. ALWAYS also fill `spoken`: a 1-3 sentence plain-text conversational summary of the reply (no markdown, no code, no URLs or ids, max 300 chars) that is read aloud to the operator.",
 	}, notifyOperatorTool(cfg))
 	addTaskTools(srv, cfg) // spec §9.5.2 (tasks_tools.go)
 

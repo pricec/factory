@@ -76,8 +76,59 @@ func TestUISpeechMic(t *testing.T) {
 			t.Errorf("UI page leaks %q", bad)
 		}
 	}
+	// Manual mic transcripts are never auto-sent; only the opt-in
+	// hands-free toggle sends (TestUISpokenReplies).
 	if strings.Contains(body, "autosend") {
 		t.Error("transcripts must not auto-send")
+	}
+	// The phone new-task / reply sheets are built on demand and get a mic too.
+	for _, want := range []string{`wireSheets`, `form.p-sheetform`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("UI page missing sheet mic wiring %q", want)
+		}
+	}
+}
+
+// TestUISpokenReplies: spoken replies + hands-free ship in the voice block
+// (spec §6.14): speaker toggle persisted in localStorage, tts/plan chunking
+// with AudioContext scheduling, an energy VAD, live-SSE-only triggering, and
+// no speech secrets in the page.
+func TestUISpokenReplies(t *testing.T) {
+	e := newEnv(t)
+	resp, err := http.Get(e.ts.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	body := string(b)
+	for _, want := range []string{
+		`createSpeaker`, `createHandsFree`, `spokenFor`, `stripMarkdown`,
+		`/v1/speech/tts/plan`, `/v1/speech/tts`, `decodeAudioData`, `webkitAudioContext`,
+		`factory.voice.speak`, `bar.id = "voice-out"`, `"factory:envelope"`, `window.FactoryHost`,
+		`p.spoken`, `hangoverMs`, `getFloatTimeDomainData`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("UI page missing spoken-reply markup %q", want)
+		}
+	}
+	// Speaking is driven by the live SSE stream only: the history renderers
+	// must not reference the speaker.
+	for _, fn := range []string{"function bubbleHTML", "function renderThread", "async function loadThread"} {
+		i := strings.Index(body, fn)
+		if i < 0 {
+			t.Fatalf("missing %q", fn)
+		}
+		end := i + 3000
+		if end > len(body) {
+			end = len(body)
+		}
+		if strings.Contains(body[i:end], "speak(") {
+			t.Errorf("%s must not speak (no replay of history)", fn)
+		}
+	}
+	if strings.Contains(body, "FACTORY_SPEECH") || strings.Contains(body, "speech-key") {
+		t.Error("UI page leaks speech configuration")
 	}
 }
 
