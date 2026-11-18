@@ -180,3 +180,39 @@ func TestSweeperTimeoutReapsQuietRunningJob(t *testing.T) {
 		t.Fatalf("state = %s, want timed_out", st)
 	}
 }
+
+// A job reaped as unclaimed goes through the bounded retry policy (spec
+// §6.4) instead of failing outright: each reap re-arms a retry until the
+// crash budget is spent, then the job is dead-lettered.
+func TestReconcileUnclaimedIsBoundedRetry(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	now := clock()
+	s.Now = func() time.Time { return *now }
+	spec := newSpec(t, nil)
+	driveTo(t, s, spec, StateRunning)
+
+	for attempt := 0; attempt <= MaxRetries("crash"); attempt++ {
+		*now = now.Add(3 * time.Minute)
+		got, err := s.ReconcileForeman(ctx, "foreman:alpha", nil)
+		if err != nil || len(got) != 1 {
+			t.Fatalf("attempt %d: reconcile = %v, %v; want 1 reaped", attempt, got, err)
+		}
+		j, _, _ := s.Get(ctx, spec.ID)
+		if attempt < MaxRetries("crash") {
+			if j.State != StateFailed || j.NextAttempt == "" {
+				t.Fatalf("attempt %d: state=%s next=%q, want failed with retry armed", attempt, j.State, j.NextAttempt)
+			}
+			*now = now.Add(time.Hour)
+			p := NewRetryPicker(s)
+			if n, err := p.Pump(ctx); err != nil || n != 1 {
+				t.Fatalf("attempt %d: pump = %d, %v", attempt, n, err)
+			}
+			if _, applied, err := s.transition(ctx, spec.ID, StateRunning); err != nil || !applied {
+				t.Fatalf("attempt %d: back to running: %v %v", attempt, applied, err)
+			}
+		} else if j.State != StateDead {
+			t.Fatalf("budget spent: state=%s, want dead", j.State)
+		}
+	}
+}

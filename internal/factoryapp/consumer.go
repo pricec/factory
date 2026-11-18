@@ -248,6 +248,12 @@ func (a *App) notifyDispatched(ctx context.Context, job jobs.Job) error {
 	if err := env.Validate(); err != nil {
 		return fmt.Errorf("envelope: %w", err)
 	}
+	// A retry re-dispatches the same job id: free the previous attempt's
+	// job.result dedupe slot in the main inbox, or this attempt's result is
+	// rejected as a duplicate and the job is later reaped by reconcile.
+	if _, err := a.inbox.ReleaseResult(ctx, FactoryMainInbox, job.ID); err != nil {
+		return fmt.Errorf("release prior result: %w", err)
+	}
 	target := registry.InboxID(job.ForemanID)
 	if _, err := a.inbox.Post(ctx, target, env); err != nil {
 		return fmt.Errorf("post to %s: %w", target, err)
