@@ -19,18 +19,23 @@ import (
 // `opencode run` has no client to answer an "ask", so any prompt is
 // auto-declined and the whole session aborts mid-flight.
 func newOpenCODEConfig(cfg Config) map[string]any {
+	return occonfig.Build(openCODEVersion(cfg), cfg.Model, occonfig.Remote{
+		Name:     "inbox",
+		URL:      cfg.MCPURL,
+		TokenEnv: envWorkerToken,
+	})
+}
+
+// openCODEVersion resolves the schema generation of cfg's opencode binary
+// (config shape and CLI flags both depend on it).
+func openCODEVersion(cfg Config) occonfig.Version {
 	v := cfg.OpenCODEVersion
 	if v == occonfig.Unknown && cfg.OpenCODEBin != "" && cfg.OpenCODEBin != "opencode" {
 		// An explicitly configured binary (wrapper/test double) is not
 		// probed, like supportsStandalone: it may not take --version.
 		v = occonfig.V2
 	}
-	v = occonfig.Resolve(v, cfg.OpenCODEBin)
-	return occonfig.Build(v, cfg.Model, occonfig.Remote{
-		Name:     "inbox",
-		URL:      cfg.MCPURL,
-		TokenEnv: envWorkerToken,
-	})
+	return occonfig.Resolve(v, cfg.OpenCODEBin)
 }
 
 // writeConfig writes a generated config (opencode or claude shape, §8.4)

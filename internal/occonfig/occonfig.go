@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -130,13 +131,18 @@ func (r Remote) server() map[string]any {
 // "ask", so any prompt auto-declines and aborts the session mid-flight.
 func Build(v Version, model string, remote Remote) map[string]any {
 	doc := map[string]any{}
-	if model != "" {
-		doc["model"] = model
-	}
 	if v == V2 {
+		if model != "" {
+			doc["model"] = model
+		}
 		doc["mcp"] = map[string]any{"servers": map[string]any{remote.Name: remote.server()}}
 		doc["permissions"] = []map[string]string{{"action": "*", "resource": "*", "effect": "allow"}}
 		return doc
+	}
+	if base, _ := SplitVariant(model); base != "" {
+		// V1 has no "#variant" model syntax (it resolves the whole string
+		// as a model id and dies with ProviderModelNotFoundError).
+		doc["model"] = base
 	}
 	doc["mcp"] = map[string]any{remote.Name: remote.server()}
 	doc["permission"] = V1AllowAll()
@@ -156,4 +162,15 @@ func V1AllowAll() map[string]string {
 		"external_directory": "allow",
 		"doom_loop":          "allow",
 	}
+}
+
+// SplitVariant splits a pinned model "provider/model#variant" into the
+// model id and the reasoning-effort variant ("" when absent). V2 accepts
+// the "#variant" suffix inline; V1 does not - its `run -m` treats the
+// whole string as a model id (ProviderModelNotFoundError, surfaced only
+// as "UnknownError ... Check server logs") and takes the variant through
+// the separate `--variant` flag.
+func SplitVariant(model string) (base, variant string) {
+	base, variant, _ = strings.Cut(model, "#")
+	return base, variant
 }
