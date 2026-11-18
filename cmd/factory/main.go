@@ -47,6 +47,7 @@ func main() {
 		DownloadsDir: *downloads,
 		Usage:        factoryapp.LoadUsageConfig(),
 		Throttle:     factoryapp.LoadThrottleConfig(),
+		Speech:       factoryapp.LoadSpeechConfig(),
 	})
 	if err != nil {
 		log.Fatalf("factory: %v", err)

@@ -745,6 +745,8 @@ factory planner's list view carries summaries only (#7, #19).
 | `GET /v1/jobs?state=&foreman=` | filter by state and foreman (#9) |
 | `POST /v1/jobs` | UI twin of the MCP `create_job` tool (§9.4): body `{task, requires[], secrets[]?, result_schema, tier, model?, timeout_s, priority, schedule_cron, foreman?, task_id?}`; runs the same capability match (no match -> `pending`); `201 + {job_id, state, foreman}`. `requires` entries are tag names, validated at creation against the union of registered foremen tag keys (§6.7, 2026-11-15 amendment): unknown tag names -> `400 unknown_requires`; a loud `warnings` array rides the 201 when nothing could be validated (no foremen registered). `foreman` (2026-11-16 foreman-pin amendment, §6.7) pins the job to that foreman (bare or `foreman:{id}` form): the pin wins over the Matcher, requires validation is skipped (requires stay informational), an unknown foreman is `404 unknown_foreman` (the `POST /v1/foremen/{id}/messages` contract), and an offline pin leaves the job `pending` with a `warnings` entry until it returns |
 | `GET /v1/models` | UI model-picker feed (2026-11-15 amendment): runs `opencode models` on the factory host and returns `[{id, provider, model}]`, provider-split and sorted (§6.5); empty listing is `[]` and is NOT cached (empty is opencode's degraded mode when its background service is unreachable - the next request retries); non-empty listings cached 5 min (§11); exec failure is `500 internal`; unauthenticated like the rest of the control plane |
+| `GET /v1/speech/config` | speech-to-text flag (§6.13): `{"enabled": bool}`, always `200`, `no-store`; never discloses the upstream URL or key; the UI shows its mic buttons only when `enabled` |
+| `GET\|POST /v1/speech/{path...}` | speech reverse proxy (§6.13): `404 not_found` unless `FACTORY_SPEECH_URL` is set; `/v1/speech/stt` maps to the configured upstream STT path (default `/api/stt`), any other path is forwarded verbatim under the base URL; unauthenticated like the rest of the control plane |
 | `GET /v1/settings` | settings panel (2026-11-15 amendment, §6.5): `{"roles": [{role, model, default_model, source}]}` for the five managed roles (`planner`, `foreman_brain`, `worker_flash`, `worker_default`, `worker_hardest`) in pinned order; `source` is `panel` (stored) or `default` (pinned; a per-host env override may still apply at spawn); unauthenticated |
 | `POST /v1/settings` | settings panel save (2026-11-15 amendment, §6.5): body is a role -> model map; a present key stores, `""` clears (back to env/default), an absent key is untouched; unknown roles and invalid models (§5.1 rules) are `400`; response is the updated state, same shape as GET; unauthenticated |
 | `POST /v1/foremen/{id}/messages` | UI twin of the MCP `message_foreman` tool (§9.4): body `{type, payload, job_id?}` posted from the planner identity; `201` + envelope. `{id}` accepts the bare foreman id or the full `foreman:{id}` form - both normalize to the same inbox (§7.3), never a double-prefixed one. `payload` is required (any JSON value; `{}` for an empty body); a null/missing payload is `400`. An id matching no registered foreman is `404 unknown_foreman` - posting never opens an inbox no foreman consumes (2026-11-14 amendment) |
@@ -1048,6 +1050,20 @@ guardrails enforced in code.
   and fixing nothing. It runs no git either: the worktree scan is skipped
   unless a scan in the audit job's result format is passed with
   `-worktrees`.
+
+### 6.13 Speech-to-text proxy (2026-11-18 amendment)
+
+The operator UI offers voice input (a mic button on the task reply, new-task and phone composers). The browser records audio (`getUserMedia`, mono, echo cancellation and noise suppression on; `MediaRecorder` with a negotiated mime: webm/opus, ogg/opus, webm, `audio/mp4` for iOS Safari) and POSTs the raw blob to `POST /v1/speech/stt` with its own `Content-Type`. The reply is the upstream JSON, `{"text": "..."}`; the UI inserts the text into the textarea for editing and never auto-sends.
+
+The factory reverse-proxies `/v1/speech/*` to a speech service so the browser never sees the service URL or its key:
+
+| Setting | Meaning |
+|---|---|
+| `FACTORY_SPEECH_URL` | upstream base URL (http/https). Unset or invalid -> speech disabled: every `/v1/speech/*` proxy route is `404`, `GET /v1/speech/config` reports `enabled:false`, and the UI hides the mic |
+| `FACTORY_SPEECH_KEY` | optional bearer; sent upstream as `Authorization: Bearer <key>`. When empty the credentials-store secret `speech-key` (§13) is read per request. The browser's own `Authorization` and `Cookie` headers are always stripped |
+| `FACTORY_SPEECH_STT_PATH` | upstream path for `/v1/speech/stt`; default `/api/stt` (the voice service today, `https://voice.home.qunify.io`); set `/v1/stt` when the service moves |
+
+Proxy behaviour: query strings are forwarded; request bodies are capped at 25 MiB (`413 too_large`, by `Content-Length` up front and by a limit reader for chunked bodies); response bytes are flushed as written (NDJSON streams work); an unreachable upstream is `502 speech_unavailable`, an upstream that does not answer in time `504 speech_timeout`. The mic is also hidden when the browser lacks `getUserMedia`/`MediaRecorder`. The capture client is a self-contained `window.FactoryVoice` block in `ui.html` intended to be extracted into a shared voice-client module.
 
 ## 7. Pairing & scoped auth
 
@@ -2404,6 +2420,7 @@ outside the `result_schema` subset at validation time (#3).
 | JobSpec defaults | `timeout_s` 14400 (ceiling); `idle_timeout_s` 900; `priority` 5 (1-9, 9 highest); `budget` `{max_prompt_bytes 32768, max_output_tokens 8192, max_cost_usd 20.0}` | #3 |
 | Long-pending alert | `pending` with no matching online foreman for > 30 min -> one `notify.pending` in `planner:main` (dedupe per job per pending episode); check tick 1 min | 2026-11-15 amendment |
 | Explicit model string | optional; 1-128 printable ASCII chars, no whitespace; overrides the tier mapping | 2026-11-15 amendment |
+| Speech proxy | request body cap 25 MiB (`413 too_large`); 10 min per request, 2 min to upstream response headers, 10s dial; responses flushed immediately | 2026-11-18 amendment, §6.13 |
 | Models listing cache | `GET /v1/models` re-execs `opencode models` at most every 5 min (non-empty listings only); one exec bounded at 10s | 2026-11-15 amendment |
 | Settings pull interval | foremen re-read `GET /v1/settings` at startup and every 60s (fetch bounded at 10s) | 2026-11-15 amendment |
 | Merge queue | one `merging` at a time; tick 5s + kicks; merge job tier `default` (escalates once to `hardest` on a `ci`/`conflict` failure, 2026-11-18), `timeout_s` 7200, `idle_timeout_s` 1800, priority 3, pinned `foreman:server` (`FACTORY_MERGE_FOREMAN`), never retried; needs_attention alert P1 source `factory:merge_queue` | 2026-11-17 amendment, §6.11 |
