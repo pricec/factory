@@ -3,6 +3,7 @@ package wire
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -28,6 +29,10 @@ const (
 	KindCrash      ErrorKind = "crash"
 	KindLLM        ErrorKind = "llm"
 	KindOther      ErrorKind = "other"
+	// KindAuth: the runner is not authenticated (not logged in, invalid API
+	// key, 401). Deterministic: a retry on the same host fails the same
+	// way, so it is never retried (§6.4).
+	KindAuth ErrorKind = "auth"
 	// KindSuperseded: the worker stood down because the job is a duplicate
 	// of, or was superseded by, another job. Not a failure to retry: the
 	// factory maps it to the terminal superseded state.
@@ -37,11 +42,47 @@ const (
 // Valid reports whether k is one of the pinned error kinds.
 func (k ErrorKind) Valid() bool {
 	switch k {
-	case KindValidation, KindTimeout, KindCrash, KindLLM, KindOther, KindSuperseded:
+	case KindValidation, KindTimeout, KindCrash, KindLLM, KindOther, KindAuth, KindSuperseded:
 		return true
 	default:
 		return false
 	}
+}
+
+// deterministicPatterns classify failure messages that will recur on every
+// retry. Lowercase substrings; kept tight to avoid misreading transient
+// errors (network, rate limit, 5xx) as permanent.
+var (
+	authPatterns = []string{
+		"not logged in", "please run /login",
+		"invalid api key", "invalid x-api-key", "incorrect api key",
+		"authentication_error", "authentication failed", "401 unauthorized",
+		"http 401", "status 401", "status code 401", "oauth token has expired",
+	}
+	validationPatterns = []string{
+		"unknown model", "model not found", "invalid model", "no such model",
+		"unknown route", "no route for", "no such route",
+		"executable file not found", "command not found",
+		"invalid job spec", "invalid spec", "spec error",
+	}
+)
+
+// ClassifyMessage inspects a failure message and returns the more specific
+// deterministic kind (auth, validation) when it matches, else "". It never
+// downgrades: callers apply it only to crash|other|llm kinds.
+func ClassifyMessage(msg string) ErrorKind {
+	m := strings.ToLower(msg)
+	for _, p := range authPatterns {
+		if strings.Contains(m, p) {
+			return KindAuth
+		}
+	}
+	for _, p := range validationPatterns {
+		if strings.Contains(m, p) {
+			return KindValidation
+		}
+	}
+	return ""
 }
 
 // Kill reasons (JobError.Reason): why the worker harness terminated the

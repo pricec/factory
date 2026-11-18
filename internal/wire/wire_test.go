@@ -641,3 +641,30 @@ func TestLoopLimitOmittedWhenZero(t *testing.T) {
 		t.Errorf("negative loop_limit (disabled) rejected: %v", err)
 	}
 }
+
+func TestClassifyMessage(t *testing.T) {
+	cases := []struct {
+		msg  string
+		want ErrorKind
+	}{
+		{"Not logged in \u00b7 Please run /login", KindAuth},
+		{"Invalid API key \u00b7 Fix external API key", KindAuth},
+		{"API Error: 401 Unauthorized", KindAuth},
+		{"unknown model \"x/y\"", KindValidation},
+		{"Model not found: foo", KindValidation},
+		{"exec: \"claude\": executable file not found in $PATH", KindValidation},
+		{"no route for model foo", KindValidation},
+		{"exit status 1", ""},
+		{"connection reset by peer", ""},
+		{"429 rate limit", ""},
+		{"GET /login returned 500", ""},
+	}
+	for _, tc := range cases {
+		if got := ClassifyMessage(tc.msg); got != tc.want {
+			t.Errorf("ClassifyMessage(%q) = %q, want %q", tc.msg, got, tc.want)
+		}
+	}
+	if !KindAuth.Valid() {
+		t.Error("KindAuth must be valid")
+	}
+}
