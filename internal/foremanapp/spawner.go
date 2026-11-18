@@ -260,6 +260,9 @@ func (a *App) defaultHarnessConfig(spec wire.JobSpec, bearer string) workerharne
 	model := a.workerModelForTier(spec.Tier)
 	if spec.Model != "" {
 		model = spec.Model
+		if a.modelCfg != nil {
+			model = a.modelCfg.ModelForTier(model, spec.Tier)
+		}
 	}
 	return workerharness.Config{
 		JobPath:   filepath.Join(a.dataDir, jobsDirName, spec.ID, "job.json"),

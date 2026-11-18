@@ -637,6 +637,12 @@ factory planner's list view carries summaries only (#7, #19).
 
 ### 6.7 Dispatch matching & capabilities (#12, #8)
 
+- Harness pin: `FACTORY_FOREMAN_HARNESS=claude` on a foreman forces the Claude
+  Code CLI for brain and every worker tier: any non-`claude-*` model (env,
+  settings panel, job `model` override, pinned GLM default) is replaced by the
+  tier's claude default (haiku-5-5 / sonnet-5-5 / opus-5-5), and the `tools`
+  capability drops `opencode` and adds `claude`. Unset keeps model-string
+  routing (§8.4).
 - Capabilities: flat string tags on the foreman (`os`, `arch`, `gpu`, `tools`
   as comma-separated, ...). Sent at pairing (#11) and at foreman startup
   (config + runtime detection of opencode/docker/git on PATH); stored in the

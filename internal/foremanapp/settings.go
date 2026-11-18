@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pricec/factory/internal/claudeauth"
+	"github.com/pricec/factory/internal/models"
 	"github.com/pricec/factory/internal/wire"
 )
 
@@ -45,10 +47,47 @@ type modelConfig struct {
 	mu      sync.RWMutex
 	seeds   modelValues
 	current modelValues
+	// claudeOnly pins the foreman to the Claude Code CLI harness
+	// (FACTORY_FOREMAN_HARNESS=claude): every resolved model - env,
+	// panel-set or pinned default - that is not a claude-* id is replaced
+	// by the role's claude default, so no run routes to opencode.
+	claudeOnly bool
 }
 
-func newModelConfig(seeds modelValues) *modelConfig {
-	return &modelConfig{seeds: seeds, current: seeds}
+func newModelConfig(seeds modelValues, claudeOnly bool) *modelConfig {
+	m := &modelConfig{claudeOnly: claudeOnly}
+	m.seeds = m.coerce(seeds)
+	m.current = m.seeds
+	return m
+}
+
+// forceClaude returns model when it already routes to claude, else def.
+func forceClaude(model, def string) string {
+	if claudeauth.IsModel(model) {
+		return model
+	}
+	return def
+}
+
+// coerce applies the claude-only pin to a model snapshot (no-op otherwise).
+func (m *modelConfig) coerce(v modelValues) modelValues {
+	if !m.claudeOnly {
+		return v
+	}
+	v.brain = forceClaude(v.brain, models.ClaudeForemanBrain)
+	v.flash = forceClaude(v.flash, models.ClaudeWorkerFlash)
+	v.standard = forceClaude(v.standard, models.ClaudeWorkerStandard)
+	v.hardest = forceClaude(v.hardest, models.ClaudeWorkerHardest)
+	return v
+}
+
+// ModelForTier applies the claude-only pin to a job's explicit model
+// override (non-claude -> the tier's claude model).
+func (m *modelConfig) ModelForTier(model, tier string) string {
+	if !m.claudeOnly || claudeauth.IsModel(model) {
+		return model
+	}
+	return m.WorkerForTier(tier)
 }
 
 // Brain returns the brain's current model.
@@ -96,7 +135,7 @@ func (m *modelConfig) apply(rows []settingEntry) {
 		}
 	}
 	m.mu.Lock()
-	m.current = next
+	m.current = m.coerce(next)
 	m.mu.Unlock()
 }
 

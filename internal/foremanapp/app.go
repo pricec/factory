@@ -71,6 +71,13 @@ type Config struct {
 	// §6.5, 2026-11-15 amendment, settings.go); 0/negative -> 60s. A
 	// test seam.
 	SettingsRefresh time.Duration
+	// Harness pins the worker/brain harness: "claude" forces the Claude
+	// Code CLI for every model role (non-claude models, from env, panel or
+	// defaults, are replaced by the claude tier defaults) and advertises
+	// tools "claude" instead of "opencode"; "" or "opencode" keeps the
+	// model-string routing (claude-* -> claude, else opencode). Set via
+	// FACTORY_FOREMAN_HARNESS.
+	Harness string
 	// Now is the clock; nil -> real UTC time.
 	Now func() time.Time
 	// ProcRoot is the process table the startup orphan probe reads (spec
@@ -305,7 +312,10 @@ func New(cfg Config) (*App, error) {
 		flash:    cfg.WorkerFlashModel,
 		standard: cfg.WorkerModel,
 		hardest:  cfg.WorkerHardestModel,
-	})
+	}, cfg.Harness == HarnessClaude)
+	if a.modelCfg.claudeOnly {
+		cfg.BrainModel = a.modelCfg.Brain()
+	}
 	a.claudeAuth = newClaudeAuth()
 	a.brain = &BrainRunner{
 		ExtraEnv: a.claudeAuth.Env,
@@ -881,7 +891,7 @@ func (a *App) capsLoop(ctx context.Context) {
 // means nothing is advertised. A successful push is also the post-update
 // confirm trigger (spec §12.5).
 func (a *App) pushCapabilities(ctx context.Context) error {
-	caps := detectCapabilities()
+	caps := detectCapabilities(a.cfg.Harness)
 	caps["build"] = a.build
 	status, body, err := postJSONResponse(ctx, a.factoryURL+"/v1/foreman/capabilities", a.paired.Bearer,
 		map[string]any{"capabilities": caps, "active_jobs": a.liveJobIDs(), "claude_auth": a.claudeAuth.report(a.claudeTiers())})

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -44,6 +45,7 @@ func main() {
 		WorkerFlashModel:   os.Getenv("FACTORY_WORKER_FLASH_MODEL"),
 		WorkerModel:        os.Getenv("FACTORY_WORKER_MODEL"),
 		WorkerHardestModel: os.Getenv("FACTORY_WORKER_HARDEST_MODEL"),
+		Harness:            strings.ToLower(strings.TrimSpace(os.Getenv("FACTORY_FOREMAN_HARNESS"))),
 	})
 	if err != nil {
 		log.Fatalf("foreman: %v", err)
