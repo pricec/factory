@@ -195,3 +195,77 @@ func TestSpeechUpstreamDown(t *testing.T) {
 		t.Errorf("status = %d, want 502", resp.StatusCode)
 	}
 }
+
+func TestSpeechProxyTTSRoutes(t *testing.T) {
+	up, ts := newSpeechUpstream(t)
+	e := speechEnv(t, factoryapp.SpeechConfig{URL: ts.URL, Key: "s3cret"})
+	for _, c := range []struct{ route, want string }{
+		{"tts", "/v1/tts"}, {"tts/plan", "/v1/tts/plan"},
+	} {
+		req, _ := http.NewRequest("POST", e.ts.URL+"/v1/speech/"+c.route, strings.NewReader(`{"text":"hi","format":"wav"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer browser-token")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 || strings.Contains(string(b), "s3cret") {
+			t.Fatalf("%s: status %d body %s", c.route, resp.StatusCode, b)
+		}
+		up.mu.Lock()
+		if up.path != c.want || up.auth != "Bearer s3cret" || up.ct != "application/json" || string(up.body) != `{"text":"hi","format":"wav"}` {
+			t.Errorf("%s: upstream got %s auth=%q ct=%q body=%q", c.route, up.path, up.auth, up.ct, up.body)
+		}
+		up.mu.Unlock()
+	}
+}
+
+func TestSpeechProxyTTSPathOverrides(t *testing.T) {
+	up, ts := newSpeechUpstream(t)
+	e := speechEnv(t, factoryapp.SpeechConfig{URL: ts.URL, TTSPath: "/api/tts", TTSPlanPath: "api/tts/plan"})
+	for route, want := range map[string]string{"tts": "/api/tts", "tts/plan": "/api/tts/plan"} {
+		resp, err := http.Post(e.ts.URL+"/v1/speech/"+route, "application/json", strings.NewReader(`{"text":"x"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		up.mu.Lock()
+		if up.path != want {
+			t.Errorf("%s -> %q, want %q", route, up.path, want)
+		}
+		up.mu.Unlock()
+	}
+}
+
+func TestSpeechProxyTTSBodyCap(t *testing.T) {
+	up, ts := newSpeechUpstream(t)
+	e := speechEnv(t, factoryapp.SpeechConfig{URL: ts.URL})
+	big := strings.Repeat("a", factoryapp.MaxSpeechTTSBody+1)
+	resp, err := http.Post(e.ts.URL+"/v1/speech/tts", "application/json", strings.NewReader(big))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413", resp.StatusCode)
+	}
+	if up.hits != 0 {
+		t.Errorf("oversize text reached the upstream")
+	}
+}
+
+func TestSpeechTTSDisabled(t *testing.T) {
+	e := newEnv(t)
+	for _, route := range []string{"tts", "tts/plan"} {
+		resp, err := http.Post(e.ts.URL+"/v1/speech/"+route, "application/json", strings.NewReader(`{"text":"x"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("%s = %d, want 404 when unset", route, resp.StatusCode)
+		}
+	}
+}

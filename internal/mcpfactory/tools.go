@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/pricec/factory/internal/auth"
@@ -73,8 +74,29 @@ type (
 	notifyOperatorArgs struct {
 		Text   string `json:"text"`
 		TaskID string `json:"task_id,omitempty"`
+		// Spoken is an optional 1-3 sentence plain-text rendering of the
+		// reply for text-to-speech (spec §6.15); trimmed and capped here.
+		Spoken string `json:"spoken,omitempty"`
 	}
 )
+
+// MaxSpokenChars caps a brain.reply `spoken` field (runes).
+const MaxSpokenChars = 300
+
+// normSpoken trims s, collapses whitespace and truncates to MaxSpokenChars
+// runes (on a word boundary where one exists, with an ellipsis).
+func normSpoken(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	r := []rune(s)
+	if len(r) <= MaxSpokenChars {
+		return s
+	}
+	cut := string(r[:MaxSpokenChars-1])
+	if i := strings.LastIndex(cut, " "); i > MaxSpokenChars/2 {
+		cut = cut[:i]
+	}
+	return strings.TrimRight(cut, " ,;:-") + "…"
+}
 
 // structuredResult packs v into the tool's structured content.
 func structuredResult(v any) *mcp.CallToolResult {
@@ -469,7 +491,7 @@ func notifyOperatorTool(cfg Config) mcp.ToolHandlerFor[notifyOperatorArgs, any] 
 		env := wire.MessageEnvelope{
 			Type:     "brain.reply",
 			From:     auth.FactoryBrainIdentity,
-			Payload:  json.RawMessage(`{"text":` + mustQuote(in.Text) + `}`),
+			Payload:  replyPayload(in.Text, in.Spoken),
 			ThreadID: taskID,
 		}
 		posted, err := cfg.Inbox.Post(ctx, auth.PlannerMainInbox, env)
@@ -483,6 +505,16 @@ func notifyOperatorTool(cfg Config) mcp.ToolHandlerFor[notifyOperatorArgs, any] 
 		}
 		return structuredResult(out), nil, nil
 	}
+}
+
+// replyPayload builds the brain.reply payload; `spoken` is omitted when
+// empty so old consumers and envelopes are unaffected.
+func replyPayload(text, spoken string) json.RawMessage {
+	out := `{"text":` + mustQuote(text)
+	if sp := normSpoken(spoken); sp != "" {
+		out += `,"spoken":` + mustQuote(sp)
+	}
+	return json.RawMessage(out + `}`)
 }
 
 // mustQuote marshals s to a JSON string (always valid).
