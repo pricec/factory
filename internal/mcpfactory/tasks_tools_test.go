@@ -412,3 +412,54 @@ func TestNotifyOperatorSpoken(t *testing.T) {
 		t.Errorf("blank spoken stored: %v", payload())
 	}
 }
+
+// TestCreateTaskLinks: create_task accepts follow_up_of / parent_task_id /
+// message, validates the ids, and list_tasks filters by parent.
+func TestCreateTaskLinks(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	root := e.mkTask("survey")
+
+	sc := structured(t, resultOf(t, e.callTool("create_task", map[string]any{
+		"title": "new goal", "follow_up_of": root.ID, "message": "continuing from the survey",
+	})))
+	fu := sc["task"].(map[string]any)
+	if fu["follow_up_of"] != root.ID {
+		t.Fatalf("create_task = %v", fu)
+	}
+	envs, err := e.svc.ThreadMessages(ctx, fu["id"].(string), 10)
+	if err != nil || len(envs) != 1 || envs[0].Type != tasks.TypeBrainReply {
+		t.Errorf("initial message = %+v, %v", envs, err)
+	}
+	sc = structured(t, resultOf(t, e.callTool("create_task", map[string]any{"title": "sub", "parent_task_id": root.ID})))
+	child := sc["task"].(map[string]any)
+
+	// Unknown ids are tool errors and create nothing.
+	before, _ := e.tasks.ListTasks(ctx, tasks.TaskFilter{})
+	for _, args := range []map[string]any{
+		{"title": "x", "follow_up_of": "task_nope"},
+		{"title": "x", "parent_task_id": "task_nope"},
+		{"title": "x", "follow_up_of": tasks.StandingID},
+	} {
+		if msg := toolError(t, "create_task", e.callTool("create_task", args)); !strings.Contains(msg, "invalid") {
+			t.Errorf("create_task %v error = %q", args, msg)
+		}
+	}
+	if after, _ := e.tasks.ListTasks(ctx, tasks.TaskFilter{}); len(after) != len(before) {
+		t.Error("a refused create_task still created a task")
+	}
+
+	// get_task / list_tasks expose the links; list_tasks filters by parent.
+	sc = structured(t, resultOf(t, e.callTool("get_task", map[string]any{"task_id": root.ID})))
+	rt := sc["task"].(map[string]any)
+	if c, _ := rt["child_task_ids"].([]any); len(c) != 1 || c[0] != child["id"] {
+		t.Errorf("get_task child_task_ids = %v", rt["child_task_ids"])
+	}
+	if f, _ := rt["follow_up_task_ids"].([]any); len(f) != 1 || f[0] != fu["id"] {
+		t.Errorf("get_task follow_up_task_ids = %v", rt["follow_up_task_ids"])
+	}
+	list := structuredSlice(t, resultOf(t, e.callTool("list_tasks", map[string]any{"parent_task_id": root.ID})), "tasks")
+	if len(list) != 1 || list[0]["id"] != child["id"] || list[0]["parent_task_id"] != root.ID {
+		t.Errorf("list_tasks parent filter = %v", list)
+	}
+}

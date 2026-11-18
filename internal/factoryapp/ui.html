@@ -410,6 +410,8 @@
   .st.failed, .st.timed_out, .st.dead, .st.offline { color: var(--bad); border-color: var(--bad); }
   /* thread */
   .p-thead { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 2px; color: var(--dim); font: 12px var(--mono); }
+  .p-links { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 0 2px 8px; color: var(--dim); font: 12px var(--mono); overflow-wrap: anywhere; }
+  .p-links a { color: var(--accent); padding: 4px 0; }
   .p-log { display: flex; flex-direction: column; gap: 10px; padding-top: 4px; }
   #phone .bubble { max-width: 88%; font: 16px/1.45 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
     overflow-wrap: anywhere; border-radius: 18px; padding: 10px 14px; }
@@ -2571,6 +2573,15 @@ function pRenderInbox() {
 function pRenderThread() { pRenderThreadView(P.thread, false); }
 // pRenderThreadView draws a task thread into #p-body: the task route, and the
 // focused task in focus mode (focus=true: the top bar keeps the usage chip).
+// pTaskLinks renders the task's links (follow-up of / parent / children /
+// follow-ups) as a wrapping line of task links; "" when it has none.
+function pTaskLinks(t) {
+  const link = id => '<a href="#/task/' + encodeURIComponent(id) + '" data-go="task/' + esc(id) + '">' + esc(id) + "</a>";
+  const part = (label, ids) => ids && ids.length ? "<span>" + label + " " + ids.map(link).join(", ") + "</span>" : "";
+  const h = part("follow-up of", t.follow_up_of ? [t.follow_up_of] : []) + part("child of", t.parent_task_id ? [t.parent_task_id] : []) +
+    part("follow-ups:", t.follow_up_task_ids) + part("children:", t.child_task_ids);
+  return h ? '<div class="p-links" data-testid="task-links">' + h + "</div>" : "";
+}
 function pRenderThreadView(th, focus) {
   if (!th) { if (P.err) $("p-body").innerHTML = pErr(); return; }
   if (th.missing) { pTop(focus ? "Inbox" : "Task not found", focus ? pUsageChip() : ""); $("p-body").innerHTML = '<div class="p-empty">This task no longer exists.</div>'; return; }
@@ -2580,7 +2591,7 @@ function pRenderThreadView(th, focus) {
   const shown = P.showInternal ? msgs : msgs.filter(m => !isInternalEnv(m));
   const last = shown[shown.length - 1];
   const typing = !!(last && last.from === "human:operator" && t.status === "open");
-  const sig = [t.id, t.title, t.status, t.priority, shown.length, last ? last.id : "", P.showInternal, typing, P.err].join("|");
+  const sig = [t.id, t.title, t.status, t.priority, shown.length, last ? last.id : "", (t.follow_up_of || "") + (t.parent_task_id || "") + (t.follow_up_task_ids || []).join() + (t.child_task_ids || []).join(), P.showInternal, typing, P.err].join("|");
   $("p-input").placeholder = t.standing ? "Ask the planner…" : t.status === "closed" ? "Reply to reopen…" : "Reply…";
   if (sig === P.threadSig) return; // nothing new: keep the scroll position and avoid flicker
   const first = !P.threadSig;
@@ -2589,7 +2600,7 @@ function pRenderThreadView(th, focus) {
   P.threadSig = sig;
   $("p-body").innerHTML = pErr() +
     '<div class="p-thead">' + (t.standing ? '<span class="badge">standing chat</span>' : prioBadge(t.priority) + ' <span class="st ' + (t.status === "open" ? "running" : "") + '">' + esc(t.status) + "</span>") +
-    "<span class=\"sid\">" + esc(t.id) + "</span>" + (P.showInternal ? '<span class="badge">showing internal</span>' : "") + "</div>" +
+    "<span class=\"sid\">" + esc(t.id) + "</span>" + (P.showInternal ? '<span class="badge">showing internal</span>' : "") + "</div>" + pTaskLinks(t) +
     '<div class="p-log">' + (shown.length ? shown.map(m => (isInternalEnv(m) ? '<div class="internal">' + bubble(m) + "</div>" : bubble(m))).join("")
       : '<div class="p-empty">no messages in this task yet</div>') +
     (typing ? '<div class="typing">the planner is thinking…</div>' : "") + "</div>";

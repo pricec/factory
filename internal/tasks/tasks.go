@@ -38,6 +38,17 @@ type Task struct {
 	// a task row that is never closed, never listed with ordinary tasks and
 	// never "awaiting"/"needs you". See EnsureStanding.
 	Standing bool `json:"standing,omitempty"`
+	// FollowUpOf is the task this one continues after a change of goal
+	// (empty when none). ParentTaskID is the task this one is a child of
+	// (empty when none). Both are set at creation and reference existing
+	// tasks.
+	FollowUpOf   string `json:"follow_up_of,omitempty"`
+	ParentTaskID string `json:"parent_task_id,omitempty"`
+	// ChildTaskIDs and FollowUpTaskIDs are the reverse links: tasks whose
+	// parent_task_id / follow_up_of is this task, oldest first. Computed on
+	// read; never nil on tasks returned by the store.
+	ChildTaskIDs    []string `json:"child_task_ids"`
+	FollowUpTaskIDs []string `json:"follow_up_task_ids"`
 	// JobIDs are the linked jobs (task_jobs), in link order. Never nil on
 	// tasks returned by the store.
 	JobIDs []string `json:"job_ids"`
@@ -59,6 +70,10 @@ type TaskFilter struct {
 	// IncludeStanding also returns the standing planner chat; by default
 	// it is excluded from every listing.
 	IncludeStanding bool
+	// ParentTaskID / FollowUpOf, when non-empty, keep only tasks linked to
+	// that task id.
+	ParentTaskID string
+	FollowUpOf   string
 }
 
 // TaskUpdate is a partial update; nil fields are left alone.
@@ -77,21 +92,50 @@ type TaskUpdate struct {
 
 // CreateTask inserts a new open task. Title must be non-empty.
 func (s *Store) CreateTask(ctx context.Context, title string, priority int) (Task, error) {
+	return s.CreateTaskLinked(ctx, title, priority, TaskLinks{})
+}
+
+// TaskLinks are the optional links of a new task.
+type TaskLinks struct {
+	FollowUpOf   string
+	ParentTaskID string
+}
+
+// CreateTaskLinked is CreateTask with links. Each non-empty link must name
+// an existing, non-standing task, else ErrInvalid.
+func (s *Store) CreateTaskLinked(ctx context.Context, title string, priority int, l TaskLinks) (Task, error) {
 	if strings.TrimSpace(title) == "" {
 		return Task{}, errInvalid("title: required")
+	}
+	for _, c := range []struct{ name, id string }{{"follow_up_of", l.FollowUpOf}, {"parent_task_id", l.ParentTaskID}} {
+		if c.id == "" {
+			continue
+		}
+		var standing bool
+		err := s.db.QueryRowContext(ctx, `SELECT standing FROM tasks WHERE id = ?`, c.id).Scan(&standing)
+		if errors.Is(err, sql.ErrNoRows) {
+			return Task{}, errInvalid("%s: unknown task %q", c.name, c.id)
+		}
+		if err != nil {
+			return Task{}, err
+		}
+		if standing {
+			return Task{}, errInvalid("%s: the standing chat cannot be linked", c.name)
+		}
 	}
 	now := formatTS(s.now())
 	id := NewTaskID()
 	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO tasks (id, title, status, priority, created_at, updated_at)
-		 VALUES (?, ?, 'open', ?, ?, ?)`, id, title, priority, now, now); err != nil {
+		`INSERT INTO tasks (id, title, status, priority, created_at, updated_at, follow_up_of, parent_task_id)
+		 VALUES (?, ?, 'open', ?, ?, ?, ?, ?)`, id, title, priority, now, now,
+		nullStr(l.FollowUpOf), nullStr(l.ParentTaskID)); err != nil {
 		return Task{}, err
 	}
 	return s.GetTask(ctx, id)
 }
 
 const taskSelect = `
-SELECT id, title, status, priority, created_at, updated_at, closed_at, close_reason, needs_operator, standing, last_act FROM (
+SELECT id, title, status, priority, created_at, updated_at, closed_at, close_reason, needs_operator, standing, follow_up_of, parent_task_id, last_act FROM (
 	SELECT t.*, MAX(t.updated_at, IFNULL(
 		(SELECT m.ts FROM messages m WHERE m.thread_id = t.id ORDER BY m.seq DESC LIMIT 1), '')) AS last_act
 	FROM tasks t
@@ -102,10 +146,12 @@ func scanTask(r rowScanner) (Task, error) {
 		t                         Task
 		created, updated, lastAct string
 		closed                    sql.NullString
+		followUp, parent          sql.NullString
 	)
-	if err := r.Scan(&t.ID, &t.Title, &t.Status, &t.Priority, &created, &updated, &closed, &t.CloseReason, &t.NeedsOperator, &t.Standing, &lastAct); err != nil {
+	if err := r.Scan(&t.ID, &t.Title, &t.Status, &t.Priority, &created, &updated, &closed, &t.CloseReason, &t.NeedsOperator, &t.Standing, &followUp, &parent, &lastAct); err != nil {
 		return t, err
 	}
+	t.FollowUpOf, t.ParentTaskID = followUp.String, parent.String
 	var err error
 	if t.CreatedAt, err = parseTS(created); err != nil {
 		return t, err
@@ -123,6 +169,8 @@ func scanTask(r rowScanner) (Task, error) {
 		t.LastActivityAt = t.UpdatedAt
 	}
 	t.JobIDs = []string{}
+	t.ChildTaskIDs = []string{}
+	t.FollowUpTaskIDs = []string{}
 	return t, nil
 }
 
@@ -138,7 +186,7 @@ func (s *Store) GetTask(ctx context.Context, id string) (Task, error) {
 		return Task{}, err
 	}
 	ts := []Task{t}
-	if err := s.fillJobIDs(ctx, ts); err != nil {
+	if err := s.fillRelations(ctx, ts); err != nil {
 		return Task{}, err
 	}
 	return ts[0], nil
@@ -167,6 +215,14 @@ func (s *Store) ListTasks(ctx context.Context, f TaskFilter) ([]Task, error) {
 		where = append(where, `(title LIKE ? ESCAPE '\' OR id LIKE ? ESCAPE '\' OR id LIKE ? ESCAPE '\'
 			OR created_at LIKE ? ESCAPE '\' OR last_act LIKE ? ESCAPE '\')`)
 		args = append(args, "%"+e+"%", e+"%", likeEscape(TaskIDPrefix)+e+"%", e+"%", e+"%")
+	}
+	if f.ParentTaskID != "" {
+		where = append(where, `parent_task_id = ?`)
+		args = append(args, f.ParentTaskID)
+	}
+	if f.FollowUpOf != "" {
+		where = append(where, `follow_up_of = ?`)
+		args = append(args, f.FollowUpOf)
 	}
 	q := taskSelect
 	if len(where) > 0 {
@@ -197,10 +253,52 @@ func (s *Store) ListTasks(ctx context.Context, f TaskFilter) ([]Task, error) {
 		return nil, err
 	}
 	rows.Close()
-	if err := s.fillJobIDs(ctx, out); err != nil {
+	if err := s.fillRelations(ctx, out); err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// fillRelations fills the computed reverse task links, then the job ids.
+func (s *Store) fillRelations(ctx context.Context, ts []Task) error {
+	if len(ts) == 0 {
+		return nil
+	}
+	if err := s.fillJobIDs(ctx, ts); err != nil {
+		return err
+	}
+	idx := make(map[string]int, len(ts))
+	ph := make([]string, len(ts))
+	args := make([]any, 0, 2*len(ts))
+	for i, t := range ts {
+		idx[t.ID] = i
+		ph[i] = "?"
+		args = append(args, t.ID)
+	}
+	in := strings.Join(ph, ",")
+	args = append(args, args...)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, parent_task_id, follow_up_of FROM tasks
+		 WHERE parent_task_id IN (`+in+`) OR follow_up_of IN (`+in+`)
+		 ORDER BY created_at, id`, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var parent, followUp sql.NullString
+		if err := rows.Scan(&id, &parent, &followUp); err != nil {
+			return err
+		}
+		if i, ok := idx[parent.String]; ok && parent.Valid {
+			ts[i].ChildTaskIDs = append(ts[i].ChildTaskIDs, id)
+		}
+		if i, ok := idx[followUp.String]; ok && followUp.Valid {
+			ts[i].FollowUpTaskIDs = append(ts[i].FollowUpTaskIDs, id)
+		}
+	}
+	return rows.Err()
 }
 
 func (s *Store) fillJobIDs(ctx context.Context, ts []Task) error {

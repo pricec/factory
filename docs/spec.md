@@ -2006,8 +2006,11 @@ Tools (exact):
   `{task}` (closing defaults `reason` to `planner`; a reopen ignores it;
   `needs_operator` true|false sets or clears the task's "waiting on the
   operator" flag, §9.5.2; a planner close never wakes the planner);
-  `set_priority_criteria(text)` -> `{ok}`; `create_task(title, priority?)` ->
-  `{task}` (a new open task; the way a standing-chat session files work);
+  `set_priority_criteria(text)` -> `{ok}`; `create_task(title, priority?,
+  follow_up_of?, parent_task_id?, message?)` -> `{task}` (a new open task;
+  the way a standing-chat session files work; the link ids must name
+  existing non-standing tasks, else a tool error and no task; `message`
+  is posted as the task's first `brain.reply`; §9.5.1 task links);
   `update_standing_summary(summary, through_message_id)` -> `{ok}` (standing
   chat session only, §9.5.7). `create_job` refuses to file a job under the
   standing chat (§9.5.7).
@@ -2169,6 +2172,17 @@ every start; existing files migrate in place.
   it); reopening clears `closed_at` and `close_reason`. `needs_operator`
   was added after the first release: an existing `tasks` table gets it by
   an idempotent `ALTER TABLE ... ADD COLUMN` at start (2026-11-17).
+- Task links (2026-11-18, stay with chat -> task -> job; there is no
+  project layer): `tasks.follow_up_of TEXT NULL` (the task this one
+  continues after a change of goal) and `tasks.parent_task_id TEXT NULL`
+  (the task this one is a sub-task of), both added by idempotent `ALTER
+  TABLE`, indexed. They are set once, when the task is created
+  (`CreateTaskLinked`); each non-empty value must name an existing
+  non-standing task, else `ErrInvalid` and nothing is created. Links are
+  never edited, so they cannot form a cycle. A task's JSON carries
+  `follow_up_of` / `parent_task_id` (omitted when null) and the computed
+  reverse links `child_task_ids` / `follow_up_task_ids` (oldest first,
+  never null). `TaskFilter.ParentTaskID` / `FollowUpOf` filter listings.
 - `task_jobs(task_id, job_id, PK(task_id, job_id))`, indexed by job_id.
 - `alerts(id 'alert_<ulid>' PK, priority INT, title, body, source,
   created_at, expires_at NULL = never, state open|acked|replied|expired,
@@ -2195,6 +2209,14 @@ every start; existing files migrate in place.
 - The store is policy-free: TTL defaults, expiry tickers, wakes and the idle
   reaper live in the factory app, which uses the store's primitives
   (`ExpireAlerts(now)`, `TransitionAlert` compare-and-set, and so on).
+
+Planner rule (2026-11-18, in the per-task wake prompt, which also lists the
+task's links): a task has one goal. When the operator's request on a task
+is really a new goal, the planner calls `create_task(follow_up_of=<task>,
+message=<brief>)`, tells the operator the new task id and carries on there;
+`parent_task_id` is for a sub-task inside the same goal. When a task's own
+goal is done it suggests the operator close it. The UI shows "follow-up of",
+"child of", and the follow-up/child task links under the thread header.
 
 #### 9.5.2 Tasks and per-task planner wakes (inbox redesign S2, 2026-11-16)
 
