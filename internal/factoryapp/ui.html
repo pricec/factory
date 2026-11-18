@@ -274,7 +274,7 @@
   #phone { display: none; }
   html.phone { --sat: env(safe-area-inset-top, 0px); --sab: env(safe-area-inset-bottom, 0px);
     --sal: env(safe-area-inset-left, 0px); --sar: env(safe-area-inset-right, 0px);
-    --tabh: 56px; --kb: 0px; --composer-h: 62px; -webkit-text-size-adjust: 100%; }
+    --tabh: 56px; --kb: 0px; --composer-h: 62px; --fnav-h: 60px; --fbar-h: 48px; -webkit-text-size-adjust: 100%; }
   html.phone body { font-size: 16px; -webkit-tap-highlight-color: transparent; }
   html.phone body > header, html.phone #usagepanel, html.phone #credpanel, html.phone body > main { display: none !important; }
   html.phone #phone { display: block; overflow-x: clip; min-height: 100vh; }
@@ -286,7 +286,7 @@
     border-bottom: 1px solid var(--border); }
   #p-top h1 { flex: 1; min-width: 0; margin: 0 6px; font: 700 20px/1.2 -apple-system, "Segoe UI", sans-serif;
     overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-word; }
-  html.p-thread #p-top h1, html.p-detail #p-top h1 { font-size: 16px; font-weight: 600; }
+  html.p-thread #p-top h1, html.p-detail #p-top h1, html.p-fthread #p-top h1 { font-size: 16px; font-weight: 600; }
   #p-topacts { display: flex; align-items: center; gap: 2px; flex: none; }
   .p-icon { min-width: 44px; height: 44px; display: inline-flex; align-items: center; justify-content: center;
     background: none; border: 0; color: var(--accent); border-radius: 12px; padding: 0 8px; font-size: 16px; }
@@ -309,14 +309,43 @@
   .p-uchip i { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); flex: none; }
   .p-uchip i.GREEN { background: var(--ok); } .p-uchip i.YELLOW, .p-uchip i.ORANGE { background: var(--warn); }
   .p-uchip i.RED { background: var(--bad); }
-  #p-searchbar { display: none; position: sticky; top: calc(52px + var(--sat)); z-index: 19; background: var(--bg);
+  #p-searchbar { display: none; position: sticky; top: calc(52px + var(--sat) + var(--fbar-h)); z-index: 19; background: var(--bg);
     padding: 8px calc(12px + var(--sar)) 4px calc(12px + var(--sal)); }
   html.p-search #p-searchbar { display: block; }
   #p-searchbar input, #phone textarea, #phone input, #phone select { font-size: 16px; }
   #p-searchbar input { width: 100%; height: 44px; padding: 0 14px; border-radius: 12px; border: 1px solid var(--border);
     background: var(--panel); color: var(--text); -webkit-appearance: none; appearance: none; }
   #p-body { padding: 4px calc(12px + var(--sar)) calc(var(--tabh) + var(--sab) + 92px) calc(12px + var(--sal)); }
-  html.p-thread #p-body { padding-bottom: calc(var(--composer-h) + var(--sab) + var(--kb) + 16px); }
+  html.p-thread #p-body, html.p-fthread.kb-open #p-body { padding-bottom: calc(var(--composer-h) + var(--sab) + var(--kb) + 16px); }
+  html.p-fthread #p-body { padding-bottom: calc(var(--composer-h) + var(--fnav-h) + var(--sab) + var(--kb) + 16px); }
+  /* focus mode (phone): focus/list switch + "N waiting" under the top bar, prev/skip/next above the composer */
+  #p-fbar { display: none; position: sticky; top: calc(52px + var(--sat)); z-index: 19; align-items: center; gap: 10px;
+    min-height: var(--fbar-h); padding: 4px calc(12px + var(--sar)) 4px calc(12px + var(--sal));
+    background: var(--bg); border-bottom: 1px solid var(--border); }
+  html.p-inbox #p-fbar { display: flex; }
+  #p-fcount { flex: 1; min-width: 0; font: 700 15px -apple-system, "Segoe UI", sans-serif; color: var(--dim); white-space: nowrap; }
+  #p-fcount.has { color: var(--warn); }
+  #p-fseg { display: flex; flex: none; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  #p-fseg button { min-width: 72px; min-height: 40px; padding: 0 14px; border: 0; background: var(--panel); color: var(--dim);
+    font-size: 15px; font-weight: 600; }
+  #p-fseg button.on { background: #1f6feb; color: #fff; }
+  #p-fnav { display: none; position: fixed; left: 0; right: 0; z-index: 29; gap: 8px; height: var(--fnav-h);
+    padding: 6px calc(10px + var(--sar)) 6px calc(10px + var(--sal)); align-items: stretch;
+    bottom: calc(var(--composer-h) + var(--kb)); background: var(--bg); border-top: 1px solid var(--border); }
+  html.p-fthread #p-fnav { display: flex; }
+  html.kb-open #p-fnav { display: none; }
+  #p-fnav button { flex: 1; min-height: 48px; border-radius: 14px; border: 1px solid var(--border);
+    background: var(--panel); color: var(--text); font-size: 17px; font-weight: 600; }
+  #p-fnav button#p-fskip { flex: 0.8; color: var(--warn); }
+  #p-fnav button:active { background: #1c2128; }
+  #p-fnav button:disabled { opacity: .4; }
+  #p-fempty { text-align: center; padding: 56px 16px 24px; }
+  #p-fempty .big { font: 600 22px -apple-system, "Segoe UI", sans-serif; color: var(--ok); margin-bottom: 8px; }
+  #p-fempty .sub { color: var(--dim); font-size: 15px; margin-bottom: 20px; }
+  #p-fempty .p-btn { width: 100%; max-width: 320px; }
+  html.p-focus #p-fab { display: none; }
+  html.p-fthread #p-tabs, html.p-fthread #p-fab { display: none; }
+  html.p-fthread #p-toast { bottom: calc(var(--composer-h) + var(--fnav-h) + var(--sab) + var(--kb) + 16px); }
   .p-chips { display: flex; gap: 8px; overflow-x: auto; padding: 8px 0 2px; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
   .p-chips::-webkit-scrollbar { display: none; }
   .p-chip { flex: none; min-height: 44px; padding: 0 16px; border-radius: 22px; border: 1px solid var(--border);
@@ -395,7 +424,7 @@
     padding: 8px calc(10px + var(--sar)) calc(8px + var(--sab)) calc(10px + var(--sal));
     background: rgba(22,27,34,.97); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
     border-top: 1px solid var(--border); transform: translateY(calc(-1 * var(--kb))); }
-  html.p-thread #p-composer { display: flex; }
+  html.p-thread #p-composer, html.p-fthread #p-composer { display: flex; }
   html.kb-open #p-composer { padding-bottom: 8px; }
   #p-input { flex: 1; min-height: 44px; max-height: 40vh; padding: 11px 16px; border-radius: 22px; resize: none;
     border: 1px solid var(--border); background: var(--bg); color: var(--text); line-height: 1.35; font-family: inherit; }
@@ -659,8 +688,20 @@
     <h1 id="p-title">Inbox</h1>
     <span id="p-topacts"></span>
   </div>
+  <div id="p-fbar">
+    <span id="p-fcount" aria-live="polite"></span>
+    <div id="p-fseg" role="group" aria-label="Inbox view">
+      <button type="button" id="p-fseg-focus" data-act="view-focus">Focus</button>
+      <button type="button" id="p-fseg-list" data-act="view-list">List</button>
+    </div>
+  </div>
   <div id="p-searchbar"><input id="p-q" type="search" placeholder="Search title, id or date" autocomplete="off" enterkeyhint="search" aria-label="Search tasks"></div>
   <div id="p-body"></div>
+  <div id="p-fnav">
+    <button type="button" id="p-fprev" data-act="focus-prev" aria-label="Previous task">&larr; Prev</button>
+    <button type="button" id="p-fskip" data-act="focus-skip" aria-label="Skip: send to the back of the queue">Skip</button>
+    <button type="button" id="p-fnext" data-act="focus-next" aria-label="Next task">Next &rarr;</button>
+  </div>
   <form id="p-composer">
     <textarea id="p-input" rows="1" placeholder="Reply…" aria-label="Reply"></textarea>
     <button type="submit" id="p-send" aria-label="Send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
@@ -1052,17 +1093,55 @@ function advance(queue, current) {
 }
 window.__queue = { mergeQueue, advance };
 
-async function loadQueue() {
-  if (!st.tasksAvailable) return;
+// Queue plumbing shared by the desktop and phone focus views (st.queue /
+// st.focusId are the single source of truth; only the rendering differs).
+// fetchQueue returns the ids awaiting the operator in triage order, or null
+// when unavailable.
+async function fetchQueue() {
+  if (!st.tasksAvailable) return null;
   try {
-    const fresh = ((await getJ("/v1/tasks?status=open&needs_operator=true&limit=500")).tasks || []).map(t => t.id);
-    st.queue = mergeQueue(st.queue, fresh);
-  } catch (e) { if (api404(e)) st.tasksAvailable = false; return; }
-  if (st.mode === "focus" && !st.queue.includes(st.focusId)) {
-    // the focused task was answered elsewhere / closed: move to the head.
+    return ((await getJ("/v1/tasks?status=open&needs_operator=true&limit=500")).tasks || []).map(t => t.id);
+  } catch (e) { if (api404(e)) st.tasksAvailable = false; return null; }
+}
+// applyQueue merges a fresh id list into st.queue (stable order, new ids at
+// the end). While focusing, a focused task that left the queue (answered
+// elsewhere / closed) moves focus to the head.
+function applyQueue(fresh, focusing) {
+  st.queue = mergeQueue(st.queue, fresh);
+  if (focusing && !st.queue.includes(st.focusId)) {
     st.focusId = st.queue.length ? st.queue[0] : null;
     st.selected = st.focusId; st.thread = null;
   }
+}
+// replyAdvance moves focus to the task after the one just replied to
+// (computed from the queue as it was when the reply was sent), then refreshes
+// the queue, which drops the answered task.
+async function replyAdvance(replied) {
+  const nxt = advance(st.queue, replied);
+  st.focusId = nxt || null; st.selected = st.focusId; st.thread = null;
+  const fresh = await fetchQueue();
+  if (fresh) applyQueue(fresh, true);
+}
+// queueStep returns the id delta places from the focused task (wrapping), "" if empty.
+function queueStep(delta) {
+  const n = st.queue.length;
+  if (!n) return "";
+  const i = st.queue.indexOf(st.focusId);
+  return st.queue[((i < 0 ? 0 : i + delta) % n + n) % n];
+}
+// queueSkip sends the focused task to the back and returns the new head-of-focus id, "" if < 2 tasks wait.
+function queueSkip() {
+  if (st.queue.length < 2) return "";
+  const cur = st.focusId, nxt = advance(st.queue, cur);
+  st.queue = st.queue.filter(id => id !== cur).concat([cur]);
+  return nxt;
+}
+window.__queue.applyQueue = applyQueue;
+
+async function loadQueue() {
+  const fresh = await fetchQueue();
+  if (!fresh) return;
+  applyQueue(fresh, st.mode === "focus");
   renderFocusBar();
 }
 
@@ -1072,15 +1151,12 @@ function setFocus(id) {
   return loadThread();
 }
 function focusStep(delta) {
-  if (!st.queue.length) return;
-  const i = st.queue.indexOf(st.focusId);
-  return setFocus(st.queue[((i < 0 ? 0 : i + delta) % st.queue.length + st.queue.length) % st.queue.length]);
+  const id = queueStep(delta);
+  if (id) return setFocus(id);
 }
 function focusSkip() {
-  if (st.queue.length < 2) return;
-  const cur = st.focusId, nxt = advance(st.queue, cur);
-  st.queue = st.queue.filter(id => id !== cur).concat([cur]);
-  return setFocus(nxt);
+  const id = queueSkip();
+  if (id) return setFocus(id);
 }
 
 function setMode(m) {
@@ -1318,10 +1394,8 @@ $("chatform").onsubmit = async (ev) => {
     if (st.tasksAvailable && st.mode === "focus") {
       // advance to the next waiting task (computed from the queue as it was
       // when the reply was sent); loadQueue drops the answered one.
-      const nxt = advance(st.queue, replied);
-      st.focusId = nxt || null; st.selected = st.focusId; st.thread = null;
-      await loadQueue();
-      if (!st.queue.includes(st.focusId)) { st.focusId = st.queue[0] || null; st.selected = st.focusId; }
+      await replyAdvance(replied);
+      renderFocusBar();
       await loadThread(); await loadTasks();
     } else if (st.tasksAvailable) { await loadThread(); await loadTasks(); await loadQueue(); } else await loadLegacy();
   } catch (e) {
@@ -2121,7 +2195,7 @@ function applyLayout() {
   $("to-phone").style.display = !now && layoutPref() === "desktop" && matchMedia(PHONE_MQ).matches ? "" : "none";
   if (was === now) return;
   if (now) pRoute();
-  else { P_ROOT.classList.remove("p-thread", "p-detail", "p-search", "p-sheet", "kb-open"); document.title = "factory"; setTab(tab); }
+  else { P_ROOT.classList.remove("p-thread", "p-detail", "p-search", "p-sheet", "kb-open", "p-inbox", "p-focus", "p-fthread"); document.title = "factory"; setTab(tab); }
 }
 
 /* ----- read state (per device) ----- */
@@ -2148,6 +2222,8 @@ const P = {
   thread: null, threadSig: "", showInternal: false,
   jobs: [], jobState: "", job: null, foremen: [], fjobs: [], fmsgs: [], inboxes: [], imsgs: [],
   err: "", busy: false, badge: 0,
+  mode: "focus",          // inbox view: "focus" (default on every load) | "list"; queue/focusId live in st
+  drafts: {}, draftFor: null, // focus-mode reply drafts per task id
 };
 const P_PARENT = { task: "inbox", job: "jobs", foreman: "foremen", ibx: "more" };
 const P_TAB = { inbox: "inbox", task: "inbox", jobs: "jobs", job: "jobs", foremen: "foremen", foreman: "foremen", more: "more", ibx: "more" };
@@ -2177,7 +2253,8 @@ function pRoute() {
   P.r = r;
   P_ROOT.classList.toggle("p-thread", r.name === "task");
   P_ROOT.classList.toggle("p-detail", !!P_PARENT[r.name] && r.name !== "task");
-  P_ROOT.classList.toggle("p-search", r.name === "inbox" && P.searchOpen === true);
+  P_ROOT.classList.toggle("p-search", r.name === "inbox" && P.searchOpen === true && P.mode === "list");
+  pSyncFocus();
   for (const b of document.querySelectorAll("#p-tabs button")) b.classList.toggle("active", b.dataset.tab === P_TAB[r.name]);
   const fab = $("p-fab");
   fab.classList.toggle("on", r.name === "inbox" || r.name === "jobs");
@@ -2215,12 +2292,26 @@ async function pLoadInboxData() {
   [P.tasks, P.alerts] = await Promise.all([tasksP, alertsP]);
 }
 
+// pLoadFocus refreshes the shared triage queue (st.queue, the same logic the
+// desktop focus view uses) and loads the thread of the focused task.
+async function pLoadFocus() {
+  if (!st.tasksAvailable) return;
+  const fresh = await fetchQueue();
+  if (fresh) applyQueue(fresh, true);
+  else if (st.tasksAvailable && !st.queue.length) throw new Error("could not load the waiting tasks");
+  const id = st.focusId;
+  if (!id) { P.thread = null; return; }
+  try { P.thread = await getJ("/v1/tasks/" + encodeURIComponent(id) + (P.showInternal ? "?internal=1" : "")); }
+  catch (e) { if (e.status === 404) P.thread = { missing: true, id }; else throw e; }
+}
+
 async function pLoadOnce() {
   const r = P.r, enc = encodeURIComponent(r.arg || "");
   P.err = "";
   const inbox = pLoadInboxData();
   try {
     switch (r.name) {
+      case "inbox": if (P.mode === "focus") await pLoadFocus(); break;
       case "task":
         try { P.thread = await getJ("/v1/tasks/" + enc + (P.showInternal ? "?internal=1" : "")); }
         catch (e) { if (e.status === 404) P.thread = { missing: true }; else throw e; }
@@ -2268,7 +2359,7 @@ function pBadge() {
 function pRender() {
   pBadge();
   switch (P.r.name) {
-    case "inbox": if (!P.busy) pRenderInbox(); break;
+    case "inbox": if (!P.busy) { pSyncFocus(); if (P.mode === "focus" && st.tasksAvailable) pRenderFocus(); else pRenderInbox(); } break;
     case "task": pRenderThread(); break;
     case "jobs": pRenderJobs(); break;
     case "job": pRenderJob(); break;
@@ -2353,7 +2444,7 @@ function pUsageTick() {
   pUsageTickT = setTimeout(pUsageTick, delay);
 }
 function pRenderUsage() {
-  if (P.r.name === "inbox") { const c = $("p-uchip"); if (c) c.outerHTML = pUsageChip(); else if (usageData) pTop("Inbox", pInboxActs()); }
+  if (P.r.name === "inbox") { const c = $("p-uchip"); if (c) c.outerHTML = pUsageChip(); else if (usageData) pRender(); }
   if (P.r.name === "more" && $("p-usage")) $("p-usage").innerHTML = pUsageHTML();
 }
 function pUsageHTML() {
@@ -2396,6 +2487,7 @@ const pList = (rows) => '<div class="p-list">' + rows.join("") + "</div>";
 
 function pRenderInbox() {
   pTop("Inbox", pInboxActs());
+  pRenderFbar();
   const body = $("p-body");
   if (!st.tasksAvailable) {
     body.innerHTML = '<div class="p-empty">This factory has no task API yet. Use the desktop layout (More → Desktop layout).</div>';
@@ -2416,17 +2508,19 @@ function pRenderInbox() {
   body.innerHTML = h;
 }
 
-function pRenderThread() {
-  const th = P.thread;
+function pRenderThread() { pRenderThreadView(P.thread, false); }
+// pRenderThreadView draws a task thread into #p-body: the task route, and the
+// focused task in focus mode (focus=true: the top bar keeps the usage chip).
+function pRenderThreadView(th, focus) {
   if (!th) { if (P.err) $("p-body").innerHTML = pErr(); return; }
-  if (th.missing) { pTop("Task not found", ""); $("p-body").innerHTML = '<div class="p-empty">This task no longer exists.</div>'; return; }
+  if (th.missing) { pTop(focus ? "Inbox" : "Task not found", focus ? pUsageChip() : ""); $("p-body").innerHTML = '<div class="p-empty">This task no longer exists.</div>'; return; }
   const t = th.task, msgs = th.messages || [];
   if (document.visibilityState === "visible") markSeen(t);
-  pTop(esc(t.title), '<button class="p-icon" data-act="task-menu" aria-label="Task actions">' + P_ICON.more + "</button>");
+  pTop(esc(t.title), (focus ? pUsageChip() : "") + '<button class="p-icon" data-act="task-menu" aria-label="Task actions">' + P_ICON.more + "</button>");
   const shown = P.showInternal ? msgs : msgs.filter(m => !isInternalEnv(m));
   const last = shown[shown.length - 1];
   const typing = !!(last && last.from === "human:operator" && t.status === "open");
-  const sig = [t.status, t.priority, shown.length, last ? last.id : "", P.showInternal, typing, P.err].join("|");
+  const sig = [t.id, t.title, t.status, t.priority, shown.length, last ? last.id : "", P.showInternal, typing, P.err].join("|");
   $("p-input").placeholder = t.status === "closed" ? "Reply to reopen…" : "Reply…";
   if (sig === P.threadSig) return; // nothing new: keep the scroll position and avoid flicker
   const first = !P.threadSig;
@@ -2440,6 +2534,74 @@ function pRenderThread() {
       : '<div class="p-empty">no messages in this task yet</div>') +
     (typing ? '<div class="typing">the planner is thinking…</div>' : "") + "</div>";
   if (atBottom) pScrollBottom();
+}
+
+/* ----- focus mode (phone): one waiting task full-screen; the queue logic is the desktop's (advance/mergeQueue/applyQueue) ----- */
+const pFocusing = () => isPhone() && P.r.name === "inbox" && P.mode === "focus" && st.tasksAvailable;
+// pSyncFocus keeps the html classes and the per-task reply drafts in step with
+// the route/mode/focused task. The composer textarea is shared, so a draft is
+// stashed per task and restored when that task is focused again.
+function pSyncFocus() {
+  const inbox = isPhone() && P.r.name === "inbox", f = pFocusing();
+  P_ROOT.classList.toggle("p-inbox", inbox && st.tasksAvailable);
+  P_ROOT.classList.toggle("p-focus", f);
+  P_ROOT.classList.toggle("p-fthread", f && !!st.focusId);
+  const ta = $("p-input"), want = f && st.focusId ? st.focusId : null;
+  if (P.draftFor !== want) {
+    if (P.draftFor) { if (ta.value) P.drafts[P.draftFor] = ta.value; else delete P.drafts[P.draftFor]; }
+    if (P.draftFor || want) ta.value = want ? (P.drafts[want] || "") : "";
+    P.draftFor = want;
+  }
+  pAutosize();
+}
+function pRenderFbar() {
+  const f = P.mode === "focus";
+  const n = f || P.q ? st.queue.length : P.tasks.filter(needsYou).length; // list view: same source as the list/badge
+  const c = $("p-fcount");
+  c.textContent = n + " waiting"; c.classList.toggle("has", n > 0);
+  $("p-fseg-focus").classList.toggle("on", f); $("p-fseg-list").classList.toggle("on", !f);
+  $("p-fseg-focus").setAttribute("aria-pressed", f); $("p-fseg-list").setAttribute("aria-pressed", !f);
+  $("p-fprev").disabled = $("p-fnext").disabled = $("p-fskip").disabled = st.queue.length < 2;
+}
+function pRenderFocus() {
+  pRenderFbar();
+  if (!st.focusId) {
+    pTop("Inbox", pUsageChip());
+    $("p-body").innerHTML = pErr() + '<div id="p-fempty"><div class="big">Nothing needs your input</div>' +
+      '<div class="sub">New tasks waiting on you will show up here.</div>' +
+      '<button type="button" class="p-btn" data-act="view-list">View all tasks</button></div>';
+    P.threadSig = "";
+    return;
+  }
+  const th = P.thread;
+  if (!th || (th.task ? th.task.id : th.id) !== st.focusId) { // still loading the focused task
+    P.threadSig = "";
+    if (P.err) $("p-body").innerHTML = pErr();
+    return;
+  }
+  pRenderThreadView(th, true);
+}
+// pFocusGo moves focus to id (queue order untouched) and loads its thread.
+function pFocusGo(id) {
+  if (!id) return;
+  st.focusId = id; st.selected = id; st.thread = null;
+  P.thread = null; P.threadSig = ""; P.err = "";
+  window.scrollTo(0, 0);
+  pSyncFocus(); pRenderFbar();
+  $("p-body").innerHTML = '<div class="p-empty">loading…</div>';
+  pLoad();
+}
+function pSetMode(m) {
+  if (P.mode === m) return;
+  P.mode = m;
+  if (m === "focus") { st.focusId = null; st.selected = null; st.thread = null; P.thread = null; P.searchOpen = false; if (P.q) { P.q = ""; $("p-q").value = ""; } }
+  P.threadSig = "";
+  P_ROOT.classList.remove("p-search");
+  window.scrollTo(0, 0);
+  pSyncFocus(); pRenderFbar();
+  $("p-body").innerHTML = '<div class="p-empty">loading…</div>';
+  pTop("Inbox", pUsageChip());
+  pLoad();
 }
 function pScrollBottom() { requestAnimationFrame(() => window.scrollTo(0, document.documentElement.scrollHeight)); }
 
@@ -2617,6 +2779,11 @@ async function pAck(id) {
 }
 async function pCloseTask(id) {
   const t = pTask(id);
+  if (pFocusing() && id === st.focusId) { // closing the focused task moves on to the next one
+    const nxt = advance(st.queue, id);
+    st.queue = st.queue.filter(q => q !== id);
+    st.focusId = nxt || null; st.selected = st.focusId; P.thread = null; P.threadSig = "";
+  }
   if (t) t.status = "closed";
   pRender();
   try { await postJ("/v1/tasks/" + encodeURIComponent(id) + "/close", {}); pToast("Closed; the planner will stop its jobs. Reply to reopen."); }
@@ -2648,6 +2815,11 @@ async function pAct(act, id, el) {
       else if (P.q) { P.q = ""; $("p-q").value = ""; pLoad(); }
       break;
     }
+    case "view-focus": pSetMode("focus"); break;
+    case "view-list": pSetMode("list"); break;
+    case "focus-prev": pFocusGo(queueStep(-1)); break;
+    case "focus-next": pFocusGo(queueStep(1)); break;
+    case "focus-skip": pFocusGo(queueSkip()); break;
     case "closed-on": case "closed-off": P.showClosed = act === "closed-on"; pRenderInbox(); pLoad(); break;
     case "toggle-read": { const t = pTask(id); if (t) { markSeen(t, isUnread(t)); pRender(); } break; }
     case "quick-reply": pResetSwipe(); pQuickReply(id); break;
@@ -2656,7 +2828,10 @@ async function pAct(act, id, el) {
     case "alert-reply": pAlertReply(id); break;
     case "task-menu": pTaskMenu(); break;
     case "toggle-internal": pCloseSheet(); P.showInternal = !P.showInternal; P.threadSig = ""; pLoad(); break;
-    case "mark-unread": pCloseSheet(); markSeen(pTask(id), false); pBack(); break;
+    case "mark-unread":
+      pCloseSheet(); markSeen(pTask(id), false);
+      if (pFocusing()) pFocusGo(queueSkip()); else pBack(); // focus: park it at the back and move on
+      break;
     case "copy-id":
       pCloseSheet();
       try { await navigator.clipboard.writeText(id); pToast("Copied " + id); } catch { pToast(id); }
@@ -2782,14 +2957,25 @@ function pInit() {
   $("p-composer").onsubmit = async (ev) => {
     ev.preventDefault();
     const text = ta.value.trim();
-    if (!text || P.r.name !== "task") return;
-    const id = P.r.arg;
+    const focus = pFocusing();
+    if (!text || (!focus && P.r.name !== "task")) return;
+    const id = focus ? st.focusId : P.r.arg;
+    if (!id) return;
     $("p-send").disabled = true;
     try {
       await sendText(text, id);
       ta.value = "";
+      delete P.drafts[id];
       pAutosize();
       P.threadSig = "";
+      if (focus) {
+        // advance to the next waiting task; the answered one drops out of the queue
+        await replyAdvance(id);
+        P.thread = null; window.scrollTo(0, 0);
+        pSyncFocus(); pRenderFbar(); pToast("Sent");
+        await pLoad();
+        return;
+      }
       await pLoad();
       pScrollBottom();
     } catch (e) { pToast("send failed: " + e.message, true); }
