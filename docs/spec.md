@@ -1312,6 +1312,8 @@ The two tool names follow the runner spelling like `report_result`.
 
 ### 8.4 Child CLI invocation & generated config (#5, #13, #28, #31; claude amendment 2026-11-16)
 
+**Config schema follows the installed opencode (V1/V2 fix).** `internal/occonfig` runs `opencode --version` (cached per binary; major >= 2 is V2). V2 gets `permissions: [{action:*,resource:*,effect:allow}]` with servers under `mcp.servers`; V1 gets the `permission` object (edit/bash/webfetch/external_directory/doom_loop = allow) with servers directly under `mcp`. A failed or unparseable probe falls back to V1, which every host reads.
+
 - Runner routing (2026-11-16 amendment): the pinned model string routes
   the child CLI. A bare `claude-*` model id (or the bare `claude` alias),
   optionally behind the `anthropic/` provider prefix, runs via the

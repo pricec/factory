@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/pricec/factory/internal/models"
+	"github.com/pricec/factory/internal/occonfig"
 )
 
 // TestBrainConfig pins the generated brain-child config: it must land at
@@ -25,6 +26,8 @@ func TestBrainConfig(t *testing.T) {
 		MCPURL:  "http://foreman.test/v1/mcp/foreman",
 		Bearer:  "brain-secret",
 		WorkDir: dir,
+
+		OpenCODEVersion: occonfig.V2,
 	}
 	path, err := b.writeConfig()
 	if err != nil {
@@ -67,5 +70,33 @@ func TestBrainTimeoutBound(t *testing.T) {
 	t.Parallel()
 	if brainTimeout != 30*time.Minute {
 		t.Errorf("brainTimeout = %v, want 30m (1800s)", brainTimeout)
+	}
+}
+
+// TestBrainConfigV1 pins the V1 shape the brain child gets on a V1 host:
+// "permission" rules, no V2 "permissions" array, server directly under mcp.
+func TestBrainConfigV1(t *testing.T) {
+	t.Parallel()
+	b := &BrainRunner{
+		Model: models.ForemanBrainDefault, MCPURL: "http://foreman.test/v1/mcp/foreman",
+		Bearer: "brain-secret", WorkDir: t.TempDir(), OpenCODEVersion: occonfig.V1,
+	}
+	path, err := b.writeConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got["permissions"]; ok {
+		t.Errorf("V1 config carries V2 permissions:\n%s", data)
+	}
+	if perm, _ := got["permission"].(map[string]any); perm["edit"] != "allow" || perm["bash"] != "allow" {
+		t.Errorf("permission = %v, want allow-all rules", got["permission"])
+	}
+	if _, ok := got["mcp"].(map[string]any)["foreman"]; !ok {
+		t.Errorf("V1 mcp must nest the server directly:\n%s", data)
 	}
 }
