@@ -145,6 +145,9 @@ CREATE INDEX IF NOT EXISTS idx_secret_grants_job ON secret_grants(job_id);
 	if _, err := db.Exec(ddl); err != nil {
 		return err
 	}
+	if err := addColumnIfMissing(db, "foremen", "host", "TEXT"); err != nil {
+		return err
+	}
 	if err := addColumnIfMissing(db, "jobs", "held_reason", "TEXT"); err != nil {
 		return err
 	}
@@ -541,6 +544,19 @@ func (s *Store) UpsertForeman(ctx context.Context, id string, capabilities json.
 		 ON CONFLICT(id) DO UPDATE SET capabilities = excluded.capabilities,
 			last_seen = excluded.last_seen, online = 1`,
 		id, string(capabilities), s.now())
+	return err
+}
+
+// SetForemanHost stores a foreman's host facts (spec §6.7.1), stamping
+// reported_at with the store clock. It never touches liveness or caps; a
+// foreman that never calls it keeps an empty host.
+func (s *Store) SetForemanHost(ctx context.Context, id string, host wire.HostInfo) error {
+	host.Reported = s.now()
+	b, err := json.Marshal(host)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE foremen SET host = ? WHERE id = ?`, string(b), id)
 	return err
 }
 

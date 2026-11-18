@@ -319,8 +319,10 @@ func TestToolsListAndBudget(t *testing.T) {
 	// gains the optional `secrets` argument (schema + one description line).
 	// Raised to 5.5KB (5632) by the conflict coordinator (2026-11-18, §6.14):
 	// create_job gains `touches` (schema + two description lines).
-	if budget >= 5632 {
-		t.Errorf("description budget = %d bytes, want < 5632", budget)
+	// Raised to 6KB (6144) by host facts (2026-11-18, §6.7.1): list_foremen
+	// gains `host`/`hosts` and the no-SSH-to-foreman-hosts rule.
+	if budget >= 6144 {
+		t.Errorf("description budget = %d bytes, want < 6144", budget)
 	}
 	t.Logf("description budget: %d bytes", budget)
 }
@@ -1030,5 +1032,54 @@ func TestCreateJobForemanPin(t *testing.T) {
 	}
 	if job.Spec.Foreman != "foreman:alpha" {
 		t.Errorf("offline spec foreman = %q, want the normalized pin", job.Spec.Foreman)
+	}
+}
+
+func TestListForemenHosts(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	for _, id := range []string{"foreman:agentcloud", "foreman:baker", "foreman:old", "foreman:other"} {
+		if err := e.store.UpsertForeman(ctx, id, json.RawMessage(`{"os":"linux"}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	shared := wire.HostInfo{HostID: "aaaaaaaaaaaa", Hostname: "box1", OS: "Debian", IPs: []wire.HostIP{{Iface: "eth0", Addr: "10.0.0.5"}}}
+	for _, id := range []string{"foreman:agentcloud", "foreman:baker"} {
+		if err := e.store.SetForemanHost(ctx, id, shared); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := e.store.SetForemanHost(ctx, "foreman:other", wire.HostInfo{HostID: "bbbbbbbbbbbb", Hostname: "box2"}); err != nil {
+		t.Fatal(err)
+	}
+
+	res := resultOf(t, e.callTool("list_foremen", map[string]any{}))
+	var out struct {
+		Foremen []struct {
+			ID   string          `json:"id"`
+			Host json.RawMessage `json:"host"`
+		} `json:"foremen"`
+		Hosts []struct {
+			HostID   string   `json:"host_id"`
+			Hostname string   `json:"hostname"`
+			Foremen  []string `json:"foremen"`
+		} `json:"hosts"`
+	}
+	b, _ := json.Marshal(structured(t, res))
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	hostOf := map[string]bool{}
+	for _, f := range out.Foremen {
+		hostOf[f.ID] = len(f.Host) > 0
+	}
+	// Back-compat: the foreman that never reported has no host key.
+	if !hostOf["foreman:agentcloud"] || !hostOf["foreman:other"] || hostOf["foreman:old"] {
+		t.Errorf("host presence = %v", hostOf)
+	}
+	if len(out.Hosts) != 2 || out.Hosts[0].HostID != "aaaaaaaaaaaa" ||
+		strings.Join(out.Hosts[0].Foremen, ",") != "foreman:agentcloud,foreman:baker" ||
+		out.Hosts[1].HostID != "bbbbbbbbbbbb" || len(out.Hosts[1].Foremen) != 1 {
+		t.Errorf("hosts = %+v", out.Hosts)
 	}
 }

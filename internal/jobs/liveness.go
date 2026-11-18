@@ -50,12 +50,15 @@ type Foreman struct {
 	Online       bool   `json:"online"`
 	Capabilities string `json:"capabilities"`
 	LastSeen     string `json:"last_seen,omitempty"`
+	// Host is the stored host-facts JSON (spec §6.7.1); "" for foremen
+	// that never reported one.
+	Host string `json:"host,omitempty"`
 }
 
 // Foremen lists the registry (spec §6.9).
 func (s *Store) Foremen(ctx context.Context) ([]Foreman, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, online, capabilities, IFNULL(last_seen, '') FROM foremen ORDER BY id`)
+		`SELECT id, online, capabilities, IFNULL(last_seen, ''), IFNULL(host, '') FROM foremen ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +67,7 @@ func (s *Store) Foremen(ctx context.Context) ([]Foreman, error) {
 	for rows.Next() {
 		var f Foreman
 		var online int
-		if err := rows.Scan(&f.ID, &online, &f.Capabilities, &f.LastSeen); err != nil {
+		if err := rows.Scan(&f.ID, &online, &f.Capabilities, &f.LastSeen, &f.Host); err != nil {
 			return nil, err
 		}
 		f.Online = online != 0

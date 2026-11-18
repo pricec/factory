@@ -264,6 +264,16 @@ scan in the audit job's result format).
 Raising the hard caps (5 auto-fixes, 150 lines) or editing the denylist is
 a code change in `internal/auditor`, which auto-fixes can never touch.
 
+## Host facts: no SSH to foreman hosts
+
+Each foreman reports its machine (host_id, hostname, IPs, OS, CPU/mem/disk,
+uptime; spec §6.7.1) and `list_foremen` groups foremen sharing a machine
+under `hosts` (e.g. agentcloud, baker, chatfrontend and videochat on one
+box). Planner rule: before asking the operator for SSH or host access, check
+`list_foremen`; if the target hostname or IP matches a foreman host, pin a
+job to that foreman instead (`create_job foreman=`). Foremen older than this
+feature report no host and are simply absent from `hosts`.
+
 ## Factory-repo work and cancelling jobs
 
 - Work on the factory repo (`pricec/factory`, `/home/price/work/factory*`)

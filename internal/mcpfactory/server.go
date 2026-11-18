@@ -71,8 +71,10 @@ func Handler(cfg Config) (http.Handler, error) {
 
 	srv := mcp.NewServer(&mcp.Implementation{Name: "factory-planner", Version: "v1"}, nil)
 	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "list_foremen",
-		Description: "List registered foremen: {foremen: [{id, online, capabilities}]}.",
+		Name: "list_foremen",
+		Description: "List foremen: {foremen: [{id, online, capabilities, host?}], hosts: [{host_id, hostname, ips, os, ..., foremen: [ids]}]}. " +
+			"hosts groups foremen sharing one machine. A foreman's host is already reachable: pin a job to that foreman " +
+			"(create_job foreman=) - never ask the operator for SSH to a host or IP listed here.",
 	}, listForemenTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "list_jobs",
