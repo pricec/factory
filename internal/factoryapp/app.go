@@ -267,6 +267,9 @@ func New(cfg Config) (*App, error) {
 		MarkSelfCancel: a.markSelfCancel,
 		// request_merge kicks the merge queue (spec §6.11).
 		MergeQueued: a.kickMergeQueue,
+		// update_task priority / set_job_priority re-evaluate held jobs.
+		TaskPriorityChanged: a.taskPriorityChanged,
+		JobPriorityChanged:  a.jobPriorityChanged,
 	})
 	if err != nil {
 		_ = a.Close()

@@ -372,6 +372,9 @@ func updateTaskTool(cfg Config) mcp.ToolHandlerFor[updateTaskArgs, any] {
 			return nil, nil, err
 		}
 		cfg.taskChanged(ctx, t.ID)
+		if in.Priority != nil && cfg.TaskPriorityChanged != nil {
+			cfg.TaskPriorityChanged(ctx, t.ID)
+		}
 		return structuredResult(map[string]any{"task": t}), nil, nil
 	}
 }

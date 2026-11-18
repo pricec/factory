@@ -122,7 +122,7 @@ func (a *App) MergeQueuePass(ctx context.Context) (string, error) {
 	mr.JobID, mr.State = jobID, jobs.MergeMerging
 	spec := jobs.MergeJobSpec(mr, jobID, a.mergeForeman)
 	taskID := a.applyMergeTask(ctx, &spec, mr)
-	if err := a.createPinnedJob(ctx, spec, taskID); err != nil {
+	if err := a.createPinnedJob(a.mergeOverrideCtx(ctx, mr), spec, taskID); err != nil {
 		a.mergeNeedsAttention(ctx, mr.ID, "could not create merge job "+jobID+": "+err.Error())
 		return "", fmt.Errorf("create merge job for %s: %w", mr.ID, err)
 	}
@@ -157,8 +157,28 @@ func (a *App) applyMergeTask(ctx context.Context, spec *wire.JobSpec, mr jobs.Me
 	if err != nil {
 		return ""
 	}
-	spec.Priority = min(max(t.Priority, wire.MinPriority), wire.MaxPriority)
+	prio := t.Priority
+	// A job-level override on the source job wins over its task's priority.
+	if o, set, err := a.jobs.PriorityOverride(ctx, mr.SourceJobID); err == nil && set {
+		prio = o
+	}
+	spec.Priority = min(max(prio, wire.MinPriority), wire.MaxPriority)
 	return taskID
+}
+
+type prioOverrideKey struct{}
+
+// mergeOverrideCtx carries the source job's priority override (if any) to
+// createPinnedJob, so the merge job passes the gate (P0) and is stored
+// with the same override.
+func (a *App) mergeOverrideCtx(ctx context.Context, mr jobs.MergeRequest) context.Context {
+	if mr.SourceJobID == "" {
+		return ctx
+	}
+	if o, set, err := a.jobs.PriorityOverride(ctx, mr.SourceJobID); err == nil && set {
+		return context.WithValue(ctx, prioOverrideKey{}, o)
+	}
+	return ctx
 }
 
 // createPinnedJob stores spec through the same gate and pin path as the
@@ -173,6 +193,11 @@ func (a *App) createPinnedJob(ctx context.Context, spec wire.JobSpec, taskID str
 		}
 	} else if err := a.jobs.Create(ctx, spec); err != nil {
 		return err
+	}
+	if o, ok := ctx.Value(prioOverrideKey{}).(int); ok {
+		if _, _, err := a.jobs.SetPriority(ctx, spec.ID, o); err != nil {
+			log.Printf("factoryapp: merge job %s priority override: %v", spec.ID, err)
+		}
 	}
 	if taskID != "" {
 		if err := a.tasks.LinkJob(ctx, taskID, spec.ID); err != nil {
@@ -316,7 +341,7 @@ func (a *App) escalateMerge(ctx context.Context, failed jobs.Job) bool {
 	mr.JobID = newID
 	escSpec := jobs.MergeEscalatedJobSpec(mr, newID, a.mergeForeman)
 	escTask := a.applyMergeTask(ctx, &escSpec, mr)
-	if err := a.createPinnedJob(ctx, escSpec, escTask); err != nil {
+	if err := a.createPinnedJob(a.mergeOverrideCtx(ctx, mr), escSpec, escTask); err != nil {
 		a.mergeNeedsAttention(ctx, mr.ID, "could not create escalated merge job "+newID+": "+err.Error())
 		return true
 	}

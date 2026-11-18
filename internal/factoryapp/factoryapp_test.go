@@ -210,15 +210,15 @@ func TestBootPlannerMCP(t *testing.T) {
 		t.Fatalf("tools/list: no result object: %v", out)
 	}
 	tools, _ := res["tools"].([]any)
-	if len(tools) != 16 {
-		t.Fatalf("tools/list: got %d tools, want 16", len(tools))
+	if len(tools) != 17 {
+		t.Fatalf("tools/list: got %d tools, want 17", len(tools))
 	}
 	want := map[string]bool{
 		"list_foremen": false, "list_jobs": false, "create_job": false,
 		"read_result": false, "cancel_job": false, "message_foreman": false,
 		"notify_operator": false, "raise_alert": false,
 		"list_tasks": false, "get_task": false, "update_task": false, "set_priority_criteria": false,
-		"request_merge": false, "get_message": false, "create_task": false, "update_standing_summary": false,
+		"request_merge": false, "set_job_priority": false, "get_message": false, "create_task": false, "update_standing_summary": false,
 	}
 	for _, tl := range tools {
 		name := tl.(map[string]any)["name"].(string)

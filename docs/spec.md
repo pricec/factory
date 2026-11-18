@@ -1999,6 +1999,15 @@ Tools (exact):
   a tool error naming the state; an unknown id is a tool error
   (`unknown job`). The planner's alternative to direct `jobs.db` writes
   (2026-11-15 amendment).
+- `set_job_priority(job_id, priority, reason)` - changes a non-terminal
+  job's priority in place (0 = P0, 1-9) without superseding it: a
+  job-level override (`jobs.priority_override`, also written to
+  `spec.priority` clamped to 1-9) that wins over the task's priority for the
+  throttle's P0 exemption, held-queue order and merge jobs filed for the
+  job. A held job is re-evaluated at once (P0 dispatches immediately); the
+  change and `reason` are posted on the job's task thread. `update_task`
+  with a priority likewise re-evaluates the held jobs immediately. Throttle
+  limits are unchanged.
 - `request_merge(branch, head, note?, after?)` - queues a merge request
   (§6.11; `requested_by` `planner`, repo the default) and returns
   `{id, state, waiting_on?}`. Invalid input and a duplicate active branch
