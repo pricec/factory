@@ -2001,7 +2001,12 @@ Tools (exact):
 - Task tools (inbox redesign S2, §9.5.2): `list_tasks(status?=open|closed|
   all (default open), q?, limit?=50)` -> `{tasks}`; `get_task(task_id)` ->
   `{task, messages}` (the last 40 thread messages with an `internal` flag,
-  each payload 2KB-capped and rendered as a string); `update_task(task_id,
+  each payload rendered as a string, capped at 16KB for chat/reply rows and
+  4KB for internal rows, the marker carrying the message id);
+  `get_message(message_id)` -> `{id, type, from, job_id, ts, internal,
+  bytes, payload}` (one message's full, uncapped payload as a string; the
+  recovery path for a truncation marker; unknown id is a tool error);
+  `update_task(task_id,
   title?, priority?, status?=open|closed, reason?, needs_operator?)` ->
   `{task}` (closing defaults `reason` to `planner`; a reopen ignores it;
   `needs_operator` true|false sets or clears the task's "waiting on the
@@ -2121,7 +2126,7 @@ threaded, not self-initiated terminal `notify.job` and a threaded waking
 (§9.5.2). A session is the §9.4 surface with the planner bearer and the model
 from the settings panel > `FACTORY_PLANNER_MODEL` (default per §6.5; the child CLI routes on the
 model: the Claude Code CLI for claude-* ids, opencode otherwise, §9.4).
-Per-payload 2KB caps apply (§6.6). The wake reason names the trigger:
+Per-payload caps apply (§6.6; the task thread uses the §9.5.2 rules, conversational rows uncapped). The wake reason names the trigger:
 operator chat needs a reply; a foreman report must be relayed to the operator
 and acted on; a terminal job (done/failed/dead/cancelled) must be reported in
 plain words. Since the job-owned-merge amendment (§6.11) the job wake reason
@@ -2339,8 +2344,17 @@ Per-task wakes (operator DECISION 1):
 - Prompt: the wake reason, then the task header (id, title, status,
   priority, job ids), then the operator's `priority_criteria` text, then
   the task's own thread (last 40 messages, oldest first, internal rows
-  included and marked `[internal]`, triggering rows marked `[new]`), each
-  payload capped at 2KB (§6.6). It is not the global history.
+  included and marked `[internal]`, triggering rows marked `[new]`). It is
+  not the global history. Truncation rules (2026-11-18 defect fix; these
+  supersede the 2KB per-payload cap of §6.6 for the thread): the newest 10
+  `chat.message`/`brain.reply` rows and every `[new]` trigger are rendered
+  in FULL - the planner must always see what it said and what the operator
+  is replying to; older conversational rows are capped at 16KB; internal
+  payloads (job notifications, results, reports) at 4KB. A cut ends with
+  `…[truncated, N bytes total; full text: get_message message_id=<id>]`.
+  The rendered thread is bounded at 64KB: over that, the OLDEST rows are
+  dropped whole (never the full-text rows), with a note saying how many.
+  The prompt tells the planner to call `get_message` for any cut row.
 - Woken-task binding: each session's MCP URL is the planner endpoint plus
   `?task_id=<id>`. The planner MCP auth wrapper copies that into the
   `X-Factory-Task-Id` header, which tools read (a client may also send the
