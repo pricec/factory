@@ -121,7 +121,8 @@ func (a *App) MergeQueuePass(ctx context.Context) (string, error) {
 	}
 	mr.JobID, mr.State = jobID, jobs.MergeMerging
 	spec := jobs.MergeJobSpec(mr, jobID, a.mergeForeman)
-	if err := a.createPinnedJob(ctx, spec); err != nil {
+	taskID := a.applyMergeTask(ctx, &spec, mr)
+	if err := a.createPinnedJob(ctx, spec, taskID); err != nil {
 		a.mergeNeedsAttention(ctx, mr.ID, "could not create merge job "+jobID+": "+err.Error())
 		return "", fmt.Errorf("create merge job for %s: %w", mr.ID, err)
 	}
@@ -137,16 +138,49 @@ func (a *App) MergeQueuePass(ctx context.Context) (string, error) {
 	return mr.ID, nil
 }
 
+// applyMergeTask gives a merge job the priority of the task owning the
+// request's source job (spec §6.11) and returns that task's id, so the job
+// is created and linked under it and a P0 task's merge passes the usage
+// gate. JobSpec priority is 1-9, so a P0 task maps to 1 (the P0 exemption
+// itself comes from the task link). No source job, no task, or a failed
+// lookup keeps the default jobs.DefaultMergeJobPriority and returns "".
+// Evaluated at job creation, so re-queues see the current task priority.
+func (a *App) applyMergeTask(ctx context.Context, spec *wire.JobSpec, mr jobs.MergeRequest) string {
+	if mr.SourceJobID == "" || a.tasks == nil {
+		return ""
+	}
+	taskID, ok, err := a.resolveJobTask(ctx, mr.SourceJobID)
+	if err != nil || !ok {
+		return ""
+	}
+	t, err := a.tasks.GetTask(ctx, taskID)
+	if err != nil {
+		return ""
+	}
+	spec.Priority = min(max(t.Priority, wire.MinPriority), wire.MaxPriority)
+	return taskID
+}
+
 // createPinnedJob stores spec through the same gate and pin path as the
 // scheduler (spec §6.7, §6.10): held when the usage throttle holds,
 // otherwise created and dispatched to the pinned foreman when it is
 // online (pending - and alerted on by the long-pending alert - when not).
-func (a *App) createPinnedJob(ctx context.Context, spec wire.JobSpec) error {
-	if hold, reason := a.jobs.Admit(ctx, spec, ""); hold {
-		return a.jobs.CreateHeld(ctx, spec, reason)
-	}
-	if err := a.jobs.Create(ctx, spec); err != nil {
+func (a *App) createPinnedJob(ctx context.Context, spec wire.JobSpec, taskID string) error {
+	hold, reason := a.jobs.Admit(ctx, spec, taskID)
+	if hold {
+		if err := a.jobs.CreateHeld(ctx, spec, reason); err != nil {
+			return err
+		}
+	} else if err := a.jobs.Create(ctx, spec); err != nil {
 		return err
+	}
+	if taskID != "" {
+		if err := a.tasks.LinkJob(ctx, taskID, spec.ID); err != nil {
+			log.Printf("factoryapp: link merge job %s to task %s: %v", spec.ID, taskID, err)
+		}
+	}
+	if hold {
+		return nil
 	}
 	pin, found, err := jobs.FindForeman(ctx, a.jobs, spec.Foreman)
 	switch {
@@ -280,7 +314,9 @@ func (a *App) escalateMerge(ctx context.Context, failed jobs.Job) bool {
 		log.Printf("factoryapp: merge queue: dead-letter escalated merge job %s: %v", failed.ID, err)
 	}
 	mr.JobID = newID
-	if err := a.createPinnedJob(ctx, jobs.MergeEscalatedJobSpec(mr, newID, a.mergeForeman)); err != nil {
+	escSpec := jobs.MergeEscalatedJobSpec(mr, newID, a.mergeForeman)
+	escTask := a.applyMergeTask(ctx, &escSpec, mr)
+	if err := a.createPinnedJob(ctx, escSpec, escTask); err != nil {
 		a.mergeNeedsAttention(ctx, mr.ID, "could not create escalated merge job "+newID+": "+err.Error())
 		return true
 	}

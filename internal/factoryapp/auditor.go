@@ -336,7 +336,7 @@ func (a *App) startAutoFix(ctx context.Context, run string, n int, act auditor.A
 	}
 	spec, err := auditor.FixJobSpec(cfg, run, n, f, t.ID, act.Reserve)
 	if err == nil {
-		err = a.createPinnedJob(ctx, spec)
+		err = a.createPinnedJob(ctx, spec, "")
 	}
 	if err != nil {
 		closed, reason := tasks.StatusClosed, "auditor: auto-fix could not start"

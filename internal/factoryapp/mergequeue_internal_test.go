@@ -433,3 +433,48 @@ func TestMergeQueueDoneWithoutMergedIsNotLanded(t *testing.T) {
 		})
 	}
 }
+
+// TestMergeJobPriorityFollowsTask: the merge job takes the priority of the
+// task owning the request's source job; no task keeps the default 3. A P0
+// task's merge job is linked to it (so the usage gate exempts it); JobSpec
+// priority is 1-9, so P0 maps to 1.
+func TestMergeJobPriorityFollowsTask(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		prio int  // -1: source job has no task
+		want int  // job priority
+		p0   bool // job is P0 for the throttle
+	}{{"p0", 0, 1, true}, {"p2", 2, 2, false}, {"no task", -1, jobs.DefaultMergeJobPriority, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newMergeApp(t)
+			src := wire.NewJobID()
+			if tc.prio >= 0 {
+				task, err := a.Tasks().CreateTask(ctx, "t", tc.prio)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := a.Tasks().LinkJob(ctx, task.ID, src); err != nil {
+					t.Fatal(err)
+				}
+			}
+			mr, err := a.jobs.CreateMergeRequest(ctx, jobs.NewMergeRequest{Branch: "feat/p", Head: mqHead, RequestedBy: "test", JobID: src})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if id := pass(t, a); id != mr.ID {
+				t.Fatalf("pass = %q", id)
+			}
+			job, ok, err := a.jobs.Get(ctx, getMerge(t, a, mr.ID).JobID)
+			if err != nil || !ok {
+				t.Fatalf("get job: %v %v", ok, err)
+			}
+			if job.Spec.Priority != tc.want {
+				t.Fatalf("priority = %d, want %d", job.Spec.Priority, tc.want)
+			}
+			if _, p0 := a.jobIsP0(ctx, job.ID); p0 != tc.p0 {
+				t.Fatalf("merge job P0 = %v, want %v", p0, tc.p0)
+			}
+		})
+	}
+}
