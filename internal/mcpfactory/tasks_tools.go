@@ -29,6 +29,9 @@ const (
 	// getTaskThreadCap: get_task returns the task's last 40 messages, the
 	// same window a wake replays.
 	getTaskThreadCap = 40
+	// get_task payload caps (get_message returns any message in full).
+	threadInternalCap = 4 << 10
+	threadConvCap     = 16 << 10
 	// titleMax bounds a fallback task title (first 60 characters).
 	titleMax = 60
 )
@@ -85,8 +88,9 @@ func addTaskTools(srv *mcp.Server, cfg Config) {
 	}, listTasksTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "get_task",
-		Description: "One task plus its thread (last 40 messages).",
+		Description: "One task plus its thread (last 40 messages; long payloads cut).",
 	}, getTaskTool(cfg))
+	addMessageTool(srv, cfg)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "update_task",
 		Description: "Retitle, reprioritise (0 = most urgent), set status open|closed (+reason), or set needs_operator " +
@@ -284,10 +288,16 @@ func getTaskTool(cfg Config) mcp.ToolHandlerFor[getTaskArgs, any] {
 		if err != nil {
 			return nil, nil, err
 		}
-		// Payloads enter LLM context: each is 2KB-capped (spec §6.6) and
+		// Payloads enter LLM context: internal rows are capped at
+		// threadInternalCap, conversational rows at threadConvCap, each
+		// marker naming the message id (recover with get_message), and
 		// rendered as a string so a cut never yields invalid JSON.
 		msgs := make([]map[string]any, 0, len(thread))
 		for _, env := range thread {
+			limit := threadInternalCap
+			if env.Type == "chat.message" || env.Type == "brain.reply" {
+				limit = threadConvCap
+			}
 			msgs = append(msgs, map[string]any{
 				"id":       env.ID,
 				"type":     env.Type,
@@ -295,7 +305,7 @@ func getTaskTool(cfg Config) mcp.ToolHandlerFor[getTaskArgs, any] {
 				"job_id":   env.JobID,
 				"ts":       env.TS,
 				"internal": tasks.IsInternal(env.Type),
-				"payload":  string(llmctx.Cap(compactJSON(env.Payload))),
+				"payload":  string(llmctx.CapLimit(compactJSON(env.Payload), limit, env.ID)),
 			})
 		}
 		return structuredResult(map[string]any{"task": t, "messages": msgs}), nil, nil
