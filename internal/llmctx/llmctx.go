@@ -44,6 +44,36 @@ func Cap(payload []byte) []byte {
 	return append(out, marker...)
 }
 
+// RecoverTool is the MCP tool a planner uses to fetch the full text of a
+// message whose payload was truncated in its prompt.
+const RecoverTool = "get_message"
+
+// CapLimit is Cap with an explicit byte limit and the message id: the
+// truncation marker names the id and RecoverTool so the full text can be
+// fetched. limit <= 0 means no cap (payload returned unchanged).
+func CapLimit(payload []byte, limit int, id string) []byte {
+	if payload == nil || limit <= 0 || len(payload) <= limit {
+		return payload
+	}
+	cut := limit
+	for cut > 0 && !utf8Start(payload[cut]) {
+		cut--
+	}
+	marker := fmt.Sprintf(truncMarkerFmt, len(payload))
+	if id != "" {
+		marker = fmt.Sprintf("\n…[truncated, %d bytes total; full text: %s message_id=%s]", len(payload), RecoverTool, id)
+	}
+	out := make([]byte, 0, cut+len(marker))
+	out = append(out, payload[:cut]...)
+	return append(out, marker...)
+}
+
+// EnvelopeSnippetLimit is EnvelopeSnippet with a caller-chosen payload cap
+// (limit <= 0: uncapped); a truncation marker carries the message id.
+func EnvelopeSnippetLimit(env wire.MessageEnvelope, limit int) string {
+	return envelopeSnippet(env, func(p []byte) []byte { return CapLimit(p, limit, env.ID) })
+}
+
 // utf8Start reports whether b is a UTF-8 continuation byte (10xxxxxx).
 func utf8Start(b byte) bool { return b&0xC0 != 0x80 }
 
@@ -51,6 +81,10 @@ func utf8Start(b byte) bool { return b&0xC0 != 0x80 }
 // prompt: every field on its own line, payload compacted when valid JSON
 // and capped via Cap. Deterministic.
 func EnvelopeSnippet(env wire.MessageEnvelope) string {
+	return envelopeSnippet(env, Cap)
+}
+
+func envelopeSnippet(env wire.MessageEnvelope, capFn func([]byte) []byte) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "type: %s\n", env.Type)
 	if env.JobID != "" {
@@ -66,7 +100,7 @@ func EnvelopeSnippet(env wire.MessageEnvelope) string {
 	if len(env.Payload) > 0 {
 		payload := compact(env.Payload)
 		b.WriteString("payload: ")
-		b.Write(Cap(payload))
+		b.Write(capFn(payload))
 		b.WriteString("\n")
 	}
 	return b.String()

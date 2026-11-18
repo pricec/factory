@@ -229,7 +229,7 @@ func plannerTaskURL(base, taskID string) string {
 // buildTaskWakePrompt renders a per-task wake prompt (spec §9.5.2): the
 // reason, the task header, the operator's priority criteria, then the
 // task thread oldest first with internal rows and the new triggers
-// marked. Payloads are llmctx-capped (2KB each, spec §6.6).
+// marked. Truncation rules: plannerthread.go.
 func buildTaskWakePrompt(w PlannerWake) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "You are the factory planner. %s\n", w.Reason)
@@ -254,14 +254,18 @@ func buildTaskWakePrompt(w PlannerWake) string {
 	for _, e := range w.Triggers {
 		isTrigger[e.ID] = true
 	}
-	fmt.Fprintf(&sb, "\n=== task thread: last %d message(s), oldest first; [internal] rows are never shown to the operator, [new] rows woke you ===\n", len(w.Thread))
+	thread, shown := renderThreadRows(w.Thread, isTrigger)
+	fmt.Fprintf(&sb, "\n=== task thread: last %d message(s), oldest first; [internal] rows are never shown to the operator, [new] rows woke you ===\n", shown)
 	if len(w.Thread) == 0 {
 		sb.WriteString("(empty)\n")
 	}
 	inThread := map[string]bool{}
-	for i, env := range w.Thread {
+	for _, env := range w.Thread {
 		inThread[env.ID] = true
-		fmt.Fprintf(&sb, "\n--- message %d%s ---\n%s", i+1, promptTags(env, isTrigger[env.ID]), llmctx.EnvelopeSnippet(env))
+	}
+	sb.WriteString(thread)
+	if len(w.Thread) > 0 {
+		sb.WriteString("\n" + plannerRecoverFooter + "\n")
 	}
 	var missing []wire.MessageEnvelope
 	for _, env := range w.Triggers {
@@ -272,7 +276,7 @@ func buildTaskWakePrompt(w PlannerWake) string {
 	if len(missing) > 0 {
 		sb.WriteString("\n=== new messages not yet in the thread view ===\n")
 		for i, env := range missing {
-			fmt.Fprintf(&sb, "\n--- new message %d%s ---\n%s", i+1, promptTags(env, true), llmctx.EnvelopeSnippet(env))
+			fmt.Fprintf(&sb, "\n--- new message %d%s ---\n%s", i+1, promptTags(env, true), llmctx.EnvelopeSnippetLimit(env, triggerCap(env)))
 		}
 	}
 	fmt.Fprintf(&sb, taskWakeFooter, t.ID)
