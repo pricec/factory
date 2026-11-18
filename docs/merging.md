@@ -57,7 +57,7 @@ gh auth status && go version
 [ "$REPO" != pricec/factory ] || sudo -n true     # only the factory deploy needs sudo
 # Build the merge tools from factory master (public repo: any account can read it).
 # $WORK is a clone of $REPO, which is usually NOT the factory repo, so the
-# tools are built here once and run as binaries; never `go run ./cmd/...` in $WORK.
+# tools are built here once and run as binaries; never run `go` in $WORK.
 rm -rf "$EV/factory-src" && git clone -q --depth 1 https://github.com/pricec/factory "$EV/factory-src" &&
   (cd "$EV/factory-src" && go build -o "$EV/ghas" ./cmd/ghas && go build -o "$EV/cigate" ./cmd/cigate) &&
   rm -rf "$EV/factory-src"
