@@ -16,6 +16,7 @@ import (
 
 	"github.com/pricec/factory/internal/claudecli"
 	"github.com/pricec/factory/internal/llmctx"
+	"github.com/pricec/factory/internal/occonfig"
 	"github.com/pricec/factory/internal/ocusage"
 	"github.com/pricec/factory/internal/tasks"
 	"github.com/pricec/factory/internal/wire"
@@ -90,6 +91,9 @@ type PlannerBrain struct {
 	// ReadUsage reads the sessions opencode recorded for a dir since a ms
 	// timestamp; nil means the host's opencode database. Test seam.
 	ReadUsage ocusage.Reader
+	// OpenCODEVersion pins the opencode config schema; the zero value
+	// detects it from `opencode --version` (V1 if that fails).
+	OpenCODEVersion occonfig.Version
 	// taskID is set by forTask for per-task sessions.
 	taskID string
 }
@@ -432,18 +436,11 @@ func (b *PlannerBrain) writeConfig() (string, error) {
 		return "", fmt.Errorf("planner work dir: %w", err)
 	}
 	path := filepath.Join(b.WorkDir, plannerConfigName)
-	cfg := plannerOpenCODEConfig{
-		Model: b.Model,
-		MCP: plannerMCPBlock{Servers: map[string]*plannerRemoteMCPServer{
-			"factory": {
-				Type:    "remote",
-				URL:     b.MCPURL,
-				Headers: map[string]string{"Authorization": "Bearer {env:" + envPlannerToken + "}"},
-				OAuth:   false,
-			},
-		}},
-		Permissions: plannerPermissions,
-	}
+	cfg := occonfig.Build(occonfig.Resolve(b.OpenCODEVersion, "opencode"), b.Model, occonfig.Remote{
+		Name:     "factory",
+		URL:      b.MCPURL,
+		TokenEnv: envPlannerToken,
+	})
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return "", err
@@ -460,42 +457,6 @@ func (b *PlannerBrain) writeConfig() (string, error) {
 // (the analog of the opencode runner's generated allow-all block).
 func (b *PlannerBrain) writeClaudeConfig() (string, error) {
 	return claudecli.WriteConfig(b.WorkDir, plannerClaudeServer, b.MCPURL, envPlannerToken)
-}
-
-// plannerOpenCODEConfig and friends mirror the opencode V2 config shape
-// (docs/mcp-servers) used by workerharness.occonfig / foremanapp.brain.
-type plannerRemoteMCPServer struct {
-	Type    string            `json:"type"`
-	URL     string            `json:"url"`
-	Headers map[string]string `json:"headers"`
-	OAuth   bool              `json:"oauth"`
-}
-
-type plannerMCPBlock struct {
-	Servers map[string]*plannerRemoteMCPServer `json:"servers"`
-}
-
-// plannerPermissionRule is one opencode V2 permission rule (docs/
-// permissions); plannerPermissions pins allow-all for the headless child.
-type plannerPermissionRule struct {
-	Action   string `json:"action"`
-	Resource string `json:"resource"`
-	Effect   string `json:"effect"`
-}
-
-// plannerPermissions is the planner child's permission policy: a headless
-// `opencode run` has no client to answer an "ask", so any prompt
-// auto-declines and aborts the whole session mid-flight (exit status 1,
-// work already done discarded - observed live). The child already runs
-// with the service user's authority; an explicit allow-all keeps it alive.
-var plannerPermissions = []plannerPermissionRule{
-	{Action: "*", Resource: "*", Effect: "allow"},
-}
-
-type plannerOpenCODEConfig struct {
-	Model       string                  `json:"model,omitempty"`
-	MCP         plannerMCPBlock         `json:"mcp"`
-	Permissions []plannerPermissionRule `json:"permissions"`
 }
 
 // plannerClaudeConfig is the generated Claude Code MCP config (spec

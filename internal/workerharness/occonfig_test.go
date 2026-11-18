@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/pricec/factory/internal/occonfig"
 )
 
 // TestGeneratedConfigGolden pins the generated opencode config against the
@@ -64,6 +66,8 @@ func TestGeneratedConfigGolden(t *testing.T) {
 				MCPURL: "http://foreman:8080/v1/mcp/worker",
 				Token:  "tok123",
 				Model:  tc.model,
+
+				OpenCODEVersion: occonfig.V2,
 			}
 			data, err := json.Marshal(newOpenCODEConfig(cfg))
 			if err != nil {
@@ -86,7 +90,7 @@ func TestGeneratedConfigGolden(t *testing.T) {
 func TestWriteConfig(t *testing.T) {
 	t.Parallel()
 
-	cfg := Config{MCPURL: "http://foreman:8080/v1/mcp/worker", Token: "secret-token"}
+	cfg := Config{MCPURL: "http://foreman:8080/v1/mcp/worker", Token: "secret-token", OpenCODEVersion: occonfig.V2}
 	path := filepath.Join(t.TempDir(), configFileName)
 	if err := writeConfig(path, newOpenCODEConfig(cfg)); err != nil {
 		t.Fatalf("writeConfig(): %v", err)
@@ -107,28 +111,49 @@ func TestWriteConfig(t *testing.T) {
 	if containsSecret(t, data, cfg.Token) {
 		t.Errorf("config file contains the raw token: %s", data)
 	}
-	var got openCODEConfig
+	var got map[string]any
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatalf("unmarshal(%s): %v", data, err)
 	}
-	srv := got.MCP.Servers["inbox"]
-	if srv == nil {
-		t.Fatal("generated config has no inbox MCP server")
+	if _, ok := got["model"]; ok {
+		t.Errorf("model present, want omitted when unset")
 	}
-	if srv.Type != "remote" || srv.URL != cfg.MCPURL {
-		t.Errorf("inbox server = %+v, want remote %s", srv, cfg.MCPURL)
+	if _, ok := got["mcp"].(map[string]any)["servers"].(map[string]any)["inbox"]; !ok {
+		t.Errorf("generated config has no mcp.servers.inbox:\n%s", data)
 	}
-	if auth := srv.Headers["Authorization"]; auth != "Bearer {env:WORKER_TOKEN}" {
-		t.Errorf("Authorization header = %q, want %q", auth, "Bearer {env:WORKER_TOKEN}")
+}
+
+// TestGeneratedConfigV1 pins the V1 shape: "permission" rules (never the
+// V2 "permissions" array, which V1 refuses to start on) and the inbox
+// server directly under "mcp".
+func TestGeneratedConfigV1(t *testing.T) {
+	t.Parallel()
+	cfg := Config{MCPURL: "http://foreman:8080/v1/mcp/worker", Token: "tok123", Model: "p/m", OpenCODEVersion: occonfig.V1}
+	data, err := json.Marshal(newOpenCODEConfig(cfg))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if srv.OAuth {
-		t.Error("OAuth auto-detection must be disabled")
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
 	}
-	if got.Model != "" {
-		t.Errorf("model = %q, want empty when unset", got.Model)
+	want := map[string]any{
+		"model": "p/m",
+		"permission": map[string]any{
+			"edit": "allow", "bash": "allow", "webfetch": "allow",
+			"external_directory": "allow", "doom_loop": "allow",
+		},
+		"mcp": map[string]any{
+			"inbox": map[string]any{
+				"type":    "remote",
+				"url":     "http://foreman:8080/v1/mcp/worker",
+				"headers": map[string]any{"Authorization": "Bearer {env:WORKER_TOKEN}"},
+				"oauth":   false,
+			},
+		},
 	}
-	if len(got.Permissions) != 1 || got.Permissions[0] != (permissionRule{Action: "*", Resource: "*", Effect: "allow"}) {
-		t.Errorf("permissions = %+v, want one allow-all rule (headless runs die on asks)", got.Permissions)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("V1 config =\n%s\nwant\n%s", data, mustJSON(t, want))
 	}
 }
 
