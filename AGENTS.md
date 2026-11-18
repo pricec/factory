@@ -40,7 +40,11 @@ A job that changes code owns it until the merge is requested. Do not hand
 "queue the merge" or any other follow-up to the planner.
 
 1. Work on a branch in your own clone or worktree.
-2. `make ci` green, then push the branch.
+2. Before requesting the merge, merge `origin/master` into your branch
+   (`git fetch origin && git merge origin/master`: merge, never rebase),
+   resolve any conflicts, and re-run `make ci`. Then push the branch.
+   Other jobs land while you work; this keeps the factory's merge from
+   failing on a conflict or stale checks.
 3. Call the `request_merge` tool yourself with the branch and the pushed
    head sha (`note` = PR title). If your branch needs another job's branch
    on master first, pass `after: ["that-branch"]`: the request waits for
@@ -52,6 +56,10 @@ the outcome on your task. If the merge fails on red checks, a conflict or
 a moved head, it dispatches a fix job on the same branch (at most twice);
 anything else goes to the operator. If you push again after requesting,
 call `request_merge` again with the new head.
+
+Jobs may declare `touches` (repo-relative file globs); the factory holds a
+job whose `touches` overlap an active job's until that job's merge lands
+(spec §6.14). Keep your edits inside the files you were told you touch.
 
 Talk to the planner (`ask_parent`, or a failed report) only when you need
 coordination with other jobs or a decision only the operator can make.

@@ -628,6 +628,7 @@
         <div class="row">
           <div><label>requires (comma-separated tag names)</label><input id="job-requires" placeholder="os:linux, arch:amd64, tools:git"></div>
           <div><label>secrets (comma-separated credential names)</label><input id="job-secrets" placeholder="github-push"></div>
+          <div><label>touches (comma-separated path globs; * = exclusive)</label><input id="job-touches" placeholder="internal/jobs/**, docs/spec.md"></div>
           <div><label>tier</label><select id="job-tier"><option value="">flash — GLM 5.3 Flash (cheapest, default)</option><option value="default">default — GLM 5.3 Flash, max thinking (same low price)</option><option value="hardest">hardest — GLM 5.3 (full model)</option></select></div>
           <div><label>timeout_s</label><input id="job-timeout" type="number" min="1" placeholder="300"></div>
           <div><label>priority 1-9</label><input id="job-priority" type="number" min="1" max="9" placeholder="5"></div>
@@ -1713,6 +1714,7 @@ $("createjob").onsubmit = async (ev) => {
   note.textContent = "";
   const body = { task: $("job-task").value.trim() };
   if ($("job-requires").value.trim()) body.requires = $("job-requires").value.split(",").map(s => s.trim()).filter(Boolean);
+  if ($("job-touches").value.trim()) body.touches = $("job-touches").value.split(",").map(s => s.trim()).filter(Boolean);
   if ($("job-secrets").value.trim()) body.secrets = $("job-secrets").value.split(",").map(s => s.trim()).filter(Boolean);
   if ($("job-tier").value) body.tier = $("job-tier").value;
   if (jobModelValue()) body.model = jobModelValue();
@@ -1823,6 +1825,10 @@ function gateHTML(g, nowMs) {
   if (g.fail_open) out += ' <span class="ufail" title="no fresh live usage reading: the gate admits everything">FAIL-OPEN</span>';
   if (g.summary) out += " · " + esc(g.summary);
   out += " · held " + (g.held == null ? "-" : Number(g.held));
+  if (g.held && g.held_by) {
+    const parts = Object.keys(g.held_by).sort().map(k => esc(k.replace("_", " ")) + " " + Number(g.held_by[k]));
+    if (parts.length) out += " (" + parts.join(", ") + ")";
+  }
   return out;
 }
 
@@ -1869,7 +1875,7 @@ function heldHTML(g, jobs, err) {
   out += "<table><tbody>" + jobs.slice(0, HELD_MAX).map(j => {
     const title = String((j.spec && j.spec.task) || "").split("\n")[0].slice(0, 80);
     return '<tr class="uheldrow" tabindex="0" data-id="' + esc(j.id) + '" title="open job detail"><td>' + esc(j.id) + "</td><td>" + esc(title || "-") +
-      "</td><td>" + esc(j.held_reason || "-") + "</td><td>" + esc(rel(j.updated_at || j.created_at)) + "</td></tr>";
+      "</td><td>" + (String(j.held_reason || "").indexOf("conflict: ") === 0 ? '<span class="badge" title="waiting on another job\'s files, not on usage">conflict</span> ' : "") + esc(j.held_reason || "-") + "</td><td>" + esc(rel(j.updated_at || j.created_at)) + "</td></tr>";
   }).join("") + "</tbody></table>" + (jobs.length > HELD_MAX ? "+" + (jobs.length - HELD_MAX) + " more (Jobs tab, state=held)" : "");
   return out;
 }

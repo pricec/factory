@@ -148,6 +148,11 @@ CREATE INDEX IF NOT EXISTS idx_secret_grants_job ON secret_grants(job_id);
 	if err := addColumnIfMissing(db, "jobs", "held_reason", "TEXT"); err != nil {
 		return err
 	}
+	// conflict_since: start of a conflict-coordinator wait (RFC3339 UTC);
+	// NULL when the job is not waiting on a conflict.
+	if err := addColumnIfMissing(db, "jobs", "conflict_since", "TEXT"); err != nil {
+		return err
+	}
 	if _, err := db.Exec(mergeDDL); err != nil {
 		return err
 	}
