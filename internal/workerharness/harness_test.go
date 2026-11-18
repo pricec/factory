@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pricec/factory/internal/occonfig"
 	"github.com/pricec/factory/internal/wire"
 )
 
@@ -977,15 +978,41 @@ func TestRunClaudeRecordsUsage(t *testing.T) {
 }
 
 func TestRunArgsStandaloneAndTerminator(t *testing.T) {
-	got := runArgs(Config{Model: "m/x#max"}, "-weird prompt", true)
+	got := runArgs(Config{Model: "m/x#max"}, "-weird prompt", true, occonfig.V2)
 	want := []string{"run", "--standalone", "-m", "m/x#max", "--", "-weird prompt"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %q want %q", got, want)
 	}
-	got = runArgs(Config{}, "", false)
+	got = runArgs(Config{}, "", false, occonfig.V1)
 	want = []string{"run", "--", ""}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
+// V1 rejects an inline "#variant" in -m (ProviderModelNotFoundError, shown
+// only as "UnknownError ... Check server logs"): it must ride --variant.
+func TestRunArgsV1SplitsModelVariant(t *testing.T) {
+	got := runArgs(Config{Model: "openrouter/z-ai/glm-5.3-flash#max"}, "p", false, occonfig.V1)
+	want := []string{"run", "-m", "openrouter/z-ai/glm-5.3-flash", "--variant", "max", "--", "p"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %q want %q", got, want)
+	}
+	got = runArgs(Config{Model: "p/m"}, "p", false, occonfig.V1)
+	want = []string{"run", "-m", "p/m", "--", "p"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
+func TestV1ConfigModelHasNoVariant(t *testing.T) {
+	cfg := Config{MCPURL: "http://x/mcp", Model: "p/m#max", OpenCODEVersion: occonfig.V1}
+	if got := newOpenCODEConfig(cfg)["model"]; got != "p/m" {
+		t.Errorf("V1 model = %v, want p/m", got)
+	}
+	cfg.OpenCODEVersion = occonfig.V2
+	if got := newOpenCODEConfig(cfg)["model"]; got != "p/m#max" {
+		t.Errorf("V2 model = %v, want p/m#max (unchanged)", got)
 	}
 }
 

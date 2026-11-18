@@ -394,13 +394,25 @@ func claudeModelArg(model string) string {
 // it is passed only when standalone is true (see supportsStandalone). The
 // prompt follows a `--` terminator so a prompt that is empty or starts
 // with '-' is never parsed as an option.
-func runArgs(cfg Config, prompt string, standalone bool) []string {
+//
+// V1 has no inline "#variant": `-m m/x#max` fails with
+// ProviderModelNotFoundError (reported only as "UnknownError"), so on V1
+// the suffix is split off into `--variant`.
+func runArgs(cfg Config, prompt string, standalone bool, v occonfig.Version) []string {
 	args := []string{"run"}
 	if standalone {
 		args = append(args, "--standalone")
 	}
 	if cfg.Model != "" {
-		args = append(args, "-m", cfg.Model)
+		if v == occonfig.V2 {
+			args = append(args, "-m", cfg.Model)
+		} else {
+			base, variant := occonfig.SplitVariant(cfg.Model)
+			args = append(args, "-m", base)
+			if variant != "" {
+				args = append(args, "--variant", variant)
+			}
+		}
 	}
 	return append(args, "--", prompt)
 }
@@ -474,7 +486,7 @@ func childCommand(cfg Config, jobDir, prompt string) (string, []string) {
 	if !standalone {
 		log.Printf("worker harness: %s does not support `run --standalone` (old opencode); running without it - upgrade opencode on this foreman, per-job MCP tokens may not apply", cfg.OpenCODEBin)
 	}
-	return cfg.OpenCODEBin, runArgs(cfg, prompt, standalone)
+	return cfg.OpenCODEBin, runArgs(cfg, prompt, standalone, openCODEVersion(cfg))
 }
 
 // execChild runs the routed agent child (§8.4) with cwd jobDir:
