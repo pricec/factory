@@ -24,6 +24,14 @@ Hard rules (they hold in every step):
 - **Work is never left unpushed.** If the requested commit exists only
   locally, push it to its branch before anything else (step 3).
 - **Do not guess.** If the branch head does not match the request, STOP.
+- **Act as an account that can push to `$REPO`, through `$GHAS` only.**
+  The host's `gh` may be logged in to several GitHub accounts, and the
+  active one need not be a collaborator on `$REPO` (`gh pr create` then
+  fails with `must be a collaborator`). Every `gh` command and every `git`
+  command that talks to `origin` runs as `$GHAS <command>` (step 1), which
+  hands the chosen account's token to that one command via `GH_TOKEN`.
+  Never run `gh auth switch` or `gh auth login`: other jobs share the
+  host's gh config.
 
 ## 0. Inputs
 
@@ -46,16 +54,29 @@ mkdir -p "$EV"
 
 ```sh
 gh auth status && go version && sudo -n true
+# Build the account selector from factory master (public repo: any account can read it).
+rm -rf "$EV/ghas-src" && git clone -q --depth 1 https://github.com/pricec/factory "$EV/ghas-src" &&
+  (cd "$EV/ghas-src" && go build -o "$EV/ghas" ./cmd/ghas) && rm -rf "$EV/ghas-src"
+GHAS="$EV/ghas -repo $REPO"
+$GHAS -login | tee "$EV/gh-account"     # the account every later step acts as
 ```
 
-Any failure: **STOP** (`preflight: <what failed>`).
+`ghas` (`cmd/ghas`, `internal/ghaccount`) lists the accounts in
+`gh auth status`, tries the repo owner's own account first, then the active
+one, then the rest, and picks the first whose token has push (or maintain/
+admin) permission on `$REPO`. It runs the given command with `GH_TOKEN` set
+to that token; git over https picks it up through gh's credential helper.
+If no account qualifies it exits 3 and names every account it tried and why.
+
+Any failure: **STOP** (`preflight: <what failed>`), quoting `ghas`'s
+message when account selection failed.
 
 ## 2. Dedicated clean clone
 
 ```sh
 rm -rf "$WORK" && mkdir -p "$(dirname "$WORK")"
-gh repo clone "$REPO" "$WORK" && cd "$WORK"
-git fetch origin --prune
+$GHAS gh repo clone "$REPO" "$WORK" && cd "$WORK"
+$GHAS git fetch origin --prune
 ```
 
 Every later command runs inside `$WORK`.
@@ -63,7 +84,7 @@ Every later command runs inside `$WORK`.
 ## 3. Verify the head; push the branch first if needed
 
 ```sh
-REMOTE=$(git ls-remote origin "refs/heads/$BRANCH" | cut -f1)
+REMOTE=$($GHAS git ls-remote origin "refs/heads/$BRANCH" | cut -f1)
 # The requested commit, if it exists only locally: read-only fetch of the
 # branch from the operator repository's object store (writes only to $WORK).
 git fetch /home/price/temp/factory "refs/heads/$BRANCH:refs/local/$BRANCH" 2>/dev/null || true
@@ -75,12 +96,12 @@ Decide, in this order:
 1. `REMOTE` starts with `HEAD_SHA`. The branch is on origin at the requested
    head. Set `FULL=$REMOTE`.
 2. `REMOTE` is empty, and `LOCAL` starts with `HEAD_SHA`. The branch is not
-   on origin. **Push it first:** `git push origin "$LOCAL:refs/heads/$BRANCH"`.
+   on origin. **Push it first:** `$GHAS git push origin "$LOCAL:refs/heads/$BRANCH"`.
    Set `FULL=$LOCAL`.
 3. `REMOTE` is non-empty, `LOCAL` starts with `HEAD_SHA`, and
    `git merge-base --is-ancestor "$REMOTE" "$LOCAL"` succeeds. Origin is
    behind the requested head. Fast-forward it:
-   `git push origin "$LOCAL:refs/heads/$BRANCH"` (never forced). Set
+   `$GHAS git push origin "$LOCAL:refs/heads/$BRANCH"` (never forced). Set
    `FULL=$LOCAL`.
 4. Anything else is **head drift**: **STOP**
    (`head drift: requested $HEAD_SHA, origin/$BRANCH is ${REMOTE:-absent}, local is ${LOCAL:-absent}`).
@@ -88,7 +109,7 @@ Decide, in this order:
 Then confirm:
 
 ```sh
-git fetch origin && test "$(git rev-parse "origin/$BRANCH")" = "$FULL"
+$GHAS git fetch origin && test "$(git rev-parse "origin/$BRANCH")" = "$FULL"
 ```
 
 If that fails: **STOP** (head drift).
@@ -99,10 +120,10 @@ If that fails: **STOP** (head drift).
 TITLE=${NOTE:-$BRANCH}
 { echo "Merge request $MR (factory merge queue, docs/merging.md)."; echo
   echo "Commits:"; git log --oneline --no-merges "origin/master..$FULL"; } > "$EV/pr-body.md"
-PR=$(gh pr list -R "$REPO" --head "$BRANCH" --state open --json number -q '.[0].number')
-[ -n "$PR" ] || PR=$(gh pr create -R "$REPO" --base master --head "$BRANCH" \
+PR=$($GHAS gh pr list -R "$REPO" --head "$BRANCH" --state open --json number -q '.[0].number')
+[ -n "$PR" ] || PR=$($GHAS gh pr create -R "$REPO" --base master --head "$BRANCH" \
     --title "$TITLE" --body-file "$EV/pr-body.md" | grep -o '[0-9]*$')
-test "$(gh pr view "$PR" -R "$REPO" --json headRefOid -q .headRefOid)" = "$FULL"
+test "$($GHAS gh pr view "$PR" -R "$REPO" --json headRefOid -q .headRefOid)" = "$FULL"
 ```
 
 If the PR's head is not `$FULL`, **STOP** (head drift).
@@ -121,8 +142,8 @@ once (`gh run rerun <id> --failed`), waits for the fresh attempt, and only
 then decides:
 
 ```sh
-go run ./cmd/cigate -repo "$REPO" -sha "$FULL" | tee "$EV/cigate.json"   # exit 0 green, 1 red/no checks/timeout
-gh pr view "$PR" -R "$REPO" --json mergeable,mergeStateStatus
+$GHAS go run ./cmd/cigate -repo "$REPO" -sha "$FULL" | tee "$EV/cigate.json"   # exit 0 green, 1 red/no checks/timeout
+$GHAS gh pr view "$PR" -R "$REPO" --json mergeable,mergeStateStatus
 ```
 
 Green means: `cigate` exits 0 (every run passed, at least one ran, possibly
@@ -137,7 +158,7 @@ If `cigate` reports `red` (red in the rerun too), or the PR conflicts:
   branch already changes, and the fix is a few lines with no contract or
   behavior change. Fix it in `$WORK` on the branch. Bring master in with
   `git merge origin/master`, never a rebase. Run `make ci`, then push the
-  branch normally (no force). Go back to the start of step 5. Each extra
+  branch normally (`$GHAS git push`, no force). Go back to the start of step 5. Each extra
   commit goes in the report.
 - **Anything else: STOP** (`checks red after rerun: <tests that failed both
   times>` or `conflict: <files>`). Never force-push. Never push to master.
@@ -145,9 +166,9 @@ If `cigate` reports `red` (red in the rerun too), or the PR conflicts:
 ## 6. Merge
 
 ```sh
-gh pr merge "$PR" -R "$REPO" --merge --delete-branch=false
-MERGED=$(gh pr view "$PR" -R "$REPO" --json mergeCommit -q .mergeCommit.oid)
-git fetch origin && git merge-base --is-ancestor "$MERGED" origin/master
+$GHAS gh pr merge "$PR" -R "$REPO" --merge --delete-branch=false
+MERGED=$($GHAS gh pr view "$PR" -R "$REPO" --json mergeCommit -q .mergeCommit.oid)
+$GHAS git fetch origin && git merge-base --is-ancestor "$MERGED" origin/master
 ```
 
 If `gh pr merge` refuses (branch protection, the branch moved), **STOP**.
