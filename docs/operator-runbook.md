@@ -124,6 +124,36 @@ fresh evidence directory, for example
    `/proc/$PID/exe` sha, and the check results. A merge job puts these in
    its `report_result`.
 
+## Held jobs and the conflict coordinator
+
+A job is `held` for one of three reasons, told apart by the prefix of its
+`held_reason` (list_jobs, the Jobs tab, the held panel):
+
+- `usage ...`: the usage throttle (spec §6.10); releases when usage allows.
+- `claude auth: ...`: the foreman's Claude CLI is logged out (see below).
+- `conflict: waits for job_X (glob)`: the job declared `touches` (file
+  globs) overlapping job_X's, and job_X is still active or its merge
+  request is `queued`/`merging` (spec §6.14). It releases by itself once
+  job_X's merge lands, is cancelled or needs attention, or job_X ends
+  without a merge. The usage panel shows `held N (usage a, conflict b)`.
+
+Things to know:
+
+- A job with no `touches` is never held for conflicts, and `touches: ["*"]`
+  is exclusive (it waits for, and blocks, every job that declares touches).
+  Docs-only overlap (`docs/**`, `*.md`) never holds.
+- Max wait is 60 minutes; then the job is released anyway (the task thread
+  gets a `notify.conflict` `timed_out` note, the log says `conflict:`).
+  Tune with `FACTORY_CONFLICT_MAX_WAIT=30m`.
+- A conflict hold that will not clear usually means the blocker's merge is
+  stuck: look at `GET /v1/merge-requests` (a paused queue, or an `after`
+  dependency nobody queued). Landing, cancelling or resolving that request
+  releases the waiter on the next pass (every 15 s).
+- To unstick a job now: `cancel_job` it and re-create it without `touches`,
+  or set `FACTORY_CONFLICT=off` and restart the factory to disable the
+  coordinator entirely (holds clear on the next releaser pass).
+- Log lines: `factoryapp: conflict: waiting|released|timed_out: ...`.
+
 ## Retries and superseded jobs
 
 A failed worker result is retried per spec §6.4 (validation 0, timeout 1,

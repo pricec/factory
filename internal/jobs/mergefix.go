@@ -195,6 +195,10 @@ func MergeFixJobSpec(mr MergeRequest, failure string, source, origin Job, jobID 
 	spec.Priority = src.Priority
 	spec.Requires = append([]string(nil), src.Requires...)
 	spec.Secrets = append([]string(nil), src.Secrets...)
+	// The fix job keeps the chain's footprint: the original job's merge
+	// request is over (needs_attention), but its files are still in flight.
+	// The fix job itself is exempt from the conflict check.
+	spec.Touches = append([]string(nil), origin.Spec.Touches...)
 	if src.Budget.MaxCostUSD > 0 {
 		spec.Budget = src.Budget
 	}

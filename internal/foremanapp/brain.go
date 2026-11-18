@@ -15,6 +15,7 @@ import (
 
 	"github.com/pricec/factory/internal/claudecli"
 	"github.com/pricec/factory/internal/llmctx"
+	"github.com/pricec/factory/internal/occonfig"
 	"github.com/pricec/factory/internal/ocusage"
 	"github.com/pricec/factory/internal/routing"
 	"github.com/pricec/factory/internal/wire"
@@ -83,6 +84,9 @@ type BrainRunner struct {
 	// ReadUsage reads the sessions opencode recorded for a dir since a ms
 	// timestamp; nil means the host's opencode database. Test seam.
 	ReadUsage ocusage.Reader
+	// OpenCODEVersion pins the opencode config schema; the zero value
+	// detects it from `opencode --version` (V1 if that fails).
+	OpenCODEVersion occonfig.Version
 }
 
 // Handle wakes the brain for env (spec §3.3): it builds the prompt via
@@ -261,60 +265,17 @@ func (b *BrainRunner) writeConfig() (string, error) {
 		return "", fmt.Errorf("brain work dir: %w", err)
 	}
 	path := filepath.Join(b.WorkDir, brainConfigName)
-	cfg := brainOpenCODEConfig{
-		Model: b.Model,
-		MCP: brainMCPBlock{Servers: map[string]*brainRemoteMCPServer{
-			"foreman": {
-				Type:    "remote",
-				URL:     b.MCPURL,
-				Headers: map[string]string{"Authorization": "Bearer {env:" + envBrainToken + "}"},
-				OAuth:   false,
-			},
-		}},
-		Permissions: brainPermissions,
-	}
+	cfg := occonfig.Build(occonfig.Resolve(b.OpenCODEVersion, "opencode"), b.Model, occonfig.Remote{
+		Name:     "foreman",
+		URL:      b.MCPURL,
+		TokenEnv: envBrainToken,
+	})
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return "", err
 	}
 	data = append(data, '\n')
 	return path, os.WriteFile(path, data, 0o600)
-}
-
-// brainOpenCODEConfig and friends mirror the opencode V2 config shape
-// (docs/mcp-servers) used by workerharness.occonfig.
-type brainRemoteMCPServer struct {
-	Type    string            `json:"type"`
-	URL     string            `json:"url"`
-	Headers map[string]string `json:"headers"`
-	OAuth   bool              `json:"oauth"`
-}
-
-type brainMCPBlock struct {
-	Servers map[string]*brainRemoteMCPServer `json:"servers"`
-}
-
-type brainOpenCODEConfig struct {
-	Model       string                `json:"model,omitempty"`
-	MCP         brainMCPBlock         `json:"mcp"`
-	Permissions []brainPermissionRule `json:"permissions"`
-}
-
-// brainPermissionRule is one opencode V2 permission rule (docs/
-// permissions); brainPermissions pins allow-all for the headless child.
-type brainPermissionRule struct {
-	Action   string `json:"action"`
-	Resource string `json:"resource"`
-	Effect   string `json:"effect"`
-}
-
-// brainPermissions is the brain child's permission policy: a headless
-// `opencode run` has no client to answer an "ask", so any prompt
-// auto-declines and aborts the whole session mid-flight (exit status 1,
-// work already done discarded). The child already runs with the foreman
-// user's authority; an explicit allow-all keeps it alive.
-var brainPermissions = []brainPermissionRule{
-	{Action: "*", Resource: "*", Effect: "allow"},
 }
 
 // withEnvValue returns base with key set to value, replacing any earlier

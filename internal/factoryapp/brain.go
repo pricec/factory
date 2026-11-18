@@ -23,6 +23,8 @@ type createJobRequest struct {
 	Requires []string `json:"requires,omitempty"`
 	// Secrets are credentials-store NAMES (spec §13.2), never values.
 	Secrets []string `json:"secrets,omitempty"`
+	// Touches is the declared file footprint (spec §6.10).
+	Touches []string `json:"touches,omitempty"`
 	// Foreman is the explicit routing pin (spec §6.7): bare or
 	// foreman:-prefixed id of the foreman the job runs on; empty means
 	// the Matcher's capability pick.
@@ -64,6 +66,7 @@ func (a *App) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	spec := wire.NewJobSpec(in.Task, "ui")
 	spec.Requires = in.Requires
 	spec.Secrets = in.Secrets
+	spec.Touches = in.Touches
 	spec.ResultSchema = in.ResultSchema
 	spec.Tier = in.Tier
 	spec.Model = in.Model

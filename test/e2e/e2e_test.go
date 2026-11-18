@@ -48,6 +48,7 @@ func TestE2E(t *testing.T) {
 	t.Run("SummaryView", func(t *testing.T) { testSummaryView(t, s) })
 	t.Run("MergeQueue", func(t *testing.T) { testMergeQueue(t, s) })
 	t.Run("JobOwnedMerge", func(t *testing.T) { testJobOwnedMerge(t, s) })
+	t.Run("ConflictCoordinator", func(t *testing.T) { testConflictCoordinator(t, s) })
 }
 
 // testHappyPath: create a job via the planner MCP create_job, let the real

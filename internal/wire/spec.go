@@ -96,6 +96,11 @@ type JobSpec struct {
 	// amendment) the job needs as env vars in its worker child. NAMES
 	// ONLY: values never enter the spec, job.json, prompts or envelopes.
 	Secrets []string `json:"secrets,omitempty"`
+	// Touches is the job's declared file footprint (§6.10 conflict
+	// coordinator, 2026-11-18 amendment): repo-relative path globs (`**`
+	// crosses directories; `*` alone means "everything"). Optional: a job
+	// that declares none is never held for conflicts and blocks nobody.
+	Touches []string `json:"touches,omitempty"`
 	// Foreman is the explicit routing pin (§6.7, 2026-11-16
 	// foreman-pin amendment): when set, the job dispatches to that
 	// foreman instead of the Matcher's capability pick. Full
@@ -210,6 +215,9 @@ func (s *JobSpec) validate(requireID bool) error {
 		if r == "" {
 			return fmt.Errorf("requires: entries must be non-empty")
 		}
+	}
+	if err := ValidateTouches(s.Touches); err != nil {
+		return fmt.Errorf("touches: %w", err)
 	}
 	for _, n := range s.Secrets {
 		if err := secrets.ValidateName(n); err != nil {

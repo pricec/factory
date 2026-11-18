@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/pricec/factory/internal/models"
+	"github.com/pricec/factory/internal/occonfig"
 	"github.com/pricec/factory/internal/wire"
 )
 
@@ -55,6 +56,8 @@ func TestPlannerOpencodeConfig(t *testing.T) {
 		MCPURL:  "http://factory.test/v1/mcp/factory",
 		Bearer:  "planner-secret",
 		WorkDir: dir,
+
+		OpenCODEVersion: occonfig.V2,
 	}
 	path, err := b.writeConfig()
 	if err != nil {
@@ -445,5 +448,32 @@ func TestPlannerModelFnPerSession(t *testing.T) {
 	b.ModelFn = nil
 	if got := b.session().Model; got != "openrouter/z-ai/glm-5.3" {
 		t.Errorf("static session model = %q, want the Model field", got)
+	}
+}
+
+// TestPlannerOpencodeConfigV1 pins the V1 shape on a V1 host.
+func TestPlannerOpencodeConfigV1(t *testing.T) {
+	t.Parallel()
+	b := &PlannerBrain{
+		Model: "openrouter/z-ai/glm-5.3", MCPURL: "http://factory.test/v1/mcp/factory",
+		Bearer: "planner-secret", WorkDir: t.TempDir(), OpenCODEVersion: occonfig.V1,
+	}
+	path, err := b.writeConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got["permissions"]; ok {
+		t.Errorf("V1 config carries V2 permissions:\n%s", data)
+	}
+	if perm, _ := got["permission"].(map[string]any); perm["edit"] != "allow" || perm["bash"] != "allow" {
+		t.Errorf("permission = %v, want allow-all rules", got["permission"])
+	}
+	if _, ok := got["mcp"].(map[string]any)["factory"]; !ok {
+		t.Errorf("V1 mcp must nest the server directly:\n%s", data)
 	}
 }

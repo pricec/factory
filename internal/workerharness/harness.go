@@ -18,6 +18,7 @@ import (
 	"github.com/pricec/factory/internal/claudecli"
 	"github.com/pricec/factory/internal/ocusage"
 
+	"github.com/pricec/factory/internal/occonfig"
 	"github.com/pricec/factory/internal/wire"
 )
 
@@ -75,6 +76,9 @@ type Config struct {
 
 	// OpenCODEBin is the opencode binary; "" means "opencode" on PATH.
 	OpenCODEBin string
+	// OpenCODEVersion pins the opencode config schema; the zero value
+	// detects it from `OpenCODEBin --version` (V1 if that fails).
+	OpenCODEVersion occonfig.Version
 	// ReadUsage reads the sessions opencode recorded for a dir since a
 	// ms timestamp: the opencode-runner usage capture (opencode prints no
 	// usage). Production wires ocusage.ReaderFor; nil skips the capture
