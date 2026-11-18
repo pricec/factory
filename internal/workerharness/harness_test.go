@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -133,7 +134,7 @@ printf '%s' "$2" > arg2.txt
 printf '%s' "$3" > arg3.txt
 printf '%s' "$4" > arg4.txt
 printf '%s' "$5" > arg5.txt
-printf '%s' "$3" > prompt.txt
+printf '%s' "$4" > prompt.txt
 printf 'all good'`)
 	rec := &recordingPost{}
 	cfg := testConfig(t, specPath, binDir, rec.post)
@@ -146,10 +147,11 @@ printf 'all good'`)
 	if info, err := os.Stat(jobDir); err != nil || !info.IsDir() {
 		t.Errorf("job dir %s missing: %v", jobDir, err)
 	}
-	// No model pinned: run --standalone <prompt>.
+	// No model pinned: run --standalone -- <prompt>.
 	assertArg(t, jobDir, 2, "--standalone")
-	assertArg(t, jobDir, 3, buildPrompt(spec, RunnerOpencode))
-	assertArg(t, jobDir, 4, "")
+	assertArg(t, jobDir, 3, "--")
+	assertArg(t, jobDir, 4, buildPrompt(spec, RunnerOpencode))
+	assertArg(t, jobDir, 5, "")
 	// macOS resolves /var to /private/var in getcwd(); compare the resolved form.
 	wantPwd, err := filepath.EvalSymlinks(jobDir)
 	if err != nil {
@@ -219,6 +221,7 @@ func TestRunPinsModelViaMFlag(t *testing.T) {
 printf '%s' "$3" > arg3.txt
 printf '%s' "$4" > arg4.txt
 printf '%s' "$5" > arg5.txt
+printf '%s' "$6" > arg6.txt
 printf 'ok'`)
 	rec := &recordingPost{}
 	cfg := testConfig(t, specPath, binDir, rec.post)
@@ -231,7 +234,8 @@ printf 'ok'`)
 	assertArg(t, jobDir, 2, "--standalone")
 	assertArg(t, jobDir, 3, "-m")
 	assertArg(t, jobDir, 4, "openrouter/z-ai/glm-5.3-flash#max")
-	assertArg(t, jobDir, 5, buildPrompt(spec, RunnerOpencode))
+	assertArg(t, jobDir, 5, "--")
+	assertArg(t, jobDir, 6, buildPrompt(spec, RunnerOpencode))
 }
 
 func TestRunExitCodeMapping(t *testing.T) {
@@ -966,5 +970,57 @@ func TestRunClaudeRecordsUsage(t *testing.T) {
 				t.Fatalf("fallback results = %+v", rec.results)
 			}
 		}
+	}
+}
+
+func TestRunArgsStandaloneAndTerminator(t *testing.T) {
+	got := runArgs(Config{Model: "m/x#max"}, "-weird prompt", true)
+	want := []string{"run", "--standalone", "-m", "m/x#max", "--", "-weird prompt"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %q want %q", got, want)
+	}
+	got = runArgs(Config{}, "", false)
+	want = []string{"run", "--", ""}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
+func TestHelpSupportsStandalone(t *testing.T) {
+	old := "opencode run [message..]\n\nOptions:\n  -m, --model\n"
+	cases := []struct {
+		name string
+		help string
+		err  error
+		want bool
+	}{
+		{"v2", "USAGE\n  opencode run [flags]\n  --standalone  x\n", nil, true},
+		{"old yargs", old, nil, false},
+		{"old yargs nonzero", old, errors.New("exit 1"), false},
+		{"unrecognized", "something else", nil, true},
+		{"probe failed", "", errors.New("boom"), true},
+	}
+	for _, c := range cases {
+		if got := helpSupportsStandalone(c.help, c.err); got != c.want {
+			t.Errorf("%s: got %v want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestCrashMessageKeepsTrailingUsageError(t *testing.T) {
+	usage := "opencode run [message..]\n\nPositionals:\n  message  message to send  [array] [default: []]\n\nOptions:\n" +
+		strings.Repeat("  -h, --help  Show help\n", 80) + "\nUnknown argument: standalone\n"
+	msg := crashMessage(usage, "", errors.New("exit status 1"), false)
+	if !strings.Contains(msg, "Unknown argument: standalone") {
+		t.Fatalf("rejection line lost: %q", msg)
+	}
+	if !strings.HasPrefix(msg, "opencode run") {
+		t.Fatalf("head lost: %q", msg)
+	}
+	if n := len([]rune(msg)); n > crashMessageLimit {
+		t.Fatalf("len %d > limit", n)
+	}
+	if short := crashMessage("boom", "", errors.New("x"), false); short != "boom" {
+		t.Fatalf("short message altered: %q", short)
 	}
 }
