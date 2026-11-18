@@ -1719,7 +1719,7 @@ orphaned, live, and local job ids.
   section (#17, #15).
 - Tool descriptions stay tiny (per-turn token cost for every LLM caller,
   #6); byte budgets asserted by test: worker surface < 2KB total (#17; 2026-11-17 job-owned merges: raised from 1.5KB for `request_merge`, §9.2; earlier 2026-11-17 typed report_result input schema, was 1KB);
-  foreman surface < 1.5KB (#18; 2KB since the 2026-11-16 `raise_alert` tool); factory surface < 6.5KB (2026-11-18 standing Planner chat: `create_task`, `update_standing_summary`, §9.5.7; was 6KB after host facts; 5.5KB, 2026-11-18 conflict coordinator `touches`; was 5KB after 2026-11-17 job secrets; 4.5KB, merge
+  foreman surface < 1.5KB (#18; 2KB since the 2026-11-16 `raise_alert` tool); factory surface < 7KB (2026-11-18 task links: `create_task` `follow_up_of`/`parent_task_id`/`message`, `list_tasks` `parent_task_id`, §9.5.1; was 6.5KB, 2026-11-18 standing Planner chat: `create_task`, `update_standing_summary`, §9.5.7; was 6KB after host facts; 5.5KB, 2026-11-18 conflict coordinator `touches`; was 5KB after 2026-11-17 job secrets; 4.5KB, merge
   queue: raised from 4KB for `request_merge`, §6.11 - 4093 B were in use;
   earlier: < 4KB since the 2026-11-16
   inbox redesign: raised from 2KB for the task tools of §9.5.2 and
@@ -2011,8 +2011,11 @@ Tools (exact):
   `{task}` (closing defaults `reason` to `planner`; a reopen ignores it;
   `needs_operator` true|false sets or clears the task's "waiting on the
   operator" flag, §9.5.2; a planner close never wakes the planner);
-  `set_priority_criteria(text)` -> `{ok}`; `create_task(title, priority?)` ->
-  `{task}` (a new open task; the way a standing-chat session files work);
+  `set_priority_criteria(text)` -> `{ok}`; `create_task(title, priority?,
+  follow_up_of?, parent_task_id?, message?)` -> `{task}` (a new open task;
+  the way a standing-chat session files work; the link ids must name
+  existing non-standing tasks, else a tool error and no task; `message`
+  is posted as the task's first `brain.reply`; §9.5.1 task links);
   `update_standing_summary(summary, through_message_id)` -> `{ok}` (standing
   chat session only, §9.5.7). `create_job` refuses to file a job under the
   standing chat (§9.5.7).
@@ -2174,6 +2177,17 @@ every start; existing files migrate in place.
   it); reopening clears `closed_at` and `close_reason`. `needs_operator`
   was added after the first release: an existing `tasks` table gets it by
   an idempotent `ALTER TABLE ... ADD COLUMN` at start (2026-11-17).
+- Task links (2026-11-18, stay with chat -> task -> job; there is no
+  project layer): `tasks.follow_up_of TEXT NULL` (the task this one
+  continues after a change of goal) and `tasks.parent_task_id TEXT NULL`
+  (the task this one is a sub-task of), both added by idempotent `ALTER
+  TABLE`, indexed. They are set once, when the task is created
+  (`CreateTaskLinked`); each non-empty value must name an existing
+  non-standing task, else `ErrInvalid` and nothing is created. Links are
+  never edited, so they cannot form a cycle. A task's JSON carries
+  `follow_up_of` / `parent_task_id` (omitted when null) and the computed
+  reverse links `child_task_ids` / `follow_up_task_ids` (oldest first,
+  never null). `TaskFilter.ParentTaskID` / `FollowUpOf` filter listings.
 - `task_jobs(task_id, job_id, PK(task_id, job_id))`, indexed by job_id.
 - `alerts(id 'alert_<ulid>' PK, priority INT, title, body, source,
   created_at, expires_at NULL = never, state open|acked|replied|expired,
@@ -2200,6 +2214,14 @@ every start; existing files migrate in place.
 - The store is policy-free: TTL defaults, expiry tickers, wakes and the idle
   reaper live in the factory app, which uses the store's primitives
   (`ExpireAlerts(now)`, `TransitionAlert` compare-and-set, and so on).
+
+Planner rule (2026-11-18, in the per-task wake prompt, which also lists the
+task's links): a task has one goal. When the operator's request on a task
+is really a new goal, the planner calls `create_task(follow_up_of=<task>,
+message=<brief>)`, tells the operator the new task id and carries on there;
+`parent_task_id` is for a sub-task inside the same goal. When a task's own
+goal is done it suggests the operator close it. The UI shows "follow-up of",
+"child of", and the follow-up/child task links under the thread header.
 
 #### 9.5.2 Tasks and per-task planner wakes (inbox redesign S2, 2026-11-16)
 

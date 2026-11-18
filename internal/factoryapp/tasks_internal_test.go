@@ -416,3 +416,16 @@ func TestRecoverTerminalJobWake(t *testing.T) {
 		t.Errorf("recovered job wake: task=%q prompt=%q", gotTask, snippet(gotPrompt))
 	}
 }
+
+// TestTaskWakePromptLinks: the wake prompt shows a task's links and tells
+// the planner to split a new goal off as a linked follow-up.
+func TestTaskWakePromptLinks(t *testing.T) {
+	p := buildTaskWakePrompt(PlannerWake{Task: tasks.Task{
+		ID: "task_b", Title: "b", Status: "open", FollowUpOf: "task_a", ChildTaskIDs: []string{"task_c"},
+	}})
+	for _, want := range []string{"follow_up_of: task_a", "child_task_ids: task_c", "follow_up_of=this task id", "suggest to the operator that they close it"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("prompt missing %q", want)
+		}
+	}
+}

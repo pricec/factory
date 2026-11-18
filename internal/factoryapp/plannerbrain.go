@@ -242,6 +242,19 @@ func buildTaskWakePrompt(w PlannerWake) string {
 		jobs = strings.Join(t.JobIDs, ", ")
 	}
 	fmt.Fprintf(&sb, "job_ids: %s\n", jobs)
+	for _, l := range []struct {
+		label string
+		ids   []string
+	}{
+		{"follow_up_of", nonEmpty(t.FollowUpOf)},
+		{"parent_task_id", nonEmpty(t.ParentTaskID)},
+		{"follow_up_task_ids", t.FollowUpTaskIDs},
+		{"child_task_ids", t.ChildTaskIDs},
+	} {
+		if len(l.ids) > 0 {
+			fmt.Fprintf(&sb, "%s: %s\n", l.label, strings.Join(l.ids, ", "))
+		}
+	}
 
 	sb.WriteString("\n=== operator priority criteria ===\n")
 	if strings.TrimSpace(w.Criteria) == "" {
@@ -283,6 +296,13 @@ func buildTaskWakePrompt(w PlannerWake) string {
 	return sb.String()
 }
 
+func nonEmpty(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return []string{s}
+}
+
 // promptTags marks a thread row in the wake prompt.
 func promptTags(env wire.MessageEnvelope, trigger bool) string {
 	var tags string
@@ -301,6 +321,7 @@ This session is bound to task %s: notify_operator and create_job default to it. 
 	`When you are waiting on an operator decision, approval or answer, set update_task(needs_operator=true) (it puts the task in their "Needs you" list); ` +
 	`set it false when that is no longer true. It clears itself when the operator replies or closes the task, so set it again if you are still waiting. ` +
 	`Every code job you create with create_job MUST carry touches: the narrowest repo-relative path globs it will edit (for example ["internal/jobs/**","docs/spec.md"]); use ["*"] only for a job that needs exclusivity. The factory runs jobs with overlapping touches one after another (a held job says "conflict: waits for job_X"), so a vague footprint costs wall-clock time and a missing one costs merge conflicts. ` +
+	`Keep a task to ONE goal. When the operator's request on this task is really a new goal (not a continuation of the current one), do not pile it onto this task: call create_task(title, follow_up_of=this task id, message=a short brief of the new goal), tell the operator the new task id with notify_operator, and create the jobs under the new task. Use parent_task_id instead of follow_up_of for a sub-task that belongs inside this task's goal. Once this task's own goal is done, suggest to the operator that they close it. ` +
 	`Handle the [new] messages with your tools, then finish; do not repeat work.`
 
 // runOpencode is the opencode-runner Exec (the non-claude route, spec

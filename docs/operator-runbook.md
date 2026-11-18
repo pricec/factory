@@ -297,6 +297,12 @@ Use it for status ("where is task X", "what is held", "what merged
 today") and for direct instructions (cancel a job, reprioritise, merge).
 For real work the planner creates a new task and tells you its id.
 
+Tasks keep to one goal. If you ask for something new on an existing task,
+the planner opens a **follow-up task** linked to it, tells you its id and
+carries on there, and suggests closing the original once its own goal is
+done. A task shows "follow-up of ..." / "child of ..." and links to its own
+follow-ups and sub-tasks under the title.
+
 - It never closes, is not in "Needs you", and cannot be renamed.
 - Only your messages wake it. Each wake sees a rolling summary plus the
   last ~20 messages, so it stays cheap however long the chat gets; if

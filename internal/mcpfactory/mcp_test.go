@@ -323,8 +323,10 @@ func TestToolsListAndBudget(t *testing.T) {
 	// gains `host`/`hosts` and the no-SSH-to-foreman-hosts rule.
 	// Raised to 6.5KB (6656) by the standing Planner chat (2026-11-18):
 	// create_task and update_standing_summary.
-	if budget >= 6656 {
-		t.Errorf("description budget = %d bytes, want < 6656", budget)
+	// Raised to 7KB (7168) by task links (2026-11-18, §9.5.1): create_task
+	// gains follow_up_of/parent_task_id/message, list_tasks parent_task_id.
+	if budget >= 7168 {
+		t.Errorf("description budget = %d bytes, want < 7168", budget)
 	}
 	t.Logf("description budget: %d bytes", budget)
 }

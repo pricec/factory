@@ -9,8 +9,10 @@ import (
 	"unicode"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/pricec/factory/internal/auth"
 	"github.com/pricec/factory/internal/llmctx"
 	"github.com/pricec/factory/internal/tasks"
+	"github.com/pricec/factory/internal/wire"
 )
 
 // WokenTaskHeader carries the planner session's woken task (spec §9.5.2).
@@ -39,6 +41,8 @@ type (
 		Status string `json:"status,omitempty"`
 		Q      string `json:"q,omitempty"`
 		Limit  *int   `json:"limit,omitempty"`
+		// ParentTaskID keeps only children of that task.
+		ParentTaskID string `json:"parent_task_id,omitempty"`
 	}
 	getTaskArgs struct {
 		TaskID string `json:"task_id"`
@@ -56,6 +60,12 @@ type (
 	createTaskArgs struct {
 		Title    string `json:"title"`
 		Priority *int   `json:"priority,omitempty"`
+		// FollowUpOf / ParentTaskID link the new task to an existing one.
+		FollowUpOf   string `json:"follow_up_of,omitempty"`
+		ParentTaskID string `json:"parent_task_id,omitempty"`
+		// Message, when set, is posted as the first planner message of the
+		// new task.
+		Message string `json:"message,omitempty"`
 	}
 	updateStandingSummaryArgs struct {
 		Summary        string `json:"summary"`
@@ -74,7 +84,7 @@ func addTaskTools(srv *mcp.Server, cfg Config) {
 	}
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_tasks",
-		Description: "List tasks, ranked: {tasks}. status open|closed|all (default open); q matches title/id/date.",
+		Description: "List tasks, ranked: {tasks}. status open|closed|all (default open); q matches title/id/date; parent_task_id filters children.",
 	}, listTasksTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "get_task",
@@ -88,7 +98,7 @@ func addTaskTools(srv *mcp.Server, cfg Config) {
 	}, updateTaskTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "create_task",
-		Description: "New open task -> {task}. Standing Planner chat: create the task first, then create_job task_id=it.",
+		Description: "New open task -> {task}. Standing chat: create it, then create_job task_id=it. New goal on a task: follow_up_of=that task (parent_task_id=sub-task); message=first note.",
 	}, createTaskTool(cfg))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "update_standing_summary",
@@ -166,11 +176,33 @@ func createTaskTool(cfg Config) mcp.ToolHandlerFor[createTaskArgs, any] {
 			}
 			prio = *in.Priority
 		}
-		t, err := cfg.Tasks.CreateTask(ctx, title, prio)
+		t, err := cfg.Tasks.CreateTaskLinked(ctx, title, prio, tasks.TaskLinks{
+			FollowUpOf:   strings.TrimSpace(in.FollowUpOf),
+			ParentTaskID: strings.TrimSpace(in.ParentTaskID),
+		})
+		if errors.Is(err, tasks.ErrInvalid) {
+			return nil, nil, fmt.Errorf("%v (see list_tasks)", err)
+		}
 		if err != nil {
 			return nil, nil, err
 		}
+		if msg := strings.TrimSpace(in.Message); msg != "" {
+			if _, err := cfg.Inbox.Post(ctx, auth.PlannerMainInbox, wire.MessageEnvelope{
+				Type:     tasks.TypeBrainReply,
+				From:     auth.FactoryBrainIdentity,
+				Payload:  replyPayload(msg, ""),
+				ThreadID: t.ID,
+			}); err != nil {
+				return nil, nil, fmt.Errorf("task %s created but the message was not posted: %w", t.ID, err)
+			}
+		}
 		cfg.taskChanged(ctx, t.ID)
+		if t.FollowUpOf != "" {
+			cfg.taskChanged(ctx, t.FollowUpOf)
+		}
+		if t.ParentTaskID != "" {
+			cfg.taskChanged(ctx, t.ParentTaskID)
+		}
 		return structuredResult(map[string]any{"task": t}), nil, nil
 	}
 }
@@ -229,7 +261,7 @@ func listTasksTool(cfg Config) mcp.ToolHandlerFor[listTasksArgs, any] {
 		if in.Limit != nil {
 			limit = min(max(*in.Limit, 1), maxListTasksLimit)
 		}
-		list, err := cfg.Tasks.ListTasks(ctx, tasks.TaskFilter{Status: status, Query: in.Q, Limit: limit})
+		list, err := cfg.Tasks.ListTasks(ctx, tasks.TaskFilter{Status: status, Query: in.Q, Limit: limit, ParentTaskID: strings.TrimSpace(in.ParentTaskID)})
 		if err != nil {
 			return nil, nil, err
 		}

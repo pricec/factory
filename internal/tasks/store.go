@@ -173,6 +173,19 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.addColumnIfMissing(ctx, "tasks", "standing", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	// follow_up_of / parent_task_id: optional links to other tasks (set at
+	// creation, validated against existing tasks; additive, nullable).
+	if err := s.addColumnIfMissing(ctx, "tasks", "follow_up_of", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing(ctx, "tasks", "parent_task_id", "TEXT"); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id);
+		 CREATE INDEX IF NOT EXISTS idx_tasks_follow_up ON tasks(follow_up_of)`); err != nil {
+		return err
+	}
 	return s.EnsureStanding(ctx)
 }
 
