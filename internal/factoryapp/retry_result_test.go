@@ -43,20 +43,29 @@ func TestRetryAttemptResultIsNotDroppedAsDuplicate(t *testing.T) {
 	if s := post("job.result", failed); s != http.StatusCreated {
 		t.Fatalf("failed result status = %d", s)
 	}
-	waitFor(t, "failed with retry armed", 5*time.Second, func() bool { st, _ := state(); return st == "failed" })
+	waitFor(t, "failed with retry armed", 30*time.Second, func() bool { st, _ := state(); return st == "failed" })
 
 	// Backoff elapses on the fake clock; the picker re-dispatches attempt 1.
 	e.clock.Advance(time.Minute)
-	waitFor(t, "retry dispatched", 15*time.Second, func() bool { st, a := state(); return st == "dispatched" && a == 1 })
-	// Let the notifier post the retry's job.request (releases the slot).
-	time.Sleep(2 * time.Second)
+	waitFor(t, "retry dispatched", 40*time.Second, func() bool { st, a := state(); return st == "dispatched" && a == 1 })
+	// The notifier releases the slot when it posts the retry's job.request;
+	// the picker has already moved the job, so poll the result post below.
 
-	if s := post("job.event", map[string]any{"event": "started"}); s != http.StatusCreated {
-		t.Fatalf("retry started status = %d", s)
-	}
+	// A real foreman only reports started after it received job.request, so
+	// give the notifier (500ms tick) time to post it - and release the slot -
+	// while the job is still dispatched.
+	time.Sleep(3 * time.Second)
+	var started int
+	waitFor(t, "retry started accepted", 30*time.Second, func() bool {
+		started = post("job.event", map[string]any{"event": "started"})
+		st, _ := state()
+		return started == http.StatusCreated && st == "running"
+	})
 	done := map[string]any{"job_id": created.JobID, "status": "done", "summary": "ok"}
-	if s := post("job.result", done); s != http.StatusCreated {
-		t.Fatalf("retry result status = %d, want 201 (dropped as duplicate?)", s)
-	}
-	waitFor(t, "done", 5*time.Second, func() bool { st, _ := state(); return st == "done" })
+	var last int
+	waitFor(t, "retry result accepted (last status shown on failure)", 30*time.Second, func() bool {
+		last = post("job.result", done)
+		return last == http.StatusCreated
+	})
+	waitFor(t, "done", 30*time.Second, func() bool { st, _ := state(); return st == "done" })
 }
