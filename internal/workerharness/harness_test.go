@@ -844,18 +844,21 @@ func TestRunClaudeAuthFailureIsLoud(t *testing.T) {
 		body    string
 		wantMsg string
 		wantSum string
+		want    wire.ErrorKind
 	}{
 		{
 			"auth failure printed on stdout (observed live shape)",
 			`printf 'Not logged in · Please run /login'; exit 1`,
 			"Not logged in · Please run /login",
 			"Not logged in · Please run /login",
+			wire.KindAuth,
 		},
 		{
 			"auth failure on stderr still preferred",
 			`printf 'Invalid API key · Please run /login'; printf 'bad key' >&2; exit 1`,
 			"bad key",
 			"Invalid API key · Please run /login",
+			wire.KindCrash, // stderr wins and carries no recognised pattern
 		},
 	}
 	for _, tc := range cases {
@@ -876,8 +879,8 @@ func TestRunClaudeAuthFailureIsLoud(t *testing.T) {
 				t.Fatalf("fallback posts = %d, want 1", rec.calls())
 			}
 			res := rec.last()
-			if res.Status != wire.StatusFailed || res.Error == nil || res.Error.Kind != wire.KindCrash {
-				t.Fatalf("result = %+v, want failed crash", res)
+			if res.Status != wire.StatusFailed || res.Error == nil || res.Error.Kind != tc.want {
+				t.Fatalf("result = %+v, want failed %s", res, tc.want)
 			}
 			if res.Error.Message != tc.wantMsg {
 				t.Errorf("crash message = %q, want %q", res.Error.Message, tc.wantMsg)
@@ -966,5 +969,27 @@ func TestRunClaudeRecordsUsage(t *testing.T) {
 				t.Fatalf("fallback results = %+v", rec.results)
 			}
 		}
+	}
+}
+
+func TestFallbackResultClassifiesAuth(t *testing.T) {
+	spec := wire.JobSpec{ID: "job_x"}
+	runErr := errors.New("exit status 1")
+	cases := []struct {
+		name, stdout, stderr string
+		claude               bool
+		want                 wire.ErrorKind
+	}{
+		{"claude not logged in (stdout)", "Not logged in \u00b7 Please run /login", "", true, wire.KindAuth},
+		{"generic crash", "", "segfault", false, wire.KindCrash},
+		{"unknown model", "", "Error: unknown model foo", false, wire.KindValidation},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := fallbackResult(spec, tc.stdout, tc.stderr, runErr, tc.claude)
+			if res.Error == nil || res.Error.Kind != tc.want {
+				t.Fatalf("error = %+v, want kind %q", res.Error, tc.want)
+			}
+		})
 	}
 }

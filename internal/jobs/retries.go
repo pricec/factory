@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/pricec/factory/internal/wire"
 )
 
 // Retry policy and dead-letter machinery (#10, spec §6.4): the kind ->
@@ -22,13 +24,37 @@ var retryPolicy = map[string]int{
 	"crash":      2,
 	"llm":        2,
 	"other":      2,
+	// auth never recovers on its own: operator must log in / fix keys.
+	"auth": 0,
+	// ceiling: a timeout that hit the max wall clock (reason=ceiling); the
+	// same ceiling would be hit again. See RetryKind.
+	"ceiling": 0,
 	// superseded never retries; ApplyResult sends it to the terminal
 	// superseded state, so this entry is belt and braces.
 	"superseded": 0,
 }
 
+// RetryKind maps a failed result to the key MaxRetries understands. Failures
+// that are deterministic get a zero-retry key: budget/loop/ceiling kills by
+// reason, and crash|llm|other whose message is a known auth, bad-model or
+// bad-route error (older workers still report auth as crash). Idle timeouts
+// and everything else keep their kind's policy.
+func RetryKind(kind, reason, message string) string {
+	switch reason {
+	case "budget", "loop", "ceiling":
+		return reason
+	}
+	switch kind {
+	case "crash", "llm", "other":
+		if k := wire.ClassifyMessage(message); k != "" {
+			return string(k)
+		}
+	}
+	return kind
+}
+
 // MaxRetries returns how many retries a failure kind allows (spec §6.4):
-// validation 0, superseded 0, timeout 1, crash|llm|other 2, unknown kinds 0.
+// validation 0, auth 0, superseded 0, timeout 1 (ceiling 0), crash|llm|other 2, unknown kinds 0.
 func MaxRetries(kind string) int {
 	if n, ok := retryPolicy[kind]; ok {
 		return n

@@ -318,7 +318,7 @@ job's own id. `spawn_child` is the only writer of the field.
   "summary": "1-240 chars, REQUIRED",
   "result": {},
   "error": {
-    "kind": "validation|timeout|crash|llm|other|superseded",
+    "kind": "validation|timeout|crash|llm|other|auth|superseded",
     "message": "..."
   },
   "usage": {
@@ -330,7 +330,11 @@ job's own id. `spawn_child` is the only writer of the field.
 ```
 
 - `status`: `done` | `failed`.
-- `error.kind`: `validation` | `timeout` | `crash` | `llm` | `other` | `superseded`.
+- `error.kind`: `validation` | `timeout` | `crash` | `llm` | `other` | `auth` | `superseded`.
+  `auth` (2026-11-18 amendment): the runner is not authenticated (`Not logged
+  in · Please run /login`, invalid API key, 401). The harness classifies crash
+  messages matching known auth / unknown-model / unknown-route / missing-CLI
+  patterns as `auth` / `validation` instead of `crash`.
   `superseded` (2026-11-17 amendment): the worker stands down because the
   job is a duplicate of, or superseded by, another job. With `status=failed`
   the factory moves the job to the terminal `superseded` state (the same
@@ -451,7 +455,7 @@ payload and `GET /v1/jobs/{id}`.
 - Terminal-idempotency: applying a `job.result` to an already-terminal job is
   a no-op (log). Envelope-level dedupe (409) lives in the inbox (#1).
 - Retry policy (normative), by `error.kind`: `validation` -> no retry;
-  `timeout` -> 1 retry; `crash | llm | other` -> 2 retries; `superseded` ->
+  `timeout` -> 1 retry, except `reason=ceiling` (hit the `timeout_s` wall clock; a rerun hits it again) -> 0; `auth` -> no retry (2026-11-18 amendment); `crash | llm | other` -> 2 retries unless the message is a known deterministic auth/model/route error (reclassified as `auth`/`validation`, 0 retries); `superseded` ->
   never retried (2026-11-17 amendment): the result lands the job in the
   terminal `superseded` state, not `failed`. A late result, or a retry timer
   firing, for a job already terminal (`cancelled`, `superseded`, `done`,
@@ -1582,7 +1586,7 @@ named `inbox`, the agent sees `inbox_report_result`, `inbox_ask_parent`,
   `{"ok": true}`.
   - Contract (2026-11-17 amendment): the advertised input schema is the
     contract. `error` is the object form `{kind, message}`, `kind` one of
-    `validation|timeout|crash|llm|other|superseded`; the schema pins that shape and
+    `validation|timeout|crash|llm|other|auth|superseded`; the schema pins that shape and
     is what new agent prompts and code target. The server MUST accept the
     normalized forms below and rewrite them before `wire.JobResult.Validate`:
     - `error` as a JSON string -> `{kind: other, message: <string>}`;
@@ -2372,7 +2376,7 @@ outside the `result_schema` subset at validation time (#3).
 | Jobs sweeper tick | 10s | #9 |
 | Retry picker tick | 10s | #10 |
 | Job timeout grace | `timeout_s` (ceiling) `+ 60s` -> `timed_out` | #9 |
-| Retries by error kind | validation 0; superseded 0; timeout 1; crash/llm/other 2 | #10 |
+| Retries by error kind | validation 0; auth 0; superseded 0; timeout 1 (ceiling 0); crash/llm/other 2 (deterministic messages 0) | #10 |
 | Retry backoff curve | 30s, 2m, 8m (attempt n waits `backoff[n-1]`) | #10 |
 | SSE reconnect backoff | 1s, 2s, 4s, ... max 60s, +-25% jitter | #2 |
 | Question SLA / `ask_parent` default wait | 60s; default answer "proceed with your best judgment" | #4, #17 |

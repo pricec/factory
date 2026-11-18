@@ -238,7 +238,7 @@ func TestReportResultAdvertisedSchema(t *testing.T) {
 		t.Fatalf("error schema type = %v, want object", errSchema["type"])
 	}
 	kinds := errSchema["properties"].(map[string]any)["kind"].(map[string]any)["enum"]
-	wantKinds := []any{"validation", "timeout", "crash", "llm", "other", "superseded"}
+	wantKinds := []any{"validation", "timeout", "crash", "llm", "other", "auth", "superseded"}
 	if b1, b2 := mustJSON(t, kinds), mustJSON(t, wantKinds); b1 != b2 {
 		t.Fatalf("kind enum = %s, want %s", b1, b2)
 	}

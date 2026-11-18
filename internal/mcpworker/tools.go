@@ -53,7 +53,7 @@ func reportResultSchema() *jsonschema.Schema {
 		Properties: map[string]*jsonschema.Schema{
 			"kind": {Type: "string", Enum: []any{
 				string(wire.KindValidation), string(wire.KindTimeout), string(wire.KindCrash),
-				string(wire.KindLLM), string(wire.KindOther), string(wire.KindSuperseded),
+				string(wire.KindLLM), string(wire.KindOther), string(wire.KindAuth), string(wire.KindSuperseded),
 			}},
 			"message": {Type: "string"},
 		},
@@ -79,6 +79,7 @@ var errorKindAliases = map[string]wire.ErrorKind{
 	"invalid":    wire.KindValidation,
 	"crash":      wire.KindCrash,
 	"llm":        wire.KindLLM,
+	"auth":       wire.KindAuth,
 	"superseded": wire.KindSuperseded,
 	"duplicate":  wire.KindSuperseded,
 }

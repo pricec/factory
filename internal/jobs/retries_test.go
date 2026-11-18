@@ -83,6 +83,8 @@ func TestMaxRetries(t *testing.T) {
 		want int
 	}{
 		{"validation", 0},
+		{"auth", 0},
+		{"ceiling", 0},
 		{"superseded", 0},
 		{"timeout", 1},
 		{"crash", 2},
@@ -99,7 +101,7 @@ func TestMaxRetries(t *testing.T) {
 	// The wire constants must agree with the table.
 	for k, want := range map[wire.ErrorKind]int{
 		wire.KindValidation: 0, wire.KindTimeout: 1, wire.KindCrash: 2,
-		wire.KindLLM: 2, wire.KindOther: 2, wire.KindSuperseded: 0,
+		wire.KindLLM: 2, wire.KindOther: 2, wire.KindSuperseded: 0, wire.KindAuth: 0,
 	} {
 		if got := MaxRetries(string(k)); got != want {
 			t.Errorf("MaxRetries(%q) = %d, want %d", k, got, want)
@@ -658,6 +660,39 @@ func TestRetryNotAfterTerminal(t *testing.T) {
 			}
 			if job, _, _ := s.Get(ctx, spec.ID); job.State != to {
 				t.Errorf("state = %s, want %s", job.State, to)
+			}
+		})
+	}
+}
+
+func TestRetryKind(t *testing.T) {
+	cases := []struct {
+		name, kind, reason, msg string
+		wantKey                 string
+		wantRetries             int
+	}{
+		{"auth crash (job_01M7NTAN79MMJ144Q5H90N83AK)", "crash", "", "Not logged in \u00b7 Please run /login", "auth", 0},
+		{"auth kind", "auth", "", "Not logged in", "auth", 0},
+		{"ceiling timeout (job_01M7NHGG04184GYVM2G1RSHDV4)", "timeout", "ceiling", "job exceeded timeout_s=7200 ceiling; process group killed", "ceiling", 0},
+		{"idle timeout still retried", "timeout", "idle", "no output for idle_timeout_s=600", "timeout", 1},
+		{"budget", "other", "budget", "spend cap reached", "budget", 0},
+		{"loop", "other", "loop", "loop guard", "loop", 0},
+		{"invalid api key", "other", "", "401 Unauthorized: invalid API key", "auth", 0},
+		{"unknown model", "llm", "", "unknown model \"foo/bar\"", "validation", 0},
+		{"missing CLI", "crash", "", "exec: \"claude\": executable file not found in $PATH", "validation", 0},
+		{"network crash retried", "crash", "", "dial tcp: connection reset by peer", "crash", 2},
+		{"rate limit retried", "llm", "", "429 rate limit exceeded", "llm", 2},
+		{"foreman disconnect retried", "crash", "", "foreman disconnected", "crash", 2},
+		{"validation stays", "validation", "", "bad spec", "validation", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			key := RetryKind(tc.kind, tc.reason, tc.msg)
+			if key != tc.wantKey {
+				t.Errorf("RetryKind = %q, want %q", key, tc.wantKey)
+			}
+			if got := MaxRetries(key); got != tc.wantRetries {
+				t.Errorf("MaxRetries(%q) = %d, want %d", key, got, tc.wantRetries)
 			}
 		})
 	}
