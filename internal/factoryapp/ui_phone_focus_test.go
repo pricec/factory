@@ -38,7 +38,7 @@ func TestUIPhoneFocusWiring(t *testing.T) {
 	// desktop focus mode is still wired to the shared helpers.
 	for _, want := range []string{
 		`$("focus-next").onclick = () => focusStep(1);`, `$("modetoggle").onclick`,
-		"await replyAdvance(replied);", "applyQueue(fresh, st.mode === \"focus\")",
+		"await replyAdvance(replied);", "applyQueue(fresh, focusTriage())",
 	} {
 		if !strings.Contains(ui, want) {
 			t.Errorf("desktop focus wiring missing %q", want)
