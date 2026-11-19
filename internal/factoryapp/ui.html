@@ -1969,7 +1969,7 @@ function heldHTML(g, jobs, err) {
   out += "<table><tbody>" + jobs.slice(0, HELD_MAX).map(j => {
     const title = String((j.spec && j.spec.task) || "").split("\n")[0].slice(0, 80);
     return '<tr class="uheldrow" tabindex="0" data-id="' + esc(j.id) + '" title="open job detail"><td>' + esc(j.id) + "</td><td>" + esc(title || "-") +
-      "</td><td>" + (String(j.held_reason || "").indexOf("conflict: ") === 0 ? '<span class="badge" title="waiting on another job\'s files, not on usage">conflict</span> ' : "") + esc(j.held_reason || "-") + "</td><td>" + esc(rel(j.updated_at || j.created_at)) + "</td></tr>";
+      "</td><td>" + (String(j.held_reason || "").indexOf("conflict: ") === 0 ? '<span class="badge" title="waiting on another job\'s files, not on usage">conflict</span> ' : "") + esc(j.held_reason || "-") + (String(j.held_reason || "").indexOf("fable: awaiting") === 0 ? ' <button class="fable-approve" data-id="' + esc(j.id) + '" title="approve this Fable job (cancel_job rejects it)">Approve</button>' : "") + "</td><td>" + esc(rel(j.updated_at || j.created_at)) + "</td></tr>";
   }).join("") + "</tbody></table>" + (jobs.length > HELD_MAX ? "+" + (jobs.length - HELD_MAX) + " more (Jobs tab, state=held)" : "");
   return out;
 }
@@ -1996,6 +1996,16 @@ function renderGate() {
   for (const b of $("u-ctl").querySelectorAll("button.uoff")) b.onclick = () => overrideOff(b.dataset);
   const auto = $("u-ctl").querySelector("button.uauto");
   if (auto) auto.onclick = () => overrideAuto();
+  for (const b of $("u-held").querySelectorAll("button.fable-approve")) {
+    b.onclick = async (ev) => {
+      ev.stopPropagation();
+      if (!window.confirm("Approve Fable job " + b.dataset.id + "? It will then dispatch (subject to the usage throttle).")) return;
+      b.disabled = true;
+      try { await postJSON("/v1/jobs/" + encodeURIComponent(b.dataset.id) + "/approve", {}); }
+      catch (e) { window.alert("approve failed: " + e.message); }
+      loadUsage();
+    };
+  }
   for (const tr of $("u-held").querySelectorAll("tr.uheldrow")) {
     tr.onclick = () => openJob(tr.dataset.id);
     tr.onkeydown = (ev) => { if (ev.key === "Enter") openJob(tr.dataset.id); };

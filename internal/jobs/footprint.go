@@ -333,7 +333,7 @@ func ConflictReason(blocker, glob string) string {
 	return ConflictHoldPrefix + "waits for " + blocker + " (" + glob + ")"
 }
 
-// HeldKind classifies a held_reason: "conflict", "claude_auth" or "usage"
+// HeldKind classifies a held_reason: "conflict", "claude_auth", "fable" or "usage"
 // (everything else the gate produces).
 func HeldKind(reason string) string {
 	switch {
@@ -341,6 +341,8 @@ func HeldKind(reason string) string {
 		return "conflict"
 	case strings.HasPrefix(reason, "claude auth: "):
 		return "claude_auth"
+	case strings.HasPrefix(reason, FableHoldPrefix):
+		return "fable"
 	}
 	return "usage"
 }

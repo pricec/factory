@@ -104,6 +104,8 @@ func Handler(cfg Config) (http.Handler, error) {
 			"an unpinned job that mentions it is rejected (factory_repo_needs_pin). " +
 			"tier: flash (cheapest, default), default (max-think), hardest (strongest); " +
 			"pick the cheapest that works. model: explicit model id overrides tier. " +
+			"model=claude-fable-5-2 (Fable): opt-in, rare; only if the operator asks or a hardest job clearly failed, and ALWAYS ask first. " +
+			"It is created held (fable: awaiting operator approval) until the operator approves; cancel_job rejects it. " +
 			"timeout_s: leave unset for code/build jobs (tier ceiling applies); never <1800 if builds/tests run. " +
 			"touches: REQUIRED on code jobs: narrowest repo-relative path globs it edits (** ok), e.g. [\"internal/jobs/**\"]; " +
 			"[\"*\"] = exclusive. Overlapping jobs run one after another (held: \"conflict: waits for job_X\"). " +

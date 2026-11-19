@@ -51,6 +51,8 @@ type ThrottleConfig struct {
 	ConflictOff bool
 	// ConflictMaxWait bounds a conflict hold (0 = DefaultConflictMaxWait).
 	ConflictMaxWait time.Duration
+	// FableMaxConcurrent caps active approved Fable jobs (fable.go).
+	FableMaxConcurrent int
 }
 
 // LoadThrottleConfig reads FACTORY_THROTTLE ("off"/"0"/"false" disables).
@@ -67,6 +69,7 @@ func LoadThrottleConfig() ThrottleConfig {
 	if d, err := time.ParseDuration(strings.TrimSpace(os.Getenv("FACTORY_CONFLICT_MAX_WAIT"))); err == nil && d > 0 {
 		cfg.ConflictMaxWait = d
 	}
+	cfg.FableMaxConcurrent = LoadFableMaxConcurrent()
 	return cfg
 }
 
@@ -118,6 +121,7 @@ func (a *App) initThrottle(cfg Config) {
 		},
 	})
 	a.conflictOff = cfg.Throttle.ConflictOff
+	a.fableMax = cfg.Throttle.FableMaxConcurrent
 	a.conflictMaxWait = cfg.Throttle.ConflictMaxWait
 	if a.conflictMaxWait <= 0 {
 		a.conflictMaxWait = DefaultConflictMaxWait
@@ -139,6 +143,9 @@ func (a *App) initThrottle(cfg Config) {
 // queues behind already-held jobs of equal or more urgent priority, so a
 // fresh create cannot jump the FIFO while the gate is restricting.
 func (a *App) admitNew(ctx context.Context, spec wire.JobSpec, taskID string) (bool, string) {
+	if hold, reason := a.fableAdmit(ctx, spec, taskID); hold {
+		return true, reason // Fable needs operator approval first
+	}
 	if hold, reason := a.claudeHold(ctx, spec, false); hold {
 		return true, reason // its foreman's Claude CLI is logged out (§13.3)
 	}
@@ -282,6 +289,12 @@ func (a *App) ReleasePass(ctx context.Context) (int, error) {
 	}
 	released := 0
 	for _, j := range held {
+		if hold, reason := a.fableRelease(ctx, j); hold {
+			if err := a.jobs.SetHeldReason(ctx, j.ID, reason); err != nil {
+				return released, fmt.Errorf("refresh held reason %s: %w", j.ID, err)
+			}
+			continue
+		}
 		if hold, reason := a.claudeHold(ctx, j.Spec, true); hold {
 			if err := a.jobs.SetHeldReason(ctx, j.ID, reason); err != nil {
 				return released, fmt.Errorf("refresh held reason %s: %w", j.ID, err)
