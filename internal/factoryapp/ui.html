@@ -129,6 +129,18 @@
   @media (max-width: 900px) { #inbox3 { grid-template-columns: 1fr; height: auto; } #chat { height: 60vh; } }
   .pane { display: flex; flex-direction: column; min-height: 0; background: var(--panel);
     border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
+  /* Planner page: one viewport, no page scroll. nav / status strip / chat;
+     only #chatlog scrolls (inside its own area). */
+  body.t-planner { height: 100vh; height: 100dvh; overflow: hidden; display: flex; flex-direction: column; }
+  body.t-planner main { flex: 1; min-height: 0; padding: 10px 20px; display: flex; flex-direction: column; width: 100%; }
+  body.t-planner #chatview { flex: 1; min-height: 0; display: flex !important; flex-direction: column; }
+  body.t-planner #plstrip { display: flex; align-items: center; gap: 18px; flex: none; padding: 0 4px 8px; flex-wrap: wrap; }
+  body.t-planner #plstrip .urings { margin-right: 4px; }
+  body.t-planner #plstrip .uring { min-height: 32px; }
+  body.t-planner #plstrip .upop { right: auto; left: 0; }
+  body.t-planner #inbox3 { flex: 1; min-height: 0; height: auto; grid-template-rows: minmax(0, 1fr); }
+  body.t-planner #chat { height: auto; }
+  body.t-planner #centerpane { min-height: 0; overflow: hidden; }
   #centerpane { background: none; border: none; padding: 0; }
   .pane h2 { margin: 0 0 8px; font: 11px var(--mono); text-transform: uppercase; letter-spacing: .05em; color: var(--dim); }
   #alerts, #tasklist { overflow-y: auto; flex: 1; }
@@ -224,6 +236,17 @@
     border: 1px solid #1f6feb; color: #fff; border-radius: 6px; padding: 6px 14px;
     cursor: pointer; font: inherit; }
   .result-note { color: var(--ok); font-family: var(--mono); font-size: 12px; margin: 8px 2px; }
+  .obs-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; max-width: 1100px; margin: 0 auto; }
+  .obs-grid > .obs-widget { margin: 0 !important; max-width: none !important; }
+  #settingsview > #credpanel { max-width: 1100px; margin: 0 0 16px; }
+  #settingsview .sethead { margin: 0 0 8px; font: 11px var(--mono); text-transform: uppercase; letter-spacing: .05em; color: var(--dim); }
+  #plstrip { display: none; }
+  body.t-planner header .urings { display: none; } /* the strip carries the chip on the Planner page */
+  .plstat { font: 12px var(--mono); color: var(--dim); }
+  .plstat b { color: var(--text); }
+  .plstat b.badge.PAUSED, .plstat b.badge.RED { color: var(--bad); }
+  .plstat b.badge.ORANGE, .plstat b.badge.YELLOW, .plstat b.badge.OFF { color: var(--warn); }
+  .plstat b.badge.GREEN { color: var(--ok); }
   #usagepanel { max-width: 1100px; margin: 12px auto 0; padding: 10px 20px; background: var(--panel);
     border: 1px solid var(--border); border-radius: 8px; font-size: 12px; }
   #usagepanel .uhead { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; color: var(--dim); font-family: var(--mono); }
@@ -586,32 +609,20 @@
     <button id="tab-jobs">Jobs</button>
     <button id="tab-merges">Merge queue</button>
     <button id="tab-inboxes">Inboxes</button>
+    <button id="tab-observability">Observability</button>
     <button id="tab-settings">Settings</button>
     <button id="to-phone" style="display:none">phone layout</button>
   </nav>
 </header>
-<section id="usagepanel" aria-label="Factory usage">
-  <div class="uhead"><b>Factory usage</b> <span id="u-overall"></span> <span id="u-meta"></span> <span id="u-note" class="unote"></span></div>
-  <div class="upause" id="u-pause" role="alert" style="display:none"></div>
-  <div class="uwins" id="u-wins"></div>
-  <div class="udetail" id="u-spend"></div>
-  <div class="ugate" id="u-gate"></div>
-  <div class="uctl" id="u-ctl"></div>
-  <div class="usec" id="u-held"></div>
-  <div class="usec" id="u-alerts"></div>
-</section>
-<section id="credpanel" aria-label="Credentials">
-  <div class="chead"><b>Credentials</b> <span id="c-note"></span> <span id="c-err" class="cerr"></span></div>
-  <div id="c-list"></div>
-  <form id="c-form" autocomplete="off">
-    <input id="c-name" placeholder="name (a-z0-9-)" required maxlength="64">
-    <input id="c-value" type="password" placeholder="value (write-only)" required autocomplete="new-password">
-    <input id="c-env" placeholder="ENV_VAR (optional)">
-    <button type="submit">save credential</button>
-  </form>
-</section>
 <main>
   <div id="chatview">
+    <div id="plstrip" role="group" aria-label="Planner status">
+      <span class="urings" id="pl-rings" role="group" aria-label="Subscription usage"></span>
+      <span class="plstat" id="pl-gate" title="dispatch throttle"></span>
+      <span class="plstat" id="pl-waiting" title="tasks waiting on you"></span>
+      <span class="plstat" id="pl-alerts" title="open alerts"></span>
+      <span class="plstat" id="pl-held" title="jobs held by the throttle"></span>
+    </div>
     <div id="inbox3">
       <section id="alertpane" class="pane">
         <h2>alerts <span id="alert-count" class="badge"></span></h2>
@@ -717,7 +728,32 @@
     <div id="list"></div>
     <div id="detail" style="display:none"></div>
   </div>
+  <div id="observabilityview" style="display:none">
+    <div id="obs-widgets" class="obs-grid">
+      <section id="usagepanel" class="obs-widget" aria-label="Factory usage">
+        <div class="uhead"><b>Factory usage</b> <span id="u-overall"></span> <span id="u-meta"></span> <span id="u-note" class="unote"></span></div>
+        <div class="upause" id="u-pause" role="alert" style="display:none"></div>
+        <div class="uwins" id="u-wins"></div>
+        <div class="udetail" id="u-spend"></div>
+        <div class="ugate" id="u-gate"></div>
+        <div class="uctl" id="u-ctl"></div>
+        <div class="usec" id="u-held"></div>
+        <div class="usec" id="u-alerts"></div>
+      </section>
+    </div>
+  </div>
   <div id="settingsview" style="display:none">
+  <section id="credpanel" aria-label="Credentials">
+    <div class="chead"><b>Credentials</b> <span id="c-note"></span> <span id="c-err" class="cerr"></span></div>
+    <div id="c-list"></div>
+    <form id="c-form" autocomplete="off">
+      <input id="c-name" placeholder="name (a-z0-9-)" required maxlength="64">
+      <input id="c-value" type="password" placeholder="value (write-only)" required autocomplete="new-password">
+      <input id="c-env" placeholder="ENV_VAR (optional)">
+      <button type="submit">save credential</button>
+    </form>
+  </section>
+    <h2 class="sethead">Role-default models</h2>
     <form class="panel" id="settingsform">
       <div class="toolbar" style="margin-bottom:4px">
         <span>role-default models — pick a model per role (grouped by provider) or leave it at default; custom… for an unlisted id (e.g. a claude-* id, which runs via the Claude Code CLI). planner changes apply to the next planner session; worker &amp; brain changes reach foremen within ~60s. a per-host env override still applies when a role sits at default.</span>
@@ -1073,6 +1109,7 @@ function renderAlerts() {
   const box = $("alerts");
   if (!st.alertsAvailable) { box.innerHTML = '<div class="empty">alerts not available on this factory yet</div>'; return; }
   $("alert-count").textContent = st.alerts.length ? String(st.alerts.length) : "";
+  renderPlannerStrip();
   $("tab-alert-count").textContent = st.alerts.length ? String(st.alerts.length) : "";
   if (!st.alerts.length) { box.innerHTML = '<div class="empty">no open alerts</div>'; return; }
   box.innerHTML = st.alerts.map(a =>
@@ -1164,6 +1201,10 @@ function applyQueue(fresh, focusing) {
     st.selected = st.focusId; st.thread = null;
   }
 }
+// focusTriage: the focus-mode triage queue only drives selection on the Tasks
+// tab. The Planner tab is pinned to the standing chat, so a reply or a queue
+// refresh there must never move the selection to another task.
+function focusTriage() { return st.mode === "focus" && tab === "chat"; }
 // replyAdvance moves focus to the task after the one just replied to
 // (computed from the queue as it was when the reply was sent), then refreshes
 // the queue, which drops the answered task.
@@ -1192,7 +1233,7 @@ window.__queue.applyQueue = applyQueue;
 async function loadQueue() {
   const fresh = await fetchQueue();
   if (!fresh) return;
-  applyQueue(fresh, st.mode === "focus");
+  applyQueue(fresh, focusTriage());
   renderFocusBar();
 }
 
@@ -1226,6 +1267,7 @@ function renderFocusBar() {
   $("focus-controls").style.display = focus ? "" : "none";
   $("focus-prev").disabled = $("focus-next").disabled = n < 2;
   $("focus-skip").disabled = n < 2;
+  renderPlannerStrip();
   $("kbhelp").style.display = st.kbHelp ? "block" : "none";
 }
 
@@ -1458,7 +1500,7 @@ $("chatform").onsubmit = async (ev) => {
     const replied = st.selected;
     await sendText(text, st.tasksAvailable ? st.selected : null);
     $("chat-input").value = ""; fitTextarea($("chat-input"), 140);
-    if (st.tasksAvailable && st.mode === "focus") {
+    if (st.tasksAvailable && focusTriage()) {
       // advance to the next waiting task (computed from the queue as it was
       // when the reply was sent); loadQueue drops the answered one.
       await replyAdvance(replied);
@@ -1900,6 +1942,7 @@ function renderUsage() {
   $("u-wins").innerHTML = usageData ? usageHTML(usageData, Date.now(), usageError) : '<div class="uwin stale">no usage data</div>';
   $("u-spend").textContent = usageData ? usageSpendText(usageData.factory_spend) : "";
   if (isPhone()) pRenderUsage();
+  renderPlannerStrip(); renderRings();
   renderRings();
   renderGate();
 }
@@ -2204,12 +2247,16 @@ $("settingsform").onsubmit = async (ev) => {
 
 /* ---------- tabs & tick ---------- */
 
-const loaders = { planner: loadChat, alerts: loadChat, chat: loadChat, foremen: loadForemen, jobs: loadJobs, merges: loadMerges, inboxes: loadInboxes, settings: loadSettings };
+const loaders = { planner: loadChat, alerts: loadChat, chat: loadChat, foremen: loadForemen, jobs: loadJobs, merges: loadMerges, inboxes: loadInboxes, settings: loadSettings, observability: renderObservability };
+// Observability page: a grid of widgets. To add one, put a section.obs-widget
+// in #obs-widgets and push a render function onto OBS_WIDGETS.
+const OBS_WIDGETS = [renderUsage];
+function renderObservability() { for (const w of OBS_WIDGETS) w(); }
 const CHAT_TABS = ["planner", "chat", "alerts"]; // tabs served by #chatview
 const isChatTab = () => CHAT_TABS.includes(tab);
 function setTab(t) {
   tab = t;
-  for (const id of ["planner", "chat", "alerts", "foremen", "jobs", "merges", "inboxes", "settings"]) {
+  for (const id of ["planner", "chat", "alerts", "foremen", "jobs", "merges", "inboxes", "observability", "settings"]) {
     $("tab-" + id).classList.toggle("active", id === t);
   }
   const chatView = CHAT_TABS.includes(t);
@@ -2220,16 +2267,20 @@ function setTab(t) {
   // triage queue, never from the standing chat left selected by Planner.
   if (t === "planner") { if (st.selected !== STANDING_ID) { st.selected = STANDING_ID; st.thread = null; } }
   else if (chatView && st.selected === STANDING_ID) { st.selected = null; st.thread = null; }
-  $("tableview").style.display = chatView || t === "settings" ? "none" : "block";
+  document.body.classList.toggle("t-planner", t === "planner");
+  $("tableview").style.display = chatView || t === "settings" || t === "observability" ? "none" : "block";
+  $("observabilityview").style.display = t === "observability" ? "block" : "none";
   $("settingsview").style.display = t === "settings" ? "block" : "none";
   $("createpanel").style.display = t === "jobs" ? "block" : "none";
   $("mergepanel").style.display = t === "merges" ? "block" : "none";
   $("state-filter").style.display = t === "jobs" ? "inline" : "none";
   selectedForeman = selectedInbox = selectedJob = null;
   $("detail").style.display = "none";
+  if (t === "observability") loadUsage();
   loaders[t]();
+  renderPlannerStrip();
 }
-for (const id of ["planner", "chat", "alerts", "foremen", "jobs", "merges", "inboxes", "settings"]) {
+for (const id of ["planner", "chat", "alerts", "foremen", "jobs", "merges", "inboxes", "observability", "settings"]) {
   $("tab-" + id).onclick = () => setTab(id);
 }
 $("state-filter").onchange = () => loadJobs();
@@ -2284,7 +2335,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   setInterval(renderUsage, 30000); // keep countdowns moving between polls
   pInit();
   renderRings();
-  setInterval(renderRings, 15000); // tick the countdowns client-side
+  setInterval(renderRings, 15000);
+  setInterval(renderPlannerStrip, 5000); // tick the countdowns client-side
   if (isPhone()) pRoute(); else setTab(tab);
   connectStream();
   // SSE is the fast path; the slow poll is the safety net (and the only path
@@ -2294,7 +2346,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (isPhone()) return;
     // The settings form is never auto-refreshed: a re-render would wipe
     // unsaved picks mid-edit (it reloads on tab switch and after save).
-    if (!isChatTab() && tab !== "settings") loaders[tab]();
+    if (!isChatTab() && tab !== "settings" && tab !== "observability") loaders[tab]();
     $("refreshed").textContent = "refreshed " + new Date().toLocaleTimeString();
   }, 5000);
 });
@@ -2605,7 +2657,7 @@ function renderRings() {
   const now = Date.now();
   const models = USAGE_RING_WINS.map(([k, s, l]) => usageRingModel(usageData && usageData.windows && usageData.windows[k], s, l, now));
   const open = ringOpen;
-  for (const [id, host] of [["p", $("p-rings")], ["d", $("d-rings")]]) {
+  for (const [id, host] of [["p", $("p-rings")], ["d", $("d-rings")], ["l", $("pl-rings")]]) {
     if (!host) continue;
     const html = usageData ? models.map((m, i) => usageRingBtn(m, id + i)).join("") + '<div class="upop" role="dialog" aria-label="Usage details" hidden></div>' : "";
     if (host.dataset.sig !== html) { host.dataset.sig = html; host.innerHTML = html; }
@@ -2620,6 +2672,17 @@ function renderRings() {
   if (usageData && models.some(m => m.left != null && m.left <= 0) && now >= usageRefetchAt) { usageRefetchAt = now + 15000; loadUsage(); }
 }
 let ringOpen = null, usageRefetchAt = 0;
+// renderPlannerStrip paints the critical stats beside the usage chip on the
+// Planner page: dispatch throttle, tasks waiting on the operator, open alerts, held jobs.
+function renderPlannerStrip() {
+  if (!$("plstrip")) return;
+  const g = usageData && usageData.gate;
+  const lvl = !g ? "n/a" : g.paused ? "PAUSED" : g.mode === "off" ? "OFF" : g.level || "UNKNOWN";
+  $("pl-gate").innerHTML = 'throttle <b class="badge ' + esc(lvl) + '">' + esc(lvl) + "</b>";
+  $("pl-waiting").innerHTML = "waiting <b>" + st.queue.length + "</b>";
+  $("pl-alerts").innerHTML = "alerts <b>" + (st.alerts ? st.alerts.length : 0) + "</b>";
+  $("pl-held").innerHTML = "held <b>" + (g && g.held != null ? Number(g.held) : "-") + "</b>";
+}
 document.addEventListener("click", (e) => {
   const t = e.target.closest ? e.target : e.target.parentElement, b = t && t.closest(".uring");
   if (b) ringOpen = ringOpen === b.dataset.ring ? null : b.dataset.ring;
