@@ -191,3 +191,31 @@ func TestEnvEnterprise(t *testing.T) {
 		t.Fatalf("env = %v", got)
 	}
 }
+
+func TestSelectAs(t *testing.T) {
+	gh := &fakeGH{
+		status: status(expAct, "pricec"),
+		tokens: map[string]string{"chris-qunify": "t-cq", "pricec": "t-pc"},
+		perms:  map[string]string{"t-cq": admin, "t-pc": push},
+	}
+	// Org repo, active account qualifies: still only pricec.
+	sel, err := SelectAs(context.Background(), gh, "", "qunify/app", MergeAccount)
+	if err != nil || sel.Account.Login != "pricec" {
+		t.Fatalf("sel=%+v err=%v", sel, err)
+	}
+	for _, c := range gh.calls {
+		if strings.Contains(c, "chris-qunify") || strings.Contains(c, "t-cq") {
+			t.Fatalf("chris-qunify was used: %s", c)
+		}
+	}
+	// pricec cannot push: error, never a fallback to the other account.
+	gh.perms["t-pc"] = pull
+	if _, err := SelectAs(context.Background(), gh, "", "qunify/app", "pricec"); !errors.Is(err, ErrNoAccount) || strings.Contains(err.Error(), "chris-qunify") {
+		t.Fatalf("err=%v", err)
+	}
+	// pricec not logged in.
+	gh.status = status(expAct)
+	if _, err := SelectAs(context.Background(), gh, "", "pricec/factory", "pricec"); !errors.Is(err, ErrNoAccount) {
+		t.Fatalf("err=%v", err)
+	}
+}

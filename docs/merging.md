@@ -68,12 +68,13 @@ $GHAS -login | tee "$EV/gh-account"     # the account every later step acts as
 `cigate` is built the same way and takes the repo from `-repo`, so it gates
 `$REPO`'s own CI runs, whatever their names.
 
-`ghas` (`cmd/ghas`, `internal/ghaccount`) lists the accounts in
-`gh auth status`, tries the repo owner's own account first, then the active
-one, then the rest, and picks the first whose token has push (or maintain/
+`ghas` (`cmd/ghas`, `internal/ghaccount`) acts as the `pricec` gh account
+and no other (`-account` / `FACTORY_GH_ACCOUNT` override it; the host's
+other account, `chris-qunify`, is a separate identity and is never used or
+even queried). It requires that account's token to have push (or maintain/
 admin) permission on `$REPO`. It runs the given command with `GH_TOKEN` set
 to that token; git over https picks it up through gh's credential helper.
-If no account qualifies it exits 3 and names every account it tried and why.
+If `pricec` is not logged in or cannot push it exits 3 and says why; there is no fallback to another account.
 
 Any failure: **STOP** (`preflight: <what failed>`), quoting `ghas`'s
 message when account selection failed.
