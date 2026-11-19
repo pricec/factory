@@ -31,7 +31,7 @@ const uiManifest = `{
   "name": "Factory",
   "short_name": "Factory",
   "description": "Factory operator console",
-  "start_url": "/#/inbox",
+  "start_url": "/#/planner",
   "scope": "/",
   "display": "standalone",
   "background_color": "#0d1117",
