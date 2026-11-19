@@ -177,6 +177,7 @@ func (a *App) runTaskWake(ctx context.Context, taskID string, wakers []wire.Mess
 		log.Printf("factoryapp: planner: priority criteria: %v", err)
 	}
 	w := PlannerWake{
+		Client:   wakeClient(wakers, thread),
 		Reason:   wakeReason(wakers),
 		Task:     t,
 		Criteria: criteria,
@@ -396,16 +397,17 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Text   string `json:"text"`
 		TaskID string `json:"task_id"`
+		Client string `json:"client"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON: "+err.Error())
 		return
 	}
-	a.postChat(w, r, in.Text, in.TaskID)
+	a.postChat(w, r, in.Text, in.TaskID, in.Client)
 }
 
 // postChat is the shared body of POST /v1/chat and POST /v1/tasks.
-func (a *App) postChat(w http.ResponseWriter, r *http.Request, text, taskID string) {
+func (a *App) postChat(w http.ResponseWriter, r *http.Request, text, taskID, client string) {
 	ctx := r.Context()
 	if strings.TrimSpace(text) == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "text: required")
@@ -447,7 +449,11 @@ func (a *App) postChat(w http.ResponseWriter, r *http.Request, text, taskID stri
 		}
 		taskID = t.ID
 	}
-	data, err := json.Marshal(map[string]any{"text": text})
+	body := map[string]any{"text": text}
+	if c := normalizeClient(client); c != "" {
+		body["client"] = c
+	}
+	data, err := json.Marshal(body)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
@@ -482,4 +488,55 @@ func (a *App) knownTask(ctx context.Context, taskID string) string {
 		return ""
 	}
 	return taskID
+}
+
+// Client hints sent with chat messages (spec §9.5.2). Anything else is
+// dropped, so the stored payload and the planner prompt only ever see these.
+const (
+	clientMobile  = "mobile"
+	clientDesktop = "desktop"
+)
+
+// normalizeClient returns the canonical client hint, or "" when absent or
+// unknown (an unknown hint is ignored, never an error).
+func normalizeClient(c string) string {
+	switch c = strings.ToLower(strings.TrimSpace(c)); c {
+	case clientMobile, clientDesktop:
+		return c
+	}
+	return ""
+}
+
+// chatClient is the client hint of a chat.message envelope ("" otherwise).
+func chatClient(env wire.MessageEnvelope) string {
+	if env.Type != "chat.message" {
+		return ""
+	}
+	var p struct {
+		Client string `json:"client"`
+	}
+	if json.Unmarshal(env.Payload, &p) != nil {
+		return ""
+	}
+	return normalizeClient(p.Client)
+}
+
+// wakeClient is the device the operator is on, from the newest chat.message
+// among the wake's triggers, else the newest one in the thread (a job or
+// merge wake still goes to the operator's last known device). "" = unknown.
+func wakeClient(wakers, thread []wire.MessageEnvelope) string {
+	for _, list := range [][]wire.MessageEnvelope{wakers, thread} {
+		for i := len(list) - 1; i >= 0; i-- {
+			if list[i].Type != "chat.message" {
+				continue
+			}
+			if c := chatClient(list[i]); c != "" {
+				return c
+			}
+			if list[i].From == auth.HumanOperatorIdentity {
+				return "" // newest operator message carries no hint
+			}
+		}
+	}
+	return ""
 }

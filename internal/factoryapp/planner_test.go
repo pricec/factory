@@ -227,3 +227,25 @@ func snippetOf(s string, n int) string {
 	}
 	return s
 }
+
+// TestChatClientHint: the client hint is stored on the chat.message payload
+// when valid (normalised), and dropped when unknown.
+func TestChatClientHint(t *testing.T) {
+	e := newEnv(t)
+	for _, tc := range []struct{ in, want string }{
+		{"mobile", "mobile"}, {" Desktop ", "desktop"}, {"toaster", ""}, {"", ""},
+	} {
+		var env wire.MessageEnvelope
+		if status := e.do("POST", "/v1/chat", "", map[string]any{"text": "hi", "client": tc.in}, &env); status != http.StatusCreated {
+			t.Fatalf("client=%q status = %d", tc.in, status)
+		}
+		var p map[string]any
+		if err := json.Unmarshal(env.Payload, &p); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := p["client"].(string)
+		if got != tc.want {
+			t.Errorf("client %q stored as %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

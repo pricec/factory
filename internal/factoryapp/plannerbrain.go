@@ -163,6 +163,26 @@ type PlannerWake struct {
 	// for the standing task).
 	Summary        string
 	SummaryThrough string
+	// Client is the device hint of the operator's newest chat message
+	// ("mobile", "desktop", or "" when unknown).
+	Client string
+}
+
+// mobileGuidance is the prompt section for an operator on a phone.
+const mobileGuidance = `
+=== operator device: MOBILE ===
+The operator is on their phone right now. Keep replies short (a few lines; lead with the answer; no long lists or code blocks).
+Deprioritise asks that need the laptop or the home network (SSH, local checkouts, VPN/LAN-only steps, long reviews): defer them, do not nag, and say briefly that they can wait.
+Critical issues (P0/P1 alerts, outages, failed deploys, security problems, anything blocking the factory) MUST still be surfaced, and say if one needs a laptop.
+`
+
+// deviceSection renders the device hint for the wake prompt ("" unless mobile;
+// desktop and unknown behave as before).
+func deviceSection(client string) string {
+	if client == clientMobile {
+		return mobileGuidance
+	}
+	return ""
 }
 
 // plannerTaskKey carries the woken task id on the session context.
@@ -256,6 +276,7 @@ func buildTaskWakePrompt(w PlannerWake) string {
 		}
 	}
 
+	sb.WriteString(deviceSection(w.Client))
 	sb.WriteString("\n=== operator priority criteria ===\n")
 	if strings.TrimSpace(w.Criteria) == "" {
 		sb.WriteString("(none set; record them with set_priority_criteria when the operator states some)\n")
