@@ -353,3 +353,47 @@ func TestConflictSinceAndHeldKinds(t *testing.T) {
 		t.Fatalf("since after release %q", since)
 	}
 }
+
+func TestActiveFootprintsIgnoresOrphanedMerge(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	spec := wire.NewJobSpec("t", "test")
+	spec.ID = "job_owner"
+	spec.Touches = []string{"a/**"}
+	if err := s.Create(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE jobs SET state = ? WHERE id = ?`, StateDone, spec.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Its merge waits on a branch queued in ANOTHER repo: never runnable.
+	if _, err := s.CreateMergeRequest(ctx, NewMergeRequest{Repo: "other/repo", Branch: "dep", Head: testHead, Note: "n"}); err != nil {
+		t.Fatal(err)
+	}
+	m, err := s.CreateMergeRequest(ctx, NewMergeRequest{Repo: "pricec/video-chat", Branch: "br", Head: testHead, Note: "n", JobID: spec.ID, After: []string{"dep"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ActiveFootprints(ctx)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("orphaned merge still locks: %v %v", got, err)
+	}
+	// Same-repo dependency queued: the lock holds.
+	if _, err := s.CreateMergeRequest(ctx, NewMergeRequest{Repo: "pricec/video-chat", Branch: "dep", Head: testHead, Note: "n"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.ActiveFootprints(ctx)
+	if err != nil || len(got) != 1 || got[0].MergeRequestID != m.ID {
+		t.Fatalf("live merge should lock: %v %v", got, err)
+	}
+}
+
+func TestCheckConflictIgnoresTerminalBlocker(t *testing.T) {
+	for _, st := range []string{StateDead, StateTimedOut, StateCancelled, StateSuperseded} {
+		hard, _ := CheckConflict(Candidate{JobID: "b", Touches: []string{"x/**"}, CreatedAt: "2"},
+			[]Footprint{{JobID: "a", Touches: []string{"x/**"}, CreatedAt: "1", State: st}})
+		if hard != nil {
+			t.Errorf("%s blocker held a candidate", st)
+		}
+	}
+}

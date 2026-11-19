@@ -273,7 +273,7 @@ func CheckConflict(c Candidate, active []Footprint) (hard *Conflict, soft []Conf
 		return nil, nil
 	}
 	for _, f := range active {
-		if f.JobID == c.JobID || len(f.Touches) == 0 || !f.before(c) || !reposMayConflict(c.Repo, f.Repo, c.Touches, f.Touches) {
+		if f.JobID == c.JobID || len(f.Touches) == 0 || (IsTerminalState(f.State) && f.State != StateDone) || !f.before(c) || !reposMayConflict(c.Repo, f.Repo, c.Touches, f.Touches) {
 			continue
 		}
 		cf, ok := overlapBetween(c.Touches, f)
