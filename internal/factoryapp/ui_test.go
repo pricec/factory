@@ -417,13 +417,18 @@ func TestUIPhoneAssets(t *testing.T) {
 				return
 			}
 			var m struct {
-				Display string `json:"display"`
-				Icons   []struct {
+				Display  string `json:"display"`
+				StartURL string `json:"start_url"`
+				Icons    []struct {
 					Src string `json:"src"`
 				} `json:"icons"`
 			}
 			if err := json.Unmarshal(b, &m); err != nil || m.Display != "standalone" || len(m.Icons) != 4 {
 				t.Fatalf("manifest = %s (%v)", b, err)
+			}
+			// Home-screen installs open the standing Planner chat, not the inbox.
+			if m.StartURL != "/#/planner" {
+				t.Fatalf("start_url = %q, want /#/planner", m.StartURL)
 			}
 		})
 	}
