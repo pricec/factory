@@ -592,6 +592,16 @@
   .vbtn.vstop { color: #fff; background: var(--bad); border-color: var(--bad); }
   .vbtn[hidden] { display: none; }
   #p-sheet .p-sheet-btns .mic { width: 48px; height: 48px; min-height: 48px; border-radius: 12px; align-self: auto; }
+  #hf-status { position: fixed; left: 50%; bottom: calc(14px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); z-index: 101;
+    display: inline-flex; align-items: center; gap: 10px; padding: 8px 8px 8px 14px; border-radius: 22px; max-width: 92vw;
+    background: var(--panel); border: 1px solid var(--accent); color: var(--text); font-size: 14px; box-shadow: 0 2px 12px rgba(0,0,0,.4); }
+  #hf-status[hidden] { display: none; }
+  #hf-status .hf-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); flex: none; }
+  #hf-status[data-state="hearing"] { border-color: var(--bad); }
+  #hf-status[data-state="hearing"] .hf-dot { background: var(--bad); animation: micpulse 0.8s ease-in-out infinite; }
+  #hf-status[data-state="sending"] .hf-dot { background: #d29922; animation: micpulse 1.2s ease-in-out infinite; }
+  #hf-status[data-state="speaking"] .hf-dot { background: #3fb950; animation: micpulse 1.2s ease-in-out infinite; }
+  #hf-status .hf-end { min-height: 32px; padding: 0 14px; border-radius: 16px; border: 0; background: var(--bad); color: #fff; font: inherit; font-weight: 600; }
   #voice-toast { position: fixed; left: 50%; bottom: 84px; transform: translateX(-50%); z-index: 100; max-width: 90vw;
     background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 8px 14px; font-size: 13px; }
   #voice-toast.err { border-color: var(--bad); color: var(--bad); }
@@ -3252,6 +3262,77 @@ function pInit() {
   applyLayout();
 }
 </script>
+<script id="voice-turn">
+"use strict";
+/* ---------- FactoryTurn: pure voice-activity turn state machine ----------
+ * No DOM, no audio, no timers, no globals besides window.FactoryTurn, so it is
+ * unit-tested under node (ui_handsfree_test.go extracts this block and runs
+ * it). The hands-free client in #voice-client feeds it one RMS sample per tick:
+ *
+ *   const t = FactoryTurn.create({silenceMs: 1300});
+ *   const events = t.step(rms, nowMs, playing);   // [] or [{type: ...}]
+ *
+ * Event types (in order of occurrence in a turn):
+ *   speech_start {bargeIn}  sustained energy above the threshold; bargeIn is
+ *                           true when the factory itself was speaking (the
+ *                           host must stop TTS at once)
+ *   utterance_end {ms}      silenceMs of quiet after real speech (or the cap)
+ *   blip                    the "speech" was shorter than minSpeechMs: discard
+ * Phases: "listening" | "speech". Threshold = max(minThr, noiseFloor*floorMult),
+ * multiplied by playMult (and needing playOnsetFrames instead of onsetFrames)
+ * while `playing` is true - the fallback for imperfect echo cancellation.
+ * The noise floor adapts only on quiet frames of the listening phase.
+ */
+window.FactoryTurn = (function () {
+  const DEFAULTS = {
+    silenceMs: 1300,        // quiet after speech that ends the utterance (tunable: 1200-1500)
+    minSpeechMs: 300,       // shorter bursts are blips and are ignored
+    onsetFrames: 3,         // consecutive loud frames that start speech
+    playOnsetFrames: 6,     // ... while the factory is speaking
+    minThr: 0.02,           // absolute RMS floor for the threshold
+    floorMult: 3,           // threshold = noise floor x this
+    playMult: 2.5,          // threshold multiplier while TTS plays
+    floorInit: 0.006, floorAlpha: 0.05, floorMax: 0.05,
+    holdRatio: 0.6,         // while in speech, frames above thr*holdRatio count as voice
+    maxUtteranceMs: 60000,  // hard cap: force the utterance to end
+  };
+  function create(cfg) {
+    const c = Object.assign({}, DEFAULTS, cfg);
+    let phase = "listening", floor = c.floorInit, loud = 0, startAt = 0, lastLoud = 0;
+    function threshold(playing) { return Math.max(c.minThr, floor * c.floorMult) * (playing ? c.playMult : 1); }
+    function reset() { phase = "listening"; loud = 0; startAt = 0; lastLoud = 0; }
+    function step(rms, now, playing) {
+      const thr = threshold(playing), out = [];
+      if (phase === "listening") {
+        if (rms > thr) {
+          loud++;
+          if (loud >= (playing ? c.playOnsetFrames : c.onsetFrames)) {
+            phase = "speech"; startAt = now; lastLoud = now; loud = 0;
+            out.push({ type: "speech_start", bargeIn: !!playing });
+          }
+        } else {
+          loud = 0;
+          floor = Math.min(c.floorMax, floor * (1 - c.floorAlpha) + rms * c.floorAlpha);
+        }
+        return out;
+      }
+      if (rms > thr * c.holdRatio) lastLoud = now;
+      if (now - lastLoud > c.silenceMs) {
+        const ms = lastLoud - startAt;
+        reset();
+        out.push(ms < c.minSpeechMs ? { type: "blip" } : { type: "utterance_end", ms });
+      } else if (now - startAt > c.maxUtteranceMs) {
+        const ms = lastLoud - startAt;
+        reset();
+        out.push({ type: "utterance_end", ms });
+      }
+      return out;
+    }
+    return { step, reset, phase: () => phase, pending: () => loud, floor: () => floor, threshold, config: c };
+  }
+  return { create, DEFAULTS };
+})();
+</script>
 <script id="voice-client">
 "use strict";
 /* ---------- FactoryVoice: speech-to-text capture client ----------
@@ -3269,8 +3350,8 @@ function pInit() {
  *   FactoryVoice.spokenFor(payload)          text to read aloud for a brain.reply payload
  *   FactoryVoice.createSpeaker({planUrl, ttsUrl, onState, onError})
  *       -> {unlock(), speak(text), stop(), state()}; tts/plan chunks, prefetch, gapless AudioContext
- *   FactoryVoice.createHandsFree({sttUrl, onState, onUtterance(text), onError})
- *       -> {start(), stop(), pause(), resume(), state()}; energy VAD with hangover -> STT
+ *   FactoryVoice.createHandsFree({sttUrl, onState, onUtterance(text), onError, onSpeechStart, isPlaying})
+ *       -> {start(), stop(), quiet(), state()}; continuous VAD (FactoryTurn) -> STT -> onUtterance
  */
 window.FactoryVoice = (function () {
   const MIMES = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/webm", "audio/mp4", "audio/aac"];
@@ -3501,20 +3582,24 @@ window.FactoryVoice = (function () {
     return { unlock, speak, stop, state: () => state, active: () => state !== "idle" };
   }
 
-  /* ---- hands-free: energy VAD with hangover -> STT -> onUtterance ---- */
-  // createHandsFree({sttUrl, onState(s), onUtterance(text), onError(msg), onLevel(rms)}):
-  //   start() (user gesture)  open the mic and listen
-  //   stop()                  close the mic
-  //   pause()/resume()        suppress / re-arm listening (while TTS plays or a reply is awaited)
-  //   states: off | listening | speech | transcribing | paused
+  /* ---- hands-free: continuous listening loop (FactoryTurn VAD) -> STT -> auto-send ---- */
+  // createHandsFree({sttUrl, onState(s), onUtterance(text) [Promise], onError(msg), onLevel(rms),
+  //                  onSpeechStart(bargeIn), isPlaying() -> bool, silenceMs, ...FactoryTurn cfg}):
+  //   start() (call inside the user's tap)  open the mic ONCE and keep it open across turns
+  //   stop()                                close the mic
+  //   quiet()  true when nobody is speaking and nothing is being recorded/transcribed/sent
+  //   states: off | listening | speech (hearing you) | sending (STT + send in flight)
+  // The mic never pauses: the VAD keeps running while replies are awaited and spoken
+  // (echoCancellation + a raised threshold while isPlaying()), so speech during TTS is a
+  // barge-in the host handles in onSpeechStart. Utterances are transcribed and sent in order.
   function createHandsFree(opts) {
     const o = Object.assign({ sttUrl: "/v1/speech/stt", onState() {}, onUtterance() {}, onError() {}, onLevel() {},
-      hangoverMs: 900, minSpeechMs: 300, onsetFrames: 3, maxUtteranceMs: 60000, rollMs: 3000 }, opts);
-    let state = "off", stream = null, actx = null, an = null, src = null, timer = 0, rec = null, chunks = [];
-    let floor = 0.006, loud = 0, speechAt = 0, lastLoud = 0, recAt = 0, gen = 0, wasPaused = false;
+      onSpeechStart() {}, isPlaying: () => false, rollMs: 3000, minBlobBytes: 1200, tickMs: 50 }, opts);
+    let stream = null, actx = null, an = null, src = null, timer = 0, rec = null, chunks = [];
+    let recAt = 0, gen = 0, inflight = 0, chain = Promise.resolve(), state = "off", turn = null, vis = null;
     const buf = new Float32Array(1024);
-    function set(s) { if (s !== state) { state = s; try { o.onState(s); } catch (_) {} } }
-    function tracks(on) { if (stream) stream.getAudioTracks().forEach((t) => { t.enabled = on; }); }
+    function cur() { return !actx ? "off" : turn.phase() === "speech" ? "speech" : inflight > 0 ? "sending" : "listening"; }
+    function emit() { const s = cur(); if (s !== state) { state = s; try { o.onState(s); } catch (_) {} } }
     function startRec() {
       chunks = []; recAt = Date.now();
       try {
@@ -3524,72 +3609,72 @@ window.FactoryVoice = (function () {
         r.start(250); rec = r;
       } catch (e) { rec = null; o.onError("Recording not supported: " + e.message); }
     }
-    function stopRec() { // resolves with the recorded blob (or null)
+    function takeRec() { // stop the current recorder; resolves with its blob (or null)
       const r = rec; rec = null;
       if (!r || r.state === "inactive") return Promise.resolve(null);
+      const mine = chunks; chunks = [];
       return new Promise((res) => {
-        r.onstop = () => { const parts = chunks; chunks = []; res(parts.length ? new Blob(parts, { type: r.mimeType || parts[0].type || "audio/webm" }) : null); };
+        r.onstop = () => res(mine.length ? new Blob(mine, { type: r.mimeType || mine[0].type || "audio/mp4" }) : null);
         try { r.stop(); } catch (_) { res(null); }
       });
     }
-    function discard() { speechAt = 0; loud = 0; stopRec().then(() => { if (state === "listening") startRec(); }); }
-    async function endUtterance() {
-      const my = gen;
-      set("transcribing");
-      const blob = await stopRec();
-      speechAt = 0; loud = 0;
-      if (my !== gen) return;
-      if (!blob || blob.size < 1200) { arm(); return; }
-      try {
-        const text = await transcribe(blob, o.sttUrl);
-        if (my !== gen) return;
-        if (!text) { arm(); return; }
-        set("paused"); // the host resumes after the reply has been spoken
-        o.onUtterance(text);
-      } catch (e) { if (my === gen) { o.onError(e.message || "Transcription failed"); arm(); } }
+    function discard() { takeRec(); startRec(); }
+    function finishUtterance() {
+      const my = gen, blobP = takeRec();
+      startRec();                       // re-arm at once: the next utterance can start while this one is sent
+      inflight++; emit();
+      chain = chain.then(async () => {
+        try {
+          const blob = await blobP;
+          if (my !== gen || !blob || blob.size < o.minBlobBytes) return;
+          const text = (await transcribe(blob, o.sttUrl)).trim();
+          if (my !== gen || !text) return; // empty / whitespace transcript: nothing to send
+          await o.onUtterance(text);
+        } catch (e) { if (my === gen) o.onError((e && e.message) || "Transcription failed"); }
+        finally { inflight = Math.max(0, inflight - 1); emit(); }
+      });
     }
-    function arm() { if (state === "off") return; tracks(true); set("listening"); if (!rec) startRec(); }
     function tick() {
-      if (!an || state === "off") return;
+      if (!an) return;
+      if (actx.state !== "running" && actx.state !== "closed") actx.resume().catch(() => {});
       an.getFloatTimeDomainData(buf);
       let sum = 0;
       for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
       const rms = Math.sqrt(sum / buf.length), now = Date.now();
       try { o.onLevel(rms); } catch (_) {}
-      if (state !== "listening" && state !== "speech") return;
-      const thr = Math.max(0.02, floor * 3);
-      if (state === "listening") {
-        if (rms > thr) { if (++loud >= o.onsetFrames) { speechAt = now; lastLoud = now; set("speech"); } }
-        else {
-          loud = 0; floor = floor * 0.95 + rms * 0.05;
-          if (rec && now - recAt > o.rollMs) discard(); // keep leading silence short
-        }
-        return;
+      for (const ev of turn.step(rms, now, !!o.isPlaying())) {
+        if (ev.type === "speech_start") { try { o.onSpeechStart(ev.bargeIn); } catch (_) {} }
+        else if (ev.type === "blip") discard();
+        else if (ev.type === "utterance_end") finishUtterance();
       }
-      // state === "speech"
-      if (rms > thr * 0.6) lastLoud = now;
-      const dur = now - speechAt;
-      if (now - lastLoud > o.hangoverMs) {
-        if (lastLoud - speechAt < o.minSpeechMs) { set("listening"); discard(); } else endUtterance();
-      } else if (dur > o.maxUtteranceMs) endUtterance();
+      // keep the leading silence short: restart the idle recorder (never mid-onset)
+      if (turn.phase() === "listening" && turn.pending() === 0 && rec && now - recAt > o.rollMs) discard();
+      emit();
     }
     async function start() {
-      if (state !== "off") return true;
+      if (state !== "off" || actx) return true;
       if (!supported()) { o.onError("Microphone not available (needs HTTPS and a modern browser)"); return false; }
-      const my = ++gen;
+      const my = ++gen, C = audioCtor();
+      // iOS: create + resume the AudioContext synchronously inside the user's tap, BEFORE
+      // the permission await, or it stays suspended and the analyser reads silence.
+      const ctx = new C();
+      if (ctx.state !== "running") ctx.resume().catch(() => {});
+      let s;
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-      } catch (e) { o.onError(micMessage(e), e); return false; }
-      if (my !== gen) { stream.getTracks().forEach((t) => t.stop()); stream = null; return false; }
-      const C = audioCtor();
-      actx = new C();
-      if (actx.state === "suspended") actx.resume().catch(() => {});
+        s = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      } catch (e) { try { ctx.close(); } catch (_) {} o.onError(micMessage(e), e); return false; }
+      if (my !== gen) { s.getTracks().forEach((t) => t.stop()); try { ctx.close(); } catch (_) {} return false; }
+      stream = s; actx = ctx; inflight = 0; chain = Promise.resolve();
+      turn = window.FactoryTurn.create(o);
       src = actx.createMediaStreamSource(stream);
       an = actx.createAnalyser(); an.fftSize = 1024;
       src.connect(an);
-      timer = setInterval(tick, 50);
-      floor = 0.006; loud = 0; speechAt = 0;
-      arm();
+      stream.getAudioTracks().forEach((t) => { t.onended = () => { if (gen === my && actx) { o.onError("Microphone stopped - tap hands-free to restart"); stop(); } }; });
+      vis = () => { if (!document.hidden && actx && actx.state !== "running") actx.resume().catch(() => {}); };
+      document.addEventListener("visibilitychange", vis);
+      startRec();
+      timer = setInterval(tick, o.tickMs);
+      emit();
       return true;
     }
     function stop() {
@@ -3597,21 +3682,14 @@ window.FactoryVoice = (function () {
       clearInterval(timer); timer = 0;
       const r = rec; rec = null; chunks = [];
       if (r && r.state !== "inactive") { r.onstop = null; try { r.stop(); } catch (_) {} }
+      if (vis) { document.removeEventListener("visibilitychange", vis); vis = null; }
       if (src) { try { src.disconnect(); } catch (_) {} src = null; }
       if (actx) { try { actx.close(); } catch (_) {} actx = null; }
-      an = null;
-      if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
-      set("off");
+      an = null; inflight = 0;
+      if (stream) { stream.getTracks().forEach((t) => { t.onended = null; t.stop(); }); stream = null; }
+      emit();
     }
-    function pause() { // suppress the mic (TTS playing / awaiting a reply)
-      if (state === "off") return;
-      gen++; speechAt = 0; loud = 0;
-      const r = rec; rec = null; chunks = [];
-      if (r && r.state !== "inactive") { r.onstop = null; try { r.stop(); } catch (_) {} }
-      tracks(false); set("paused");
-    }
-    function resume() { if (state === "paused") { floor = Math.min(floor, 0.02); arm(); } }
-    return { start, stop, pause, resume, state: () => state, active: () => state !== "off" };
+    return { start, stop, state: () => state, active: () => state !== "off", quiet: () => state === "listening" };
   }
   return { supported, pickMime, fetchEnabled, transcribe, createRecorder, stripMarkdown, spokenFor, createSpeaker, createHandsFree };
 })();
@@ -3720,28 +3798,60 @@ window.FactoryVoice = (function () {
   };
   const voiceOut = (function () {
     const H = () => window.FactoryHost;
-    let speakOn = false, hfOn = false, bar = null, bSpeak = null, bHands = null, bStop = null;
-    let waitTask, waiting = false, waitTimer = 0, seen = new Set(), speaking = false;
+    let speakOn = false, hfOn = false, bar = null, bSpeak = null, bHands = null, bStop = null, pill = null, pillTxt = null;
+    let seen = new Set(), speaking = false, pending = null, awaited = new Set(), awaitAny = false, hfState = "off";
     try { speakOn = localStorage.getItem(LS_SPEAK) === "1"; } catch (_) {}
+
+    // What the operator sees: hearing you > sending > speaking > listening.
+    function status() {
+      if (!hfOn) return "off";
+      if (hfState === "speech") return "hearing";
+      if (hfState === "sending") return "sending";
+      if (speaking) return "speaking";
+      return "listening";
+    }
+    const LABEL = { hearing: "Hearing you…", sending: "Sending…", speaking: "Speaking - talk to interrupt", listening: "Listening" };
+    function render() {
+      const s = status();
+      if (bHands) {
+        bHands.classList.toggle("on", s !== "off");
+        bHands.classList.toggle("recording", s === "hearing");
+        bHands.classList.toggle("transcribing", s === "sending");
+        bHands.setAttribute("aria-pressed", s !== "off" ? "true" : "false");
+        bHands.title = s === "off" ? "Hands-free: just talk, it sends and reads the reply" : "Hands-free: " + LABEL[s].toLowerCase() + " (tap to end)";
+      }
+      if (pill) {
+        pill.hidden = s === "off";
+        pill.dataset.state = s;
+        if (s !== "off") pillTxt.textContent = LABEL[s];
+      }
+    }
+    // Never talk over the operator: speak only when nothing is being said,
+    // recorded, transcribed or sent. Otherwise keep the newest reply queued.
+    function flush() {
+      if (!pending || !speakOn) return;
+      if (hfOn && !hf.quiet()) return;
+      const t = pending; pending = null;
+      speaker.speak(t);
+    }
 
     const speaker = V.createSpeaker({
       onState(s) {
         speaking = s !== "idle";
         if (bStop) bStop.hidden = !speaking;
         if (bSpeak) bSpeak.classList.toggle("playing", s === "playing");
+        render();
       },
       onError(msg) { toast(msg, true); },
     });
     const hf = V.createHandsFree({
+      isPlaying: () => speaker.active(),
+      onSpeechStart() { if (speaker.active()) speaker.stop(); }, // barge-in: stop TTS the instant the operator speaks
       onState(s) {
-        if (!bHands) return;
-        bHands.classList.toggle("on", s !== "off");
-        bHands.classList.toggle("recording", s === "speech");
-        bHands.classList.toggle("transcribing", s === "transcribing");
-        bHands.setAttribute("aria-pressed", s !== "off" ? "true" : "false");
-        bHands.title = s === "off" ? "Hands-free: talk, it sends and reads the reply" :
-          s === "listening" ? "Hands-free: listening - tap to end" : s === "speech" ? "Hands-free: hearing you…" :
-          s === "transcribing" ? "Hands-free: transcribing…" : "Hands-free: waiting for the reply";
+        hfState = s;
+        if (s === "off" && hfOn) { hfOn = false; awaited.clear(); awaitAny = false; speaker.stop(); } // mic died / stopped
+        render();
+        if (s === "listening") flush();
       },
       onUtterance: onUtterance,
       onError(msg) { toast(msg, true); },
@@ -3750,7 +3860,7 @@ window.FactoryVoice = (function () {
     function persist() { try { localStorage.setItem(LS_SPEAK, speakOn ? "1" : "0"); } catch (_) {} }
     function setSpeak(on) {
       speakOn = on; persist();
-      if (!on) { speaker.stop(); if (hfOn) setHands(false); }
+      if (!on) { pending = null; speaker.stop(); if (hfOn) setHands(false); }
       if (bSpeak) { bSpeak.classList.toggle("on", on); bSpeak.setAttribute("aria-pressed", on ? "true" : "false"); bSpeak.title = on ? "Spoken replies on (tap to turn off)" : "Spoken replies off (tap to turn on)"; }
     }
     async function setHands(on) {
@@ -3760,40 +3870,36 @@ window.FactoryVoice = (function () {
         if (!V.supported()) { toast("Microphone not available (needs HTTPS and a modern browser)", true); return; }
         hfOn = true;
         if (!speakOn) setSpeak(true);
-        if (!(await hf.start())) { hfOn = false; return; }
+        render();
+        if (!(await hf.start())) { hfOn = false; render(); return; }
         toast("Hands-free on - just talk");
       } else {
-        hfOn = false; waiting = false; clearTimeout(waitTimer);
+        hfOn = false; awaited.clear(); awaitAny = false; pending = null;
         hf.stop(); speaker.stop(); toast("Hands-free off");
       }
-      if (bHands) bHands.classList.toggle("on", hfOn);
+      render();
     }
-    function resumeListening() { waiting = false; clearTimeout(waitTimer); if (hfOn) hf.resume(); }
 
+    // Auto-send: resolves once the message is posted (the loop re-arms meanwhile).
     async function onUtterance(text) {
-      speaker.stop();
       toast("You: " + (text.length > 80 ? text.slice(0, 79) + "…" : text));
-      waiting = true; waitTask = undefined;
       try {
         const id = await H().send(text);
-        waitTask = id || null;
-      } catch (e) { toast(e.message || "Send failed", true); resumeListening(); return; }
-      clearTimeout(waitTimer);
-      waitTimer = setTimeout(resumeListening, 10 * 60 * 1000); // never wedge hands-free
+        if (id) awaited.add(id); else awaitAny = true;
+      } catch (e) { toast(e.message || "Send failed", true); }
     }
 
     // A NEW brain.reply that arrived live over SSE (never history).
-    async function onEnvelope(env) {
+    function onEnvelope(env) {
       if (!env || env.type !== "brain.reply" || env.internal === true) return;
       if (env.id) { if (seen.has(env.id)) return; seen.add(env.id); if (seen.size > 200) seen.delete(seen.values().next().value); }
       const open = H() ? H().openTaskId() : null;
-      const forWait = hfOn && waiting && waitTask !== undefined && (waitTask === null || env.thread_id === waitTask);
-      if (!(forWait || (speakOn && open && env.thread_id === open))) return;
+      const mine = hfOn && (awaitAny || awaited.has(env.thread_id));
+      if (!(mine || (speakOn && open && env.thread_id === open))) return;
       const payload = typeof env.payload === "string" ? (() => { try { return JSON.parse(env.payload); } catch (_) { return {}; } })() : env.payload;
       const text = V.spokenFor(payload);
-      if (hfOn) hf.pause();
-      if (text && speakOn) { await speaker.speak(text); }
-      if (forWait || hfOn) resumeListening();
+      if (!text || !speakOn) return;
+      pending = text; flush();
     }
     window.addEventListener("factory:envelope", (ev) => { onEnvelope(ev.detail); });
 
@@ -3816,18 +3922,31 @@ window.FactoryVoice = (function () {
       bStop = mkBtn("vstop", ICON.stop, "Stop speaking"); bStop.hidden = true;
       bSpeak.onclick = () => { speaker.unlock(); setSpeak(!speakOn); };
       bHands.onclick = () => { setHands(!hfOn); };
-      bStop.onclick = () => { speaker.stop(); if (hfOn) resumeListening(); };
+      bStop.onclick = () => { speaker.stop(); };
       if (!V.supported()) bHands.hidden = true; // no mic capture: speaker only
       bar.append(bSpeak, bHands, bStop);
+      // Always-visible state pill (the button titles are invisible on a phone);
+      // the red End button is the manual exit.
+      pill = document.createElement("div"); pill.id = "hf-status"; pill.hidden = true; pill.setAttribute("role", "status");
+      const dot = document.createElement("span"); dot.className = "hf-dot";
+      pillTxt = document.createElement("span"); pillTxt.className = "hf-txt";
+      const end = document.createElement("button"); end.type = "button"; end.className = "hf-end"; end.textContent = "End";
+      end.setAttribute("aria-label", "End hands-free"); end.onclick = () => { setHands(false); };
+      pill.append(dot, pillTxt, end);
+      document.body.appendChild(pill);
       setSpeak(speakOn);
       place();
       new MutationObserver(place).observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+      // The phone router rewrites #p-topacts on every navigation (e.g. a hands-free
+      // send opening the new task): put the buttons back.
+      const pt = document.getElementById("p-topacts");
+      if (pt) new MutationObserver(place).observe(pt, { childList: true });
       window.addEventListener("resize", place);
     }
     return {
       build, place,
       stop() { speaker.stop(); },
-      pauseHF() { if (hfOn) { hf.stop(); hfOn = false; waiting = false; if (bHands) bHands.classList.remove("on"); } },
+      pauseHF() { if (hfOn) { hfOn = false; hf.stop(); awaited.clear(); awaitAny = false; pending = null; render(); } },
     };
   })();
 
