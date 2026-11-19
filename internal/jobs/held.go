@@ -204,3 +204,32 @@ func (s *Store) PriorityOverride(ctx context.Context, id string) (int, bool, err
 	}
 	return int(p.Int64), err == nil, err
 }
+
+// FableHoldPrefix starts every Fable-gate held_reason (HeldKind "fable").
+const FableHoldPrefix = "fable: "
+
+// FableAwaitingReason is the held_reason of a Fable job nobody approved.
+const FableAwaitingReason = FableHoldPrefix + "awaiting operator approval"
+
+// ApproveFable records the operator's approval of a held job. applied is
+// false when the job is not held (unknown, cancelled, already released).
+// It does not release the job: the releaser still runs the usage gate.
+func (s *Store) ApproveFable(ctx context.Context, id string) (applied bool, err error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE jobs SET fable_approved = 1 WHERE id = ? AND state = ?`, id, StateHeld)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// FableApproved reports whether the operator approved the job.
+func (s *Store) FableApproved(ctx context.Context, id string) (bool, error) {
+	var v int
+	err := s.db.QueryRowContext(ctx, `SELECT fable_approved FROM jobs WHERE id = ?`, id).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return v != 0, err
+}

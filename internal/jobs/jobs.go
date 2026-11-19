@@ -161,6 +161,11 @@ CREATE INDEX IF NOT EXISTS idx_secret_grants_job ON secret_grants(job_id);
 	if err := addColumnIfMissing(db, "jobs", "priority_override", "INTEGER"); err != nil {
 		return err
 	}
+	// fable_approved: operator approval of a Fable job (models.Fable);
+	// 0/NULL until approved. Approval never bypasses the usage throttle.
+	if err := addColumnIfMissing(db, "jobs", "fable_approved", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	if _, err := db.Exec(mergeDDL); err != nil {
 		return err
 	}

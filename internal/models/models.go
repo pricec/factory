@@ -13,6 +13,8 @@
 // change only).
 package models
 
+import "strings"
+
 // Resolve returns override when set, else fallback: the env-override
 // helper every role wiring uses (spec §6.5).
 func Resolve(override, fallback string) string {
@@ -71,3 +73,16 @@ const (
 	ClaudeWorkerHardest  = "claude-opus-5-5"
 	ClaudeForemanBrain   = "claude-opus-5-5"
 )
+
+// Fable is the Claude Fable 5.2 model id. It is allowed ONLY as an
+// explicit per-job `model` and only behind an operator-approval gate
+// (spec §6.10, Fable gate): no tier, role default or automatic selection
+// (planner, auditor) ever resolves to it, so every constant above must
+// stay different from it (see TestTiersNeverResolveToFable).
+const Fable = "claude-fable-5-2"
+
+// IsFable reports whether model names Fable (bare or with the anthropic/
+// provider prefix) and so needs operator approval before it dispatches.
+func IsFable(model string) bool {
+	return strings.TrimPrefix(model, "anthropic/") == Fable
+}

@@ -108,6 +108,7 @@ type App struct {
 	usagePoll       *usagewin.Poller // nil unless Usage.Poll
 	gate            *throttle.Gate   // S3 dispatch gate (throttle.go)
 	conflictOff     bool             // FACTORY_CONFLICT=off (conflict.go)
+	fableMax        int              // max concurrent Fable jobs (fable.go)
 	conflictMaxWait time.Duration    // bound on one conflict hold (conflict.go)
 	// S5 pause (pause.go): jobs that hit the limit (job id -> true), and
 	// test seams for the re-probe, jitter and wake poll interval.
@@ -507,7 +508,8 @@ func buildMux(a *App, mcpH http.Handler) http.Handler {
 	mux.HandleFunc("POST /v1/claude-auth/check", a.handleClaudeAuthCheck)
 	mux.Handle("/v1/jobs", a.jobs.APIHandler())
 	mux.Handle("/v1/jobs/", a.jobs.APIHandler())
-	mux.HandleFunc("GET /v1/jobs/{id}", a.handleGetJob) // + task_id (§9.5.2)
+	mux.HandleFunc("POST /v1/jobs/{id}/approve", a.handleApproveJob) // Fable gate (fable.go)
+	mux.HandleFunc("GET /v1/jobs/{id}", a.handleGetJob)              // + task_id (§9.5.2)
 	mux.Handle("/v1/foremen", a.jobs.APIHandler())
 	mux.Handle("/v1/schedules", a.jobs.SchedulesHandler())
 	mux.Handle("/v1/schedules/", a.jobs.SchedulesHandler())
