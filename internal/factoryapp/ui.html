@@ -3683,6 +3683,18 @@ window.FactoryVoice = (function () {
   // 24k -> 44.1/48k (iOS Safari's resampler plus the voice-processing session that an open
   // hands-free mic forces made it crackle); the OS converts once, at the output.
   const TTS_RATE = 24000;
+  // nextSlot places a chunk on the output timeline in whole sample frames. The old scheduler
+  // chained float seconds (next += buf.duration), so most starts landed between output frames
+  // and WebKit interpolated each chunk's first sample - and a late chunk was started in the
+  // past, i.e. mid-buffer at an arbitrary offset. Here a chunk that follows on in time starts
+  // exactly on the previous chunk's last frame (gapless, no overlap, no rounding drift); one
+  // that missed its slot (underrun) is re-primed with LEAD seconds of runway instead.
+  const LEAD = 0.06, MIN_RUNWAY = 0.005;
+  function nextSlot(nextFrame, now, rate, frames) {
+    const nowF = Math.ceil((now + MIN_RUNWAY) * rate);
+    const startFrame = nextFrame != null && nextFrame >= nowF ? nextFrame : Math.ceil((now + LEAD) * rate);
+    return { start: startFrame / rate, startFrame, endFrame: startFrame + frames, underrun: nextFrame != null && nextFrame < nowF };
+  }
   function newCtx(C) {
     try { return new C({ sampleRate: TTS_RATE }); } catch (_) { return new C(); }
   }
@@ -3745,15 +3757,16 @@ window.FactoryVoice = (function () {
         const AHEAD = 2, pend = new Array(chunks.length);
         const kick = (i) => { if (i < chunks.length && !pend[i]) { pend[i] = fetchChunk(chunks[i], sig); pend[i].catch(() => {}); } };
         for (let i = 0; i < Math.min(AHEAD, chunks.length); i++) kick(i);
-        let next = 0, lastEnded = null;
+        let nextFrame = null, lastEnded = null;
         for (let i = 0; i < chunks.length; i++) {
           const buf = await pend[i];
           if (my !== gen) return;
           kick(i + AHEAD);
           const src = ctx.createBufferSource();
           src.buffer = buf; src.connect(master);
-          next = Math.max(next, ctx.currentTime + 0.04);
-          src.start(next); next += buf.duration;
+          const rate = ctx.sampleRate || buf.sampleRate;
+          const slot = nextSlot(nextFrame, ctx.currentTime, rate, Math.round(buf.length * rate / buf.sampleRate));
+          src.start(slot.start); nextFrame = slot.endFrame;
           sources.push(src);
           lastEnded = new Promise((res) => { src.onended = res; });
           set("playing");
@@ -3905,7 +3918,7 @@ window.FactoryVoice = (function () {
     }
     return { start, stop, retryFailed, hasFailed: () => failed.length > 0, state: () => state, active: () => state !== "off", quiet: () => state === "listening" };
   }
-  return { supported, pickMime, fetchEnabled, transcribe, transcribeRetry, createRecorder, stripMarkdown, spokenFor, createSpeaker, createHandsFree, fadeEdges };
+  return { supported, pickMime, fetchEnabled, transcribe, transcribeRetry, createRecorder, stripMarkdown, spokenFor, createSpeaker, createHandsFree, fadeEdges, nextSlot };
 })();
 </script>
 <script id="voice-wiring">
