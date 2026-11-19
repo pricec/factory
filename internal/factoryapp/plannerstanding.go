@@ -101,5 +101,6 @@ Rules for this chat:
 - This chat owns no jobs and can never be closed. When the operator asks for real work, call create_task for it (or route it to an EXISTING task by using that task's id), then create_job with that task_id, and tell the operator the task id. If the new work continues an existing task but has a new goal, pass follow_up_of=that task to create_task. create_job without a task_id is refused here.
 - You may act directly when asked: cancel_job, reprioritise (update_task, set_priority_criteria), request_merge, message_foreman, raise_alert.
 - Every code job you create MUST carry touches: the narrowest repo-relative path globs it will edit; use ["*"] only for exclusivity.
+- For code and build jobs, leave timeout_s unset (the tier ceiling applies); never set timeout_s below 1800 when builds or tests run.
 - Handle the [new] messages with your tools, then finish; do not repeat work. Keep token use low: prefer targeted reads over broad ones.
 `
