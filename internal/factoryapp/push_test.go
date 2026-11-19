@@ -2,6 +2,7 @@ package factoryapp_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/base64"
@@ -43,6 +44,20 @@ func newPushEnv(t *testing.T) (*testEnv, *pushRecv, map[string]any) {
 	}))
 	t.Cleanup(svc.Close)
 	e := newEnv(t, func(c *factoryapp.Config) { c.PushHTTPClient = svc.Client(); c.PushAnyHost = true })
+	// Pin the planner brain. Alerts and chat wake it, and an unpinned brain
+	// shells out to a real CLI whose failure posts brain.reply + a P0 alert
+	// (each a legitimate extra push) at an environment-dependent moment -
+	// which made the push counts below flaky on CI. A planner that never
+	// answers keeps the counts about the one thing under test.
+	quiet := make(chan struct{})
+	e.a.SetPlannerExec(func(ctx context.Context, _ string) (string, error) {
+		select {
+		case <-quiet:
+		case <-ctx.Done():
+		}
+		return "", nil
+	})
+	t.Cleanup(func() { close(quiet) })
 	k, _ := ecdh.P256().GenerateKey(rand.Reader)
 	auth := make([]byte, 16)
 	_, _ = rand.Read(auth)
