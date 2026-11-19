@@ -310,7 +310,7 @@
   #phone { display: none; }
   html.phone { --sat: env(safe-area-inset-top, 0px); --sab: env(safe-area-inset-bottom, 0px);
     --sal: env(safe-area-inset-left, 0px); --sar: env(safe-area-inset-right, 0px);
-    --tabh: 56px; --topx: 0px; --kb: 0px; --composer-h: 62px; --fnav-h: 60px; --fbar-h: 48px; -webkit-text-size-adjust: 100%; }
+    --tabh: 56px; --topx: 0px; --kb: 0px; --kbpad: 0px; --composer-h: 62px; --fnav-h: 60px; --fbar-h: 48px; -webkit-text-size-adjust: 100%; }
   html.phone body { font-size: 16px; -webkit-tap-highlight-color: transparent; }
   html.phone body > header, html.phone #usagepanel, html.phone #credpanel, html.phone body > main { display: none !important; }
   html.phone #phone { display: block; overflow-x: clip; min-height: 100vh; min-height: 100dvh; }
@@ -370,8 +370,11 @@
   #p-searchbar input { width: 100%; height: 44px; padding: 0 14px; border-radius: 12px; border: 1px solid var(--border);
     background: var(--panel); color: var(--text); -webkit-appearance: none; appearance: none; }
   #p-body { padding: 4px calc(12px + var(--sar)) calc(var(--tabh) + var(--sab) + 92px) calc(12px + var(--sal)); }
-  html.p-thread #p-body, html.p-fthread.kb-open #p-body { padding-bottom: calc(var(--composer-h) + var(--sab) + var(--kb) + 16px); }
-  html.p-fthread #p-body { padding-bottom: calc(var(--composer-h) + var(--fnav-h) + var(--sab) + var(--kb) + 16px); }
+  /* The message list pads its end by the composer's measured height (--composer-h, written by pLayout only when the composer
+     really resized) plus the keyboard height (--kbpad: written only when the keyboard opens/closes, never on scroll), so the
+     last message always clears the fixed composer. --kb (the live visualViewport offset) only moves fixed things. */
+  html.p-thread #p-body, html.p-fthread.kb-open #p-body { padding-bottom: calc(var(--composer-h) + var(--sab) + var(--kbpad) + 16px); }
+  html.p-fthread #p-body { padding-bottom: calc(var(--composer-h) + var(--fnav-h) + var(--sab) + var(--kbpad) + 16px); }
   /* focus mode (phone): focus/list switch + "N waiting" under the top bar, prev/skip/next above the composer */
   #p-fbar { display: none; position: sticky; top: calc(52px + var(--sat) + var(--topx)); z-index: 19; align-items: center; gap: 10px;
     min-height: var(--fbar-h); padding: 4px calc(12px + var(--sar)) 4px calc(12px + var(--sal));
@@ -514,7 +517,7 @@
   html.p-planner #p-composer { display: flex; bottom: calc(var(--tabh) + var(--sab)); }
   html.p-planner.kb-open #p-composer { bottom: 0; }
   html.p-planner #p-body { padding-bottom: calc(var(--tabh) + var(--sab) + var(--composer-h) + 16px); }
-  html.p-planner.kb-open #p-body { padding-bottom: calc(var(--composer-h) + var(--sab) + var(--kb) + 16px); }
+  html.p-planner.kb-open #p-body { padding-bottom: calc(var(--composer-h) + var(--sab) + var(--kbpad) + 16px); }
   html.p-planner #p-fab { display: none; }
   html.p-planner #p-toast { bottom: calc(var(--tabh) + var(--sab) + var(--composer-h) + 16px); }
   html.p-planner #p-top h1 { font-size: 16px; font-weight: 600; }
@@ -3197,19 +3200,60 @@ function pSwipeInit(root) {
   root.addEventListener("touchcancel", end);
 }
 
-/* ----- keyboard: keep the composer / sheet above the iOS keyboard ----- */
-function pViewport() {
+/* ----- keyboard + composer: keep the composer / sheet above the iOS keyboard and the last message above the composer -----
+   Loop-safe by construction (PR #97 made iOS flash with a measure -> pad -> scroll -> measure cycle):
+   - all work runs in pLayout, coalesced to at most one pending requestAnimationFrame;
+   - every write is skipped unless the value moved by more than 1px from the last one applied;
+   - the list padding depends only on the composer's height and the keyboard height (innerHeight - vv.height), never on
+     the scroll position or vv.offsetTop, so scrolling/panning can at most move the composer (--kb transform), never re-pad;
+   - pLayout scrolls only when the padding just changed AND the reader was already at the bottom. */
+const pLay = { queued: false, kb: null, kbpad: null, ch: null };
+const pKbOpen = () => P_ROOT.classList.contains("kb-open");
+const pChatRoute = () => P.r.name === "planner" || P.r.name === "task" || pFocusing();
+const pNearBottom = () => document.documentElement.scrollHeight - window.innerHeight - window.scrollY <= 80;
+function pVV() {
   const vv = window.visualViewport;
-  if (!vv) return;
-  const kb = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
-  P_ROOT.style.setProperty("--kb", kb + "px");
-  P_ROOT.classList.toggle("kb-open", kb > 60);
+  if (!vv) return null;
+  const kbh = Math.max(0, Math.round(window.innerHeight - vv.height * (vv.scale || 1))); // keyboard height: changes on vv resize only
+  return { kb: Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop)), open: kbh > 60, kbh };
+}
+const pMoved = (a, b) => a === null || Math.abs(a - b) > 1;
+function pSetPx(name, key, v) {
+  if (!pMoved(pLay[key], v)) return false;
+  pLay[key] = v;
+  P_ROOT.style.setProperty(name, v + "px");
+  return true;
+}
+function pLayoutSoon() {
+  if (pLay.queued) return;
+  pLay.queued = true;
+  requestAnimationFrame(pLayout);
+}
+// visualViewport resize/scroll (iOS fires these continuously): read the vv numbers only, schedule work only if they changed
+function pViewport() {
+  const v = pVV();
+  if (v && (pMoved(pLay.kb, v.kb) || v.open !== pKbOpen() || pMoved(pLay.kbpad, v.open ? v.kbh : 0))) pLayoutSoon();
+}
+function pLayout() {
+  pLay.queued = false;
+  if (!isPhone()) return;
+  const stick = pNearBottom(); // read before any write
+  let pad = false;
+  const v = pVV();
+  if (v) {
+    pSetPx("--kb", "kb", v.kb);
+    if (v.open !== pKbOpen()) { P_ROOT.classList.toggle("kb-open", v.open); pad = true; }
+    if (pSetPx("--kbpad", "kbpad", v.open ? v.kbh : 0)) pad = true;
+  }
+  const h = $("p-composer").offsetHeight; // 0 while hidden: keep the last value
+  if (h && pSetPx("--composer-h", "ch", h)) pad = true;
+  if (pad && stick && pChatRoute()) window.scrollTo(0, document.documentElement.scrollHeight);
 }
 function pAutosize() {
   const ta = $("p-input");
   ta.style.height = "auto";
   ta.style.height = Math.min(ta.scrollHeight + 2, window.innerHeight * 0.4) + "px";
-  P_ROOT.style.setProperty("--composer-h", $("p-composer").offsetHeight + "px");
+  pLayoutSoon();
 }
 
 function pInit() {
@@ -3221,7 +3265,11 @@ function pInit() {
   window.addEventListener("popstate", () => { if (isPhone()) pRoute(); });
   window.addEventListener("hashchange", () => { if (isPhone() && (P.r.name !== pParse().name || P.r.arg !== pParse().arg)) pRoute(); });
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && isPhone()) { P.threadSig = ""; pLoad(); } });
-  if (window.visualViewport) { visualViewport.addEventListener("resize", pViewport); visualViewport.addEventListener("scroll", pViewport); }
+  if (window.visualViewport) { visualViewport.addEventListener("resize", pViewport); visualViewport.addEventListener("scroll", pViewport, { passive: true }); }
+  window.addEventListener("resize", pLayoutSoon);
+  // the composer's real height (textarea growth, safe-area, kb-open padding, display toggles) -> --composer-h; writes
+  // in pLayout never change the composer's own size, so this cannot re-trigger itself
+  if (window.ResizeObserver) new ResizeObserver(pLayoutSoon).observe($("p-composer"));
 
   const phone = $("phone");
   phone.addEventListener("click", (ev) => {
@@ -3259,7 +3307,8 @@ function pInit() {
   const ta = $("p-input");
   ta.addEventListener("input", pAutosize);
   // no Enter-to-send here: on the phone Enter is a newline, #p-send submits.
-  ta.addEventListener("focus", () => { setTimeout(() => { pViewport(); pScrollBottom(); }, 350); });
+  // keyboard opening: follow to the bottom only if the reader was already there
+  ta.addEventListener("focus", () => { const stick = pNearBottom(); setTimeout(() => { pLayoutSoon(); if (stick && pChatRoute()) pScrollBottom(); }, 350); });
   $("p-composer").onsubmit = async (ev) => {
     ev.preventDefault();
     const text = ta.value.trim();
@@ -3288,7 +3337,6 @@ function pInit() {
     finally { $("p-send").disabled = false; }
   };
   pAutosize();
-  pViewport();
   applyLayout();
 }
 </script>
