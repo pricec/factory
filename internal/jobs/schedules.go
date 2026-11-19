@@ -39,8 +39,21 @@ CREATE TABLE IF NOT EXISTS schedule_runs (
 	PRIMARY KEY (schedule_id, run_at)
 );
 `
-	_, err := db.Exec(ddl)
-	return err
+	if _, err := db.Exec(ddl); err != nil {
+		return err
+	}
+	// task_id (added later): the task the schedule was created under; every
+	// fired job is linked to it. Idempotent column add for existing DBs.
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('schedules') WHERE name = 'task_id'`).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		if _, err := db.Exec(`ALTER TABLE schedules ADD COLUMN task_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ErrScheduleNotFound is returned by DeleteSchedule and SetScheduleEnabled
@@ -64,6 +77,9 @@ type Schedule struct {
 	CronSpec    string       `json:"cron_spec"`
 	JobTemplate wire.JobSpec `json:"job_template"`
 	Enabled     bool         `json:"enabled"`
+	// TaskID is the task every fired job is linked to (and admitted under,
+	// so a P0 task's runs bypass the usage throttle). Empty = unlinked.
+	TaskID string `json:"task_id,omitempty"`
 	// LastRunAt is the fire-time anchor: seeded with the schedule's
 	// creation time (the pinned schema has no created_at column) and
 	// advanced to each fire time, so the next fire is always the first
@@ -78,6 +94,12 @@ func newScheduleID() string { return "sched_" + ulid.Make().String() }
 // optional), then stores the schedule enabled (spec §6.8). Errors of type
 // errBadSchedule are 400-level.
 func (s *Store) CreateSchedule(ctx context.Context, cronSpec string, template wire.JobSpec) (Schedule, error) {
+	return s.CreateScheduleForTask(ctx, cronSpec, template, "")
+}
+
+// CreateScheduleForTask is CreateSchedule with the originating task: each
+// fired job is linked to taskID before dispatch and admitted under it.
+func (s *Store) CreateScheduleForTask(ctx context.Context, cronSpec string, template wire.JobSpec, taskID string) (Schedule, error) {
 	if _, err := cron.ParseStandard(cronSpec); err != nil {
 		return Schedule{}, badSchedule("cron_spec: %v", err)
 	}
@@ -92,6 +114,7 @@ func (s *Store) CreateSchedule(ctx context.Context, cronSpec string, template wi
 		CronSpec:    cronSpec,
 		JobTemplate: template,
 		Enabled:     true,
+		TaskID:      taskID,
 		LastRunAt:   s.now(),
 	}
 	tmplJSON, err := json.Marshal(sch.JobTemplate)
@@ -99,8 +122,8 @@ func (s *Store) CreateSchedule(ctx context.Context, cronSpec string, template wi
 		return Schedule{}, err
 	}
 	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO schedules (id, cron_spec, job_template, enabled, last_run_at) VALUES (?, ?, ?, 1, ?)`,
-		sch.ID, sch.CronSpec, string(tmplJSON), sch.LastRunAt); err != nil {
+		`INSERT INTO schedules (id, cron_spec, job_template, enabled, last_run_at, task_id) VALUES (?, ?, ?, 1, ?, ?)`,
+		sch.ID, sch.CronSpec, string(tmplJSON), sch.LastRunAt, sch.TaskID); err != nil {
 		return Schedule{}, err
 	}
 	return sch, nil
@@ -112,7 +135,7 @@ func (s *Store) Schedules(ctx context.Context) ([]Schedule, error) {
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, cron_spec, job_template, enabled, IFNULL(last_run_at, '') FROM schedules ORDER BY id`)
+		`SELECT id, cron_spec, job_template, enabled, IFNULL(last_run_at, ''), IFNULL(task_id, '') FROM schedules ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +145,7 @@ func (s *Store) Schedules(ctx context.Context) ([]Schedule, error) {
 		var sch Schedule
 		var tmplJSON string
 		var enabled int
-		if err := rows.Scan(&sch.ID, &sch.CronSpec, &tmplJSON, &enabled, &sch.LastRunAt); err != nil {
+		if err := rows.Scan(&sch.ID, &sch.CronSpec, &tmplJSON, &enabled, &sch.LastRunAt, &sch.TaskID); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(tmplJSON), &sch.JobTemplate); err != nil {
@@ -208,6 +231,10 @@ type Scheduler struct {
 	// factory auditor writes its fire-time snapshot into the payload,
 	// spec §6.12). An error is logged and the template job runs as is.
 	Prepare func(ctx context.Context, sch Schedule, spec *wire.JobSpec) error
+	// LinkTask, if set, links a fired job to the schedule's task before
+	// dispatch (so its report resolves to the task and wakes the planner).
+	// An error is logged; the job still runs.
+	LinkTask func(ctx context.Context, taskID, jobID string) error
 }
 
 // NewScheduler creates a scheduler over store dispatching via matcher.
@@ -288,11 +315,12 @@ func (s *Scheduler) Pump(ctx context.Context) (int, error) {
 		}
 		// Dispatch gate (S3 token throttle): a held scheduled job waits in
 		// the held queue for the releaser instead of dispatching now.
-		if hold, reason := s.store.Admit(ctx, spec, ""); hold {
+		if hold, reason := s.store.Admit(ctx, spec, sch.TaskID); hold {
 			if err := s.store.CreateHeld(ctx, spec, reason); err != nil {
 				return enqueued, err
 			}
 			enqueued++
+			s.link(ctx, sch, spec.ID)
 			log.Printf("scheduler: job %s held: %s", spec.ID, reason)
 			if _, err := s.store.db.ExecContext(ctx,
 				`UPDATE schedules SET last_run_at = ? WHERE id = ?`, runAt, sch.ID); err != nil {
@@ -304,6 +332,7 @@ func (s *Scheduler) Pump(ctx context.Context) (int, error) {
 			return enqueued, err
 		}
 		enqueued++
+		s.link(ctx, sch, spec.ID)
 		// A pinned template job bypasses the Matcher (spec §6.7 foreman
 		// pin): it dispatches when the pinned foreman is online, else
 		// pends for the pending picker. The pin rides the template, so
@@ -448,4 +477,14 @@ func writeScheduleError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeError(w, http.StatusInternalServerError, "internal", err.Error(), true)
+}
+
+// link attaches a fired job to the schedule's task, if any.
+func (s *Scheduler) link(ctx context.Context, sch Schedule, jobID string) {
+	if sch.TaskID == "" || s.LinkTask == nil {
+		return
+	}
+	if err := s.LinkTask(ctx, sch.TaskID, jobID); err != nil {
+		log.Printf("scheduler: schedule %s: link job %s to task %s: %v", sch.ID, jobID, sch.TaskID, err)
+	}
 }

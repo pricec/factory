@@ -680,3 +680,40 @@ func TestSchedulerPinnedTemplate(t *testing.T) {
 		t.Errorf("matcher calls = %d, want 0 on the offline pin too", m.calls)
 	}
 }
+
+// A schedule created under a task links every fired job to it and admits
+// the job under that task id (so a P0 task's runs bypass the throttle).
+func TestSchedulerLinksAndAdmitsUnderTask(t *testing.T) {
+	s := schedStore(t)
+	now := schedClock()
+	s.Now = func() time.Time { return *now }
+	var admitTask string
+	s.SetAdmission(func(_ context.Context, _ wire.JobSpec, taskID string) (bool, string) {
+		admitTask = taskID
+		return false, ""
+	})
+	if _, err := s.CreateScheduleForTask(context.Background(), "0 12 * * *", schedTemplate(nil), "task_X"); err != nil {
+		t.Fatal(err)
+	}
+	var linkedTask, linkedJob string
+	sched := NewScheduler(s, &schedMatcher{})
+	sched.LinkTask = func(_ context.Context, taskID, jobID string) error {
+		linkedTask, linkedJob = taskID, jobID
+		return nil
+	}
+	*now = now.Add(25 * time.Hour)
+	n, err := sched.Pump(context.Background())
+	if err != nil || n != 1 {
+		t.Fatalf("pump = %d, %v", n, err)
+	}
+	if linkedTask != "task_X" || linkedJob == "" {
+		t.Fatalf("link = %q/%q, want task_X and a job id", linkedTask, linkedJob)
+	}
+	if admitTask != "task_X" {
+		t.Fatalf("admitted under task %q, want task_X", admitTask)
+	}
+	list, _ := s.Schedules(context.Background())
+	if len(list) != 1 || list[0].TaskID != "task_X" {
+		t.Fatalf("schedules = %+v", list)
+	}
+}

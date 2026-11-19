@@ -175,7 +175,7 @@ func (a *App) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	if in.ScheduleCron != "" {
 		template := spec
 		template.ID, template.CreatedAt = "", ""
-		if _, err := a.jobs.CreateSchedule(r.Context(), in.ScheduleCron, template); err != nil {
+		if _, err := a.jobs.CreateScheduleForTask(r.Context(), in.ScheduleCron, template, in.TaskID); err != nil {
 			writeError(w, http.StatusInternalServerError, "internal", "create schedule: "+err.Error())
 			return
 		}
