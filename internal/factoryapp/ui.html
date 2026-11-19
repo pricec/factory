@@ -3760,11 +3760,14 @@ window.FactoryVoice = (function () {
     function cur() { return !actx ? "off" : turn.phase() === "speech" ? "speech" : inflight > 0 ? "sending" : "listening"; }
     function emit() { const s = cur(); if (s !== state) { state = s; try { o.onState(s); } catch (_) {} } }
     function startRec() {
-      chunks = []; recAt = Date.now();
+      // Each recorder owns its chunk array: stop() fires one last dataavailable AFTER takeRec() has
+      // swapped in a fresh array, and that tail must not leak into the next recorder's blob (a blob
+      // starting with an orphan fragment has no container header -> server 400 "could not decode audio").
+      const mine = chunks = []; recAt = Date.now();
       try {
         const mime = pickMime();
         const r = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
-        r.ondataavailable = (ev) => { if (ev.data && ev.data.size) chunks.push(ev.data); };
+        r.ondataavailable = (ev) => { if (ev.data && ev.data.size) mine.push(ev.data); };
         r.start(250); rec = r;
       } catch (e) { rec = null; o.onError("Recording not supported: " + e.message); }
     }
