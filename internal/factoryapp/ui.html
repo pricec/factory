@@ -119,6 +119,13 @@
   .task .needs { color: var(--warn); font: 700 10px var(--mono); margin-left: 6px; }
   #focus-empty { text-align: center; padding: 60px 16px; }
   #focus-empty .big { font-size: 20px; color: var(--ok); margin-bottom: 6px; font-style: normal; }
+  /* desktop views over the shared #chatview: Planner (default), Tasks, Alerts */
+  #inbox3.v-planner, #inbox3.v-alerts { grid-template-columns: minmax(0, 1fr); }
+  #inbox3.v-tasks { grid-template-columns: minmax(0, 1fr) 300px; }
+  #inbox3.v-tasks.tp-collapsed { grid-template-columns: minmax(0, 1fr) 44px; }
+  #inbox3.v-planner #alertpane, #inbox3.v-planner #taskpane, #inbox3.v-planner #newtaskform, #inbox3.v-planner #focusbar,
+  #inbox3.v-planner #kbhelp { display: none; }
+  #inbox3.v-alerts #centerpane, #inbox3.v-alerts #taskpane, #inbox3.v-tasks #alertpane { display: none; }
   @media (max-width: 900px) { #inbox3 { grid-template-columns: 1fr; height: auto; } #chat { height: 60vh; } }
   .pane { display: flex; flex-direction: column; min-height: 0; background: var(--panel);
     border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
@@ -446,6 +453,14 @@
   #p-tabs .cnt { position: absolute; top: 5px; left: calc(50% + 5px); min-width: 19px; height: 19px; padding: 0 5px;
     border-radius: 10px; background: var(--bad); color: #fff; font: 700 12px/19px -apple-system, sans-serif; }
   html.p-thread #p-tabs, html.p-thread #p-fab, html.kb-open #p-fab, html.kb-open #p-tabs { display: none; }
+  /* Planner tab: the standing chat is a tab, not a pushed thread - tab bar stays, composer sits above it */
+  html.p-planner #p-composer { display: flex; bottom: calc(var(--tabh) + var(--sab)); }
+  html.p-planner.kb-open #p-composer { bottom: 0; }
+  html.p-planner #p-body { padding-bottom: calc(var(--tabh) + var(--sab) + var(--composer-h) + 16px); }
+  html.p-planner.kb-open #p-body { padding-bottom: calc(var(--composer-h) + var(--sab) + var(--kb) + 16px); }
+  html.p-planner #p-fab { display: none; }
+  html.p-planner #p-toast { bottom: calc(var(--tabh) + var(--sab) + var(--composer-h) + 16px); }
+  html.p-planner #p-top h1 { font-size: 16px; font-weight: 600; }
   #p-fab { position: fixed; right: calc(16px + var(--sar)); bottom: calc(var(--tabh) + var(--sab) + 16px); z-index: 25;
     display: none; align-items: center; justify-content: center; width: 58px; height: 58px; padding: 0; border: 0;
     border-radius: 29px; background: #1f6feb; color: #fff; box-shadow: 0 8px 24px rgba(0,0,0,.55); }
@@ -546,7 +561,9 @@
 <header>
   <h1><span class="prompt">factory</span> : <span id="adv">-</span></h1>
   <nav>
-    <button id="tab-chat" class="active">Tasks</button>
+    <button id="tab-planner" class="active">Planner</button>
+    <button id="tab-chat">Tasks</button>
+    <button id="tab-alerts">Alerts <span id="tab-alert-count" class="badge"></span></button>
     <button id="tab-foremen">Foremen</button>
     <button id="tab-jobs">Jobs</button>
     <button id="tab-merges">Merge queue</button>
@@ -720,7 +737,9 @@
   </form>
   <button id="p-fab" aria-label="New task"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span id="p-fab-label">New task</span></button>
   <nav id="p-tabs">
-    <button data-tab="inbox"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/></svg><span>Inbox</span><b class="cnt" id="p-cnt" style="display:none"></b></button>
+    <button data-tab="planner"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg><span>Planner</span></button>
+    <button data-tab="inbox"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/></svg><span>Tasks</span><b class="cnt" id="p-cnt" style="display:none"></b></button>
+    <button data-tab="alerts"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 01-3.4 0"/></svg><span>Alerts</span><b class="cnt" id="p-cnt-alerts" style="display:none"></b></button>
     <button data-tab="jobs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v16"/></svg><span>Jobs</span></button>
     <button data-tab="foremen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><path d="M6 7h.01M6 17h.01"/></svg><span>Foremen</span></button>
     <button data-tab="more"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg><span>More</span></button>
@@ -732,7 +751,7 @@
 <script>
 "use strict";
 let selectedForeman = null, selectedInbox = null, selectedJob = null;
-let tab = "chat";
+let tab = "planner";
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -766,7 +785,7 @@ document.addEventListener("selectionchange", () => {
   refreshSoon();
 });
 function refreshSoon() {
-  setTimeout(() => { if (isPhone()) { P.threadSig = ""; pLoad(); } else if (tab === "chat") loadChat(); else loaders[tab](); }, 50);
+  setTimeout(() => { if (isPhone()) { P.threadSig = ""; pLoad(); } else if (isChatTab()) loadChat(); else loaders[tab](); }, 50);
 }
 
 // copyText copies raw text. navigator.clipboard only exists in secure
@@ -1035,6 +1054,7 @@ function renderAlerts() {
   const box = $("alerts");
   if (!st.alertsAvailable) { box.innerHTML = '<div class="empty">alerts not available on this factory yet</div>'; return; }
   $("alert-count").textContent = st.alerts.length ? String(st.alerts.length) : "";
+  $("tab-alert-count").textContent = st.alerts.length ? String(st.alerts.length) : "";
   if (!st.alerts.length) { box.innerHTML = '<div class="empty">no open alerts</div>'; return; }
   box.innerHTML = st.alerts.map(a =>
     '<div class="alert" data-id="' + esc(a.id) + '">' +
@@ -1260,7 +1280,7 @@ function renderThread() {
   const head = $("threadhead");
   if (!st.tasksAvailable) return;
   $("chatform").style.display = "";
-  if (!st.thread && st.mode === "focus" && !st.focusId) {
+  if (!st.thread && st.mode === "focus" && !st.focusId && !st.selected) {
     head.style.display = "none";
     log.innerHTML = '<div id="focus-empty" class="empty"><div class="big">Nothing needs your input</div>' +
       "all caught up - tasks that need a reply will appear here</div>";
@@ -1385,11 +1405,12 @@ async function sendText(text, taskID) {
   sending = true;
   try {
     // POST /v1/tasks is the "new task" alias; fall back to /v1/chat if absent.
+    const client = isPhone() ? "mobile" : "desktop"; // device hint for the planner (spec §9.5.2)
     if (!taskID && st.tasksAvailable) {
-      try { return await postJ("/v1/tasks", { text }); }
+      try { return await postJ("/v1/tasks", { text, client }); }
       catch (e) { if (e.status !== 404 && e.status !== 405) throw e; }
     }
-    return await postJ("/v1/chat", taskID ? { text, task_id: taskID } : { text });
+    return await postJ("/v1/chat", taskID ? { text, task_id: taskID, client } : { text, client });
   } finally { sending = false; }
 }
 
@@ -1493,7 +1514,7 @@ function scheduleRefresh() {
   if (refreshTimer) return;
   refreshTimer = setTimeout(() => {
     refreshTimer = null;
-    if (isPhone()) pLoad(); else if (tab === "chat") loadChat();
+    if (isPhone()) pLoad(); else if (isChatTab()) loadChat();
   }, 300);
 }
 function connectStream() {
@@ -1514,7 +1535,7 @@ function connectStream() {
 window.FactoryHost = {
   // The task thread currently on screen (phone route or desktop selection), or null.
   openTaskId() {
-    if (isPhone()) return P.r.name === "task" ? P.r.arg : null;
+    if (isPhone()) return P.r.name === "planner" ? STANDING_ID : P.r.name === "task" ? P.r.arg : null;
     return st.tasksAvailable ? st.selected : null;
   },
   // Hands-free send: reply on the open task, else start a new task and open
@@ -2138,15 +2159,23 @@ $("settingsform").onsubmit = async (ev) => {
 
 /* ---------- tabs & tick ---------- */
 
-const loaders = { chat: loadChat, foremen: loadForemen, jobs: loadJobs, merges: loadMerges, inboxes: loadInboxes, settings: loadSettings };
+const loaders = { planner: loadChat, alerts: loadChat, chat: loadChat, foremen: loadForemen, jobs: loadJobs, merges: loadMerges, inboxes: loadInboxes, settings: loadSettings };
+const CHAT_TABS = ["planner", "chat", "alerts"]; // tabs served by #chatview
+const isChatTab = () => CHAT_TABS.includes(tab);
 function setTab(t) {
   tab = t;
-  for (const id of ["chat", "foremen", "jobs", "merges", "inboxes", "settings"]) {
+  for (const id of ["planner", "chat", "alerts", "foremen", "jobs", "merges", "inboxes", "settings"]) {
     $("tab-" + id).classList.toggle("active", id === t);
   }
-  $("chatview").style.display = t === "chat" ? "block" : "none";
-  document.querySelector("main").classList.toggle("wide", t === "chat");
-  $("tableview").style.display = t === "chat" || t === "settings" ? "none" : "block";
+  const chatView = CHAT_TABS.includes(t);
+  $("chatview").style.display = chatView ? "block" : "none";
+  document.querySelector("main").classList.toggle("wide", chatView);
+  for (const [k, v] of [["planner", "v-planner"], ["chat", "v-tasks"], ["alerts", "v-alerts"]]) $("inbox3").classList.toggle(v, t === k);
+  // The Planner tab is the standing chat; the Tasks tab starts from the
+  // triage queue, never from the standing chat left selected by Planner.
+  if (t === "planner") { if (st.selected !== STANDING_ID) { st.selected = STANDING_ID; st.thread = null; } }
+  else if (chatView && st.selected === STANDING_ID) { st.selected = null; st.thread = null; }
+  $("tableview").style.display = chatView || t === "settings" ? "none" : "block";
   $("settingsview").style.display = t === "settings" ? "block" : "none";
   $("createpanel").style.display = t === "jobs" ? "block" : "none";
   $("mergepanel").style.display = t === "merges" ? "block" : "none";
@@ -2155,7 +2184,7 @@ function setTab(t) {
   $("detail").style.display = "none";
   loaders[t]();
 }
-for (const id of ["chat", "foremen", "jobs", "merges", "inboxes", "settings"]) {
+for (const id of ["planner", "chat", "alerts", "foremen", "jobs", "merges", "inboxes", "settings"]) {
   $("tab-" + id).onclick = () => setTab(id);
 }
 $("state-filter").onchange = () => loadJobs();
@@ -2210,16 +2239,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   setInterval(renderUsage, 30000); // keep countdowns moving between polls
   pInit();
   pUsageTick();
-  if (isPhone()) pRoute(); else await loadChat();
+  if (isPhone()) pRoute(); else setTab(tab);
   connectStream();
   // SSE is the fast path; the slow poll is the safety net (and the only path
   // on older factories). Tables refresh slower (5s).
-  setInterval(() => { if (isPhone()) pLoad(); else if (tab === "chat") loadChat(); }, 10000);
+  setInterval(() => { if (isPhone()) pLoad(); else if (isChatTab()) loadChat(); }, 10000);
   setInterval(() => {
     if (isPhone()) return;
     // The settings form is never auto-refreshed: a re-render would wipe
     // unsaved picks mid-edit (it reloads on tab switch and after save).
-    if (tab !== "chat" && tab !== "settings") loaders[tab]();
+    if (!isChatTab() && tab !== "settings") loaders[tab]();
     $("refreshed").textContent = "refreshed " + new Date().toLocaleTimeString();
   }, 5000);
 });
@@ -2254,7 +2283,7 @@ function applyLayout() {
   $("to-phone").style.display = !now && layoutPref() === "desktop" && matchMedia(PHONE_MQ).matches ? "" : "none";
   if (was === now) return;
   if (now) pRoute();
-  else { P_ROOT.classList.remove("p-thread", "p-detail", "p-search", "p-sheet", "kb-open", "p-inbox", "p-focus", "p-fthread"); document.title = "factory"; setTab(tab); }
+  else { P_ROOT.classList.remove("p-thread", "p-detail", "p-search", "p-sheet", "kb-open", "p-inbox", "p-focus", "p-fthread", "p-planner"); document.title = "factory"; setTab(tab); }
 }
 
 /* ----- read state (per device) ----- */
@@ -2285,13 +2314,14 @@ const P = {
   drafts: {}, draftFor: null, // focus-mode reply drafts per task id
 };
 const P_PARENT = { task: "inbox", job: "jobs", foreman: "foremen", ibx: "more" };
-const P_TAB = { inbox: "inbox", task: "inbox", jobs: "jobs", job: "jobs", foremen: "foremen", foreman: "foremen", more: "more", ibx: "more" };
+const P_TAB = { planner: "planner", alerts: "alerts", inbox: "inbox", task: "inbox", jobs: "jobs", job: "jobs", foremen: "foremen", foreman: "foremen", more: "more", ibx: "more" };
 
 function pParse() {
   const h = location.hash.replace(/^#\/?/, "");
   const i = h.indexOf("/");
-  const r = i < 0 ? { name: h || "inbox", arg: null } : { name: h.slice(0, i), arg: decodeURIComponent(h.slice(i + 1)) };
-  if (!P_TAB[r.name]) r.name = "inbox";
+  const r = i < 0 ? { name: h || "planner", arg: null } : { name: h.slice(0, i), arg: decodeURIComponent(h.slice(i + 1)) };
+  if (!P_TAB[r.name]) r.name = "planner"; // the planner chat is the default view
+  if (r.name === "task" && r.arg === STANDING_ID) { r.name = "planner"; r.arg = null; } // the standing chat is the Planner tab
   return r;
 }
 function pGo(name, arg, replace) {
@@ -2301,7 +2331,7 @@ function pGo(name, arg, replace) {
 }
 function pBack() {
   if (history.state && history.state.p) history.back();
-  else pGo(P_PARENT[P.r.name] || "inbox", null, true);
+  else pGo(P_PARENT[P.r.name] || "planner", null, true);
 }
 
 function pRoute() {
@@ -2311,6 +2341,7 @@ function pRoute() {
   const changed = r.name !== P.r.name || r.arg !== P.r.arg;
   P.r = r;
   P_ROOT.classList.toggle("p-thread", r.name === "task");
+  P_ROOT.classList.toggle("p-planner", r.name === "planner");
   P_ROOT.classList.toggle("p-detail", !!P_PARENT[r.name] && r.name !== "task");
   P_ROOT.classList.toggle("p-search", r.name === "inbox" && P.searchOpen === true && P.mode === "list");
   pSyncFocus();
@@ -2327,7 +2358,7 @@ function pRoute() {
   }
   pLoad();
 }
-const pTitles = { inbox: "Inbox", jobs: "Jobs", foremen: "Foremen", more: "More", task: "", job: "Job", foreman: "Foreman", ibx: "Inbox log" };
+const pTitles = { planner: "Planner", alerts: "Alerts", inbox: "Tasks", jobs: "Jobs", foremen: "Foremen", more: "More", task: "", job: "Job", foreman: "Foreman", ibx: "Inbox log" };
 
 let pLoading = false, pAgain = false;
 async function pLoad() {
@@ -2371,6 +2402,10 @@ async function pLoadOnce() {
   try {
     switch (r.name) {
       case "inbox": if (P.mode === "focus") await pLoadFocus(); break;
+      case "planner":
+        try { P.thread = await getJ("/v1/tasks/" + encodeURIComponent(STANDING_ID) + (P.showInternal ? "?internal=1" : "")); }
+        catch (e) { if (e.status === 404) P.thread = { missing: true }; else throw e; }
+        break;
       case "task":
         try { P.thread = await getJ("/v1/tasks/" + enc + (P.showInternal ? "?internal=1" : "")); }
         catch (e) { if (e.status === 404) P.thread = { missing: true }; else throw e; }
@@ -2409,8 +2444,12 @@ function pBadge() {
   const n = P.alerts.length + P.tasks.filter(needsYou).length;
   P.badge = n;
   const c = $("p-cnt");
-  c.textContent = n > 99 ? "99+" : String(n);
-  c.style.display = n ? "" : "none";
+  const nt = P.tasks.filter(needsYou).length; // Tasks tab: tasks waiting on you; alerts count on their own tab
+  c.textContent = nt > 99 ? "99+" : String(nt);
+  c.style.display = nt ? "" : "none";
+  const na = P.alerts.length, ca = $("p-cnt-alerts");
+  ca.textContent = na > 99 ? "99+" : String(na);
+  ca.style.display = na ? "" : "none";
   document.title = (n ? "(" + n + ") " : "") + "factory";
   if (navigator.setAppBadge) (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {});
 }
@@ -2419,7 +2458,8 @@ function pRender() {
   pBadge();
   switch (P.r.name) {
     case "inbox": if (!P.busy) { pSyncFocus(); if (P.mode === "focus" && st.tasksAvailable) pRenderFocus(); else pRenderInbox(); } break;
-    case "task": pRenderThread(); break;
+    case "planner": case "task": pRenderThread(); break;
+    case "alerts": pRenderAlerts(); break;
     case "jobs": pRenderJobs(); break;
     case "job": pRenderJob(); break;
     case "foremen": pRenderForemen(); break;
@@ -2544,15 +2584,21 @@ function pAlertRow(a) {
 }
 const pList = (rows) => '<div class="p-list">' + rows.join("") + "</div>";
 
+function pRenderAlerts() {
+  pTop("Alerts", "");
+  const alerts = [...P.alerts].sort((a, b) => a.priority - b.priority || Date.parse(b.created_at) - Date.parse(a.created_at));
+  $("p-body").innerHTML = pErr() + (!st.alertsAvailable ? '<div class="p-empty">Alerts are not available on this factory yet.</div>'
+    : alerts.length ? pList(alerts.map(pAlertRow)) : '<div class="p-zero">No open alerts.</div>');
+}
+
 function pRenderInbox() {
-  pTop("Inbox", pInboxActs());
+  pTop("Tasks", pInboxActs());
   pRenderFbar();
   const body = $("p-body");
   if (!st.tasksAvailable) {
     body.innerHTML = '<div class="p-empty">This factory has no task API yet. Use the desktop layout (More → Desktop layout).</div>';
     return;
   }
-  const alerts = [...P.alerts].sort((a, b) => a.priority - b.priority || Date.parse(b.created_at) - Date.parse(a.created_at));
   const open = P.tasks.filter(t => t.status === "open");
   const needs = open.filter(needsYou), rest = open.filter(t => !needsYou(t)), closed = P.tasks.filter(t => t.status !== "open");
   let h = pList(['<div class="p-row"><div class="p-item" data-go="task/' + STANDING_ID + '" data-testid="standing-row">' +
@@ -2560,8 +2606,7 @@ function pRenderInbox() {
     '<div class="p-prev">Standing chat: ask about status, or tell it what to do</div></div></div>']) +
     '<div class="p-chips"><button class="p-chip' + (P.showClosed ? "" : " on") + '" data-act="closed-off">Open</button>' +
     '<button class="p-chip' + (P.showClosed ? " on" : "") + '" data-act="closed-on">Include closed</button></div>' + pErr();
-  if (!alerts.length && !needs.length && !P.q) h += '<div class="p-zero">All caught up: nothing needs you.</div>';
-  if (alerts.length) h += pSec("Alerts", alerts.length) + pList(alerts.map(pAlertRow));
+  if (!needs.length && !P.q) h += '<div class="p-zero">All caught up: nothing needs you.</div>';
   if (needs.length) h += pSec("Needs you", needs.length) + pList(needs.map(pTaskRow));
   h += pSec(needs.length ? "Other open" : "Open", rest.length) +
     (rest.length ? pList(rest.map(pTaskRow)) : '<div class="p-empty">' + (P.q ? "no matching open tasks" : "no other open tasks") + "</div>");
@@ -2584,7 +2629,7 @@ function pTaskLinks(t) {
 }
 function pRenderThreadView(th, focus) {
   if (!th) { if (P.err) $("p-body").innerHTML = pErr(); return; }
-  if (th.missing) { pTop(focus ? "Inbox" : "Task not found", focus ? pUsageChip() : ""); $("p-body").innerHTML = '<div class="p-empty">This task no longer exists.</div>'; return; }
+  if (th.missing) { pTop(focus ? "Tasks" : "Task not found", focus ? pUsageChip() : ""); $("p-body").innerHTML = '<div class="p-empty">This task no longer exists.</div>'; return; }
   const t = th.task, msgs = th.messages || [];
   if (document.visibilityState === "visible") markSeen(t);
   pTop(t.standing ? "Planner" : esc(t.title), (focus ? pUsageChip() : "") + '<button class="p-icon" data-act="task-menu" aria-label="Task actions">' + P_ICON.more + "</button>");
@@ -2637,7 +2682,7 @@ function pRenderFbar() {
 function pRenderFocus() {
   pRenderFbar();
   if (!st.focusId) {
-    pTop("Inbox", pUsageChip());
+    pTop("Tasks", pUsageChip());
     $("p-body").innerHTML = pErr() + '<div id="p-fempty"><div class="big">Nothing needs your input</div>' +
       '<div class="sub">New tasks waiting on you will show up here.</div>' +
       '<button type="button" class="p-btn" data-act="view-list">View all tasks</button></div>';
@@ -2671,7 +2716,7 @@ function pSetMode(m) {
   window.scrollTo(0, 0);
   pSyncFocus(); pRenderFbar();
   $("p-body").innerHTML = '<div class="p-empty">loading…</div>';
-  pTop("Inbox", pUsageChip());
+  pTop("Tasks", pUsageChip());
   pLoad();
 }
 function pScrollBottom() { requestAnimationFrame(() => window.scrollTo(0, document.documentElement.scrollHeight)); }
@@ -2983,7 +3028,7 @@ function pInit() {
   pInit.done = true;
   $("to-phone").onclick = () => setLayoutPref("");
   if (window.matchMedia) matchMedia(PHONE_MQ).addEventListener("change", applyLayout);
-  if (!/^#\//.test(location.hash)) history.replaceState(null, "", "#/inbox");
+  if (!/^#\//.test(location.hash)) history.replaceState(null, "", "#/planner");
   window.addEventListener("popstate", () => { if (isPhone()) pRoute(); });
   window.addEventListener("hashchange", () => { if (isPhone() && (P.r.name !== pParse().name || P.r.arg !== pParse().arg)) pRoute(); });
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && isPhone()) { P.threadSig = ""; pLoad(); } });
@@ -3029,8 +3074,8 @@ function pInit() {
     ev.preventDefault();
     const text = ta.value.trim();
     const focus = pFocusing();
-    if (!text || (!focus && P.r.name !== "task")) return;
-    const id = focus ? st.focusId : P.r.arg;
+    if (!text || (!focus && P.r.name !== "task" && P.r.name !== "planner")) return;
+    const id = focus ? st.focusId : P.r.name === "planner" ? STANDING_ID : P.r.arg;
     if (!id) return;
     $("p-send").disabled = true;
     try {

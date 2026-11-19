@@ -827,7 +827,7 @@ host facts are descriptive and never matched on).
 | `GET /v1/spend?day=` | daily totals `{total_usd, jobs}`; per-role deferred until jobs carry role tags (#13) |
 | `GET /v1/inboxes` | per-inbox aggregate listing `{inbox_id, total, unacked, last_ts}` (UI; §4.1) |
 | `GET /v1/inboxes/{id}/recent` | recent envelopes for one inbox, acked included (UI; §4.1) |
-| `POST /v1/chat` | `{text, task_id?}` -> chat.message envelope in the operator inbox, filed under a task (new without `task_id`; 404 for an unknown one); wakes the LLM planner (§9.5, §9.5.2) |
+| `POST /v1/chat` | `{text, task_id?, client?}` -> chat.message envelope in the operator inbox, filed under a task (new without `task_id`; 404 for an unknown one); wakes the LLM planner (§9.5, §9.5.2) |
 | `GET /v1/tasks`, `GET /v1/tasks/{id}`, `POST /v1/tasks`, `PATCH /v1/tasks/{id}` | task list, task + thread, the "new task" alias of chat, and operator rename `{title}` (§9.5.2) |
 | `POST /v1/tasks/{id}/close` | (400 `standing_chat` for the standing chat, §9.5.7) operator closes a task from the UI; clears `needs_operator` and wakes the planner with `task.closed_by_operator` (§9.5.2) |
 | `GET /v1/alerts`, `POST /v1/alerts/{id}/ack`, `POST /v1/alerts/{id}/reply` | open alerts, ack, and reply-creates-a-task (§9.5.3) |
@@ -2156,7 +2156,7 @@ never stored: only `chat.message` and `brain.reply` are operator-visible,
 
 | Type | From / payload | Internal | Wakes planner | Notes |
 |---|---|---|---|---|
-| `chat.message` | `human:operator`, `{text}` | no | yes | `POST /v1/chat {text, task_id?}` / `POST /v1/tasks {text}`; unauthenticated like the UI surface, §7.5 |
+| `chat.message` | `human:operator`, `{text, client?}` | no | yes | `POST /v1/chat {text, task_id?, client?}` / `POST /v1/tasks {text, client?}`; unauthenticated like the UI surface, §7.5 |
 | `brain.reply` | `factory:brain` or `factory`, `{text, spoken?}` | no | no | the planner's `notify_operator` (§9.4), the planner-failure note, and the alert seed of §9.5.3 |
 | `foreman.report` | `foreman:{id}`, free-form (typically `{text}`) | yes | yes | relayed verbatim from `factory:main`, stamped with its task (§9.5.2 relay stamping) |
 | `brain.failed` | `foreman:{id}`, `{envelope_id, envelope_type, error}` | yes | yes | a foreman brain session failed on a delegated envelope (§3.3); relayed exactly like `foreman.report`, so a failed delegation is never silent |
@@ -2278,6 +2278,17 @@ Chat and task API (unauthenticated, like the rest of the UI surface,
   `unknown_task`; blank text returns 400. The response is 201 with the
   stored envelope (every field it had before, `thread_id` included) plus
   `task_id`.
+  Both endpoints accept an optional `client` device hint, `mobile` or
+  `desktop` (case-insensitive; anything else is ignored, never an error),
+  stored on the `chat.message` payload. The wake takes the hint from the
+  newest `chat.message` among its triggers, else from the newest one in the
+  thread, and for `mobile` adds an "operator device: MOBILE" section to the
+  wake prompt: short replies, asks that need the laptop or the home network
+  deprioritised, critical issues (P0/P1 alerts, outages, failed deploys,
+  security) still surfaced. `desktop` or no hint changes nothing. The web UI
+  sends `client: "mobile"` from the phone layout and `"desktop"` otherwise;
+  its default view is the standing Planner chat, with Tasks and Alerts on
+  their own tabs.
 - `POST /v1/tasks {text}` is the same as chat without `task_id` (the "new
   task" box).
 - `PATCH /v1/tasks/{id} {title}` renames a task (operator rename from the

@@ -322,13 +322,14 @@ func (a *App) handleGetTask(w http.ResponseWriter, r *http.Request) {
 // alias of POST /v1/chat without task_id (same 201 body).
 func (a *App) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Text string `json:"text"`
+		Text   string `json:"text"`
+		Client string `json:"client"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON: "+err.Error())
 		return
 	}
-	a.postChat(w, r, in.Text, "")
+	a.postChat(w, r, in.Text, "", in.Client)
 }
 
 // intParam parses an optional positive integer query parameter, clamped

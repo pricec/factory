@@ -47,6 +47,7 @@ func buildStandingWakePrompt(w PlannerWake) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "You are the factory planner, in the STANDING factory chat (id %s): the operator's permanent, single back-and-forth with you, not tied to any unit of work. %s\n", w.Task.ID, w.Reason)
 
+	sb.WriteString(deviceSection(w.Client))
 	sb.WriteString("\n=== operator priority criteria ===\n")
 	if strings.TrimSpace(w.Criteria) == "" {
 		sb.WriteString("(none set; record them with set_priority_criteria when the operator states some)\n")
