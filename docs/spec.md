@@ -2163,6 +2163,7 @@ never stored: only `chat.message` and `brain.reply` are operator-visible,
 | `notify.job` | `factory`, `{id, state, foreman, last_error, over_budget, summary}` and `job_id`, plus `self_initiated`, plus `merge_requests: [{id, branch, head, state, waiting_on?}]` when the job filed its own merge requests (§6.11) | yes | **yes, when threaded** (2026-11-16 wake-on-terminal) | terminal job transition (done/failed/timed_out/dead/cancelled/superseded); stamped with its task when attributable, else unthreaded; hidden by default, no chips (operator DECISION 2). Wakes the planner on its task so the operator hears the outcome unasked. NO wake when unthreaded (never opens a task), when `merge_job` is true (a merge-queue job; its outcome is the `notify.merge`), or when `self_initiated` is true (the planner's own `cancel_job`, §9.4: it already knows) |
 | `notify.merge` | `factory`, the §6.11 `notify.merge` payload, and `job_id` = the source job | yes | **yes, when threaded and `wake` is true** | outcome of a job-owned merge request (§6.11): `landed`, `escalated`, `dependency_failed`, `dependency_stalled` wake; `fix_dispatched` and `cancelled` are a record only. Deduped; goes to the standing chat when no task owns the job; reopens a closed task only when it needs the planner (§6.11) |
 | `notify.conflict` | `factory`, `{wake:false, action, job_id, waits_for, glob, text}` | yes | no | conflict-hold record on the job's task (§6.14): `waiting`, `released`, `timed_out`. Never posted without a task |
+| `alert.raised` | `factory`, thread = standing chat, payload per §9.5.3 | no | **yes** | alert delivery to the planner (coalesced, deduped) |
 | `task.changed`, `alert.changed` | synthetic, payload = Task / Alert | n/a | no | SSE hints only, NOT persisted (§9.5.2, §9.5.3) |
 | `notify.pending`, `notify.unhandled` | `factory` | yes | no | **legacy**: no longer produced; since the redesign they are P1 and P2 alerts (§9.5.3). Old rows stay readable (backfilled into the legacy task) |
 
@@ -2499,6 +2500,27 @@ task_id|null}`; `priority` is an integer, 0 = most urgent.
     becomes `replied` only if it was still open; an acked or expired alert
     still gets a task and keeps its state. `task_id` on the alert points at
     the new task. Empty text -> 400, unknown alert -> 404 (no task created).
+- **Delivery to the planner (2026-11-19).** A new alert wakes the planner in
+  the standing chat (`task_standing`) with a persisted `alert.raised`
+  envelope (from `factory`, thread = the standing chat; distinct from the
+  operator's `chat.message`). Payload: `{count, critical, alerts:[{alert_id,
+  severity, priority, source, task_id?, job_ids[], title, text, created_at}]}`
+  where `severity` is `critical` (P0/P1), `warning` (P2) or `info`, and
+  `job_ids` are the `job_...` ids named in the title/body. Guards:
+  **coalescing** - alerts raised within 3s share one envelope/wake;
+  **dedupe** - a repeat with the same source, task and title within 30 min
+  is stored and shown but does not wake again (process-local); **no
+  self-loop** - alerts with source `planner`, `factory:planner` (planner
+  failure) or `factory:claude-auth` never wake the planner. The wake prompt
+  tells the planner to triage first (read tools, fix or re-route, `ack_alert`
+  what it handled), then decide whether to notify the operator; critical
+  alerts and anything blocking the operator always reach them. The mobile
+  device hint (§9.5.2) still applies to the wake via the standing prompt.
+- **Planner tools `list_alerts` / `ack_alert`.** `list_alerts(limit?)`
+  returns open alerts; `ack_alert(ids[])` acks (resolves) open alerts,
+  reporting unknown or already-closed ids under `skipped`, and publishes
+  `alert.changed`. Both need the task store. The planner MCP surface budget
+  is now < 8KB.
 - **SSE.** Every create and state change publishes a synthetic,
   non-persisted `alert.changed` envelope (payload = Alert JSON) on the
   `planner:main` stream (contract I5).

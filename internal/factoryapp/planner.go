@@ -89,7 +89,7 @@ func (a *App) plannerLoop(ctx context.Context) {
 // deliberately not a wake) and stays informational.
 func wakesPlanner(env wire.MessageEnvelope) bool {
 	switch env.Type {
-	case "chat.message", foremanReportType, brainFailedType, taskClosedByOperatorType:
+	case "chat.message", alertRaisedType, foremanReportType, brainFailedType, taskClosedByOperatorType:
 		return true
 	case notifyJobType:
 		return env.ThreadID != "" && !selfInitiatedJob(env) && !mergeJobNote(env)
@@ -186,12 +186,30 @@ func (a *App) runTaskWake(ctx context.Context, taskID string, wakers []wire.Mess
 	}
 	if t.Standing {
 		w.Reason = reasonStanding
+		if !hasType(wakers, "chat.message") && hasType(wakers, alertRaisedType) {
+			w.Reason = reasonStandingAlert
+		}
 		w.Summary, w.SummaryThrough, err = a.tasks.StandingSummary(ctx)
 		if err != nil {
 			log.Printf("factoryapp: planner: standing summary: %v", err)
 		}
 	}
 	return a.planner.HandleTask(ctx, w)
+}
+
+// reasonAlert / reasonStandingAlert: the wake reason of alert.raised.
+const (
+	reasonAlert         = "planner: new operator alert(s) were raised; triage them"
+	reasonStandingAlert = "planner: new alert(s) were raised (alert.raised rows below); no one wrote in the chat. Triage them, do not just relay them"
+)
+
+func hasType(envs []wire.MessageEnvelope, typ string) bool {
+	for _, e := range envs {
+		if e.Type == typ {
+			return true
+		}
+	}
+	return false
 }
 
 // reasonStanding is the wake reason of the standing Planner chat.
@@ -222,13 +240,15 @@ const (
 
 // wakeReason names why a task session wakes, from the batch's envelope types.
 func wakeReason(wakers []wire.MessageEnvelope) string {
-	var chat, job, merge, report, closed bool
+	var chat, job, merge, report, closed, alert bool
 	for _, env := range wakers {
 		switch env.Type {
 		case taskClosedByOperatorType:
 			closed = true
 		case "chat.message":
 			chat = true
+		case alertRaisedType:
+			alert = true
 		case notifyJobType:
 			job = true
 		case notifyMergeType:
@@ -240,6 +260,9 @@ func wakeReason(wakers []wire.MessageEnvelope) string {
 	var parts []string
 	if chat {
 		parts = append(parts, reasonChat)
+	}
+	if alert {
+		parts = append(parts, reasonAlert)
 	}
 	if closed {
 		parts = append(parts, closedByOperatorReason)

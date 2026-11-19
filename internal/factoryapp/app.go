@@ -130,7 +130,9 @@ type App struct {
 	// dispatch notifier's notified set. Guarded by pendingAlertMu (the
 	// loop and test-driven passes may interleave).
 	pendingAlertedJobs map[string]string
-	pendingAlertMu     sync.Mutex
+	// alertWake coalesces and dedupes alert.raised planner wakes (alertwake.go).
+	alertWake      alertWakeState
+	pendingAlertMu sync.Mutex
 
 	// Merge queue (spec §6.11, mergequeue.go): mergeMu serializes passes,
 	// mergeKick wakes the loop, mergeForeman is the integration pin.
@@ -262,7 +264,8 @@ func New(cfg Config) (*App, error) {
 		Tasks:       a.tasks,
 		TaskChanged: a.publishTaskChanged,
 		// raise_alert tool (spec §9.5.3).
-		RaiseAlert: a.RaisePlannerAlert,
+		RaiseAlert:   a.RaisePlannerAlert,
+		AlertChanged: a.publishAlertChanged,
 		// cancel_job marks its own cancels so they do not wake the planner.
 		MarkSelfCancel: a.markSelfCancel,
 		// request_merge kicks the merge queue (spec §6.11).
@@ -397,6 +400,7 @@ func (a *App) Run(ctx context.Context) error {
 // Close closes the three stores.
 func (a *App) Close() error {
 	var errs []error
+	a.alertWake.stop()
 	if a.inbox != nil {
 		errs = append(errs, a.inbox.Close())
 	}
