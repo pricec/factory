@@ -836,7 +836,11 @@ host facts are descriptive and never matched on).
 | `GET /v1/alerts`, `POST /v1/alerts/{id}/ack`, `POST /v1/alerts/{id}/reply` | open alerts, ack, and reply-creates-a-task (§9.5.3) |
 | `GET /v1/inboxes/planner:main/stream` | permissive SSE stream of the operator inbox for the chat UI (§9.5) |
 | `GET /` | operator web UI (single page; §4.1) |
-| `GET /manifest.webmanifest`, `GET /apple-touch-icon.png`, `GET /icon-512.png` | home-screen (PWA) manifest and icons for the UI (§9.5.5) |
+| `GET /manifest.webmanifest`, `GET /apple-touch-icon.png`, `GET /icon-192.png`, `GET /icon-512.png`, `GET /icon-maskable-512.png` | home-screen (PWA) manifest and icons for the UI (§9.5.5) |
+| `GET /sw.js` | the UI's service worker (§9.6); `Cache-Control: no-cache`, version-stamped |
+| `GET /v1/push/key` | `{public_key}` the VAPID public key (generated and persisted on first use); 404 when push is disabled (§9.6) |
+| `POST /v1/push/subscribe` | a browser `PushSubscription` JSON; 400 for a malformed one, a non-https endpoint or a host that is not a known push service (§9.6) |
+| `POST /v1/push/unsubscribe` | `{endpoint}` -> removes that device's subscription (§9.6) |
 | `POST /v1/pairing-tokens` | planner-credential auth (v1: the planner token doubles as the operator credential); issues a one-time pairing token, `200 {pairing_token, expires_at}` (#23) |
 
 Request/response shapes and status codes beyond those shown are not pinned.
@@ -3111,6 +3115,38 @@ Verified on CLI 2.1.325: the failure texts, the probe, and the setup-token
 URL and code paths (a bad code yields `OAuth error: That code wasn't
 accepted...`); the success screen's token scrape could not be exercised
 without a real sign-in - a pasted token is the always-available path.
+
+### 9.6 Home-screen app and Web Push
+
+The UI is an installable PWA (iOS: Safari > Share > Add to Home Screen).
+`/manifest.webmanifest` names it "Factory" (`display: standalone`, `scope: /`,
+icons 180/192/512 plus a maskable 512). The page uses `viewport-fit=cover` and
+`env(safe-area-inset-*)` padding; hands-free voice (§6.15) and its Screen Wake
+Lock work unchanged in standalone mode.
+
+**Service worker** (`/sw.js`, scope `/`). Caches the app shell only: the page
+(network-first, 2.5 s timeout, cache fallback) and the static icons/manifest.
+It never intercepts `/v1/*`, SSE (`text/event-stream`), websocket, non-GET or
+cross-origin requests. The worker is served with a version = build id + a hash
+of the shell assets, so every deploy changes its bytes, replaces the shell
+cache and (via `skipWaiting`/`clients.claim`) reloads the page at the next safe
+moment (never during hands-free).
+
+**Web Push.** Stdlib-only VAPID (RFC 8292) and aes128gcm (RFC 8291) in
+`internal/webpush`. The VAPID private key is generated on first use and stored
+in the tasks `settings` table (`push.vapid`); it is never logged or served.
+Subscriptions are stored in `push.subs` (max 50, newest kept) and pruned on
+404/410. Subscription endpoints must be https on a known push service
+(`*.push.apple.com`, `fcm.googleapis.com`, `*.push.services.mozilla.com`,
+`*.notify.windows.com`): the server POSTs to them. A push is sent for exactly
+the operator-facing events: `brain.reply`, `notify.job` (not `self_initiated`),
+`notify.pending`, `notify.merge`, `notify.conflict`, and every newly raised
+alert (§9.5.3). Payload `{title, body (<=140 chars), url, tag}`; the worker
+always shows a notification (iOS revokes subscriptions that do not). The UI's
+Notifications panel (desktop Settings, phone More) subscribes inside a click
+and can unsubscribe the device; `FACTORY_PUSH_DISABLE=1` disables push
+server-side. `FACTORY_PUSH_SUBJECT` overrides the VAPID contact (default: the
+https advertise URL, else a placeholder `mailto:`).
 
 ---
 

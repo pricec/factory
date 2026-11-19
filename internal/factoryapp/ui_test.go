@@ -399,6 +399,8 @@ func TestUIPhoneAssets(t *testing.T) {
 		{"/manifest.webmanifest", "application/manifest+json", "{"},
 		{"/apple-touch-icon.png", "image/png", "\x89PNG"},
 		{"/icon-512.png", "image/png", "\x89PNG"},
+		{"/icon-192.png", "image/png", "\x89PNG"},
+		{"/icon-maskable-512.png", "image/png", "\x89PNG"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.path, func(t *testing.T) {
@@ -420,7 +422,7 @@ func TestUIPhoneAssets(t *testing.T) {
 					Src string `json:"src"`
 				} `json:"icons"`
 			}
-			if err := json.Unmarshal(b, &m); err != nil || m.Display != "standalone" || len(m.Icons) != 2 {
+			if err := json.Unmarshal(b, &m); err != nil || m.Display != "standalone" || len(m.Icons) != 4 {
 				t.Fatalf("manifest = %s (%v)", b, err)
 			}
 		})

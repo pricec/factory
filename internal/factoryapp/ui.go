@@ -1,11 +1,16 @@
 package factoryapp
 
 import (
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
+	"github.com/pricec/factory/internal/buildinfo"
 	"github.com/pricec/factory/internal/inbox"
 	"github.com/pricec/factory/internal/wire"
 )
@@ -22,8 +27,10 @@ var uiHTML []byte
 // uiManifest is the web app manifest (GET /manifest.webmanifest): it lets
 // the operator add the UI to a phone home screen as a standalone app.
 const uiManifest = `{
-  "name": "factory",
-  "short_name": "factory",
+  "id": "/",
+  "name": "Factory",
+  "short_name": "Factory",
+  "description": "Factory operator console",
   "start_url": "/#/inbox",
   "scope": "/",
   "display": "standalone",
@@ -31,7 +38,9 @@ const uiManifest = `{
   "theme_color": "#0d1117",
   "icons": [
     {"src": "/apple-touch-icon.png", "sizes": "180x180", "type": "image/png"},
-    {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+    {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+    {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+    {"src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}
   ]
 }
 `
@@ -41,6 +50,40 @@ var uiAppleIcon []byte
 
 //go:embed uiassets/icon-512.png
 var uiIcon512 []byte
+
+//go:embed uiassets/icon-192.png
+var uiIcon192 []byte
+
+//go:embed uiassets/icon-maskable-512.png
+var uiIconMaskable []byte
+
+//go:embed uiassets/sw.js
+var uiServiceWorker string
+
+// swVersion is the cache-busting version baked into /sw.js: the build id plus
+// a hash of everything the worker caches, so any deploy (and any dev edit)
+// changes the worker bytes and replaces the shell cache.
+func swVersion() string {
+	h := sha256.New()
+	h.Write(uiHTML)
+	h.Write([]byte(uiManifest))
+	h.Write(uiAppleIcon)
+	h.Write(uiIcon192)
+	h.Write(uiIcon512)
+	h.Write(uiIconMaskable)
+	return buildinfo.Current() + "-" + hex.EncodeToString(h.Sum(nil))[:12]
+}
+
+// handleServiceWorker serves GET /sw.js. It is never HTTP-cached so the
+// browser's update check sees a new deploy immediately.
+func (a *App) handleServiceWorker(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Service-Worker-Allowed", "/")
+	if _, err := io.WriteString(w, strings.Replace(uiServiceWorker, "__VERSION__", swVersion(), 1)); err != nil {
+		log.Printf("factoryapp: sw: %v", err)
+	}
+}
 
 // handleUIAsset serves the static home-screen assets of the operator UI:
 // the manifest and the two PNG icons. Unauthenticated like GET /.
@@ -54,6 +97,10 @@ func (a *App) handleUIAsset(w http.ResponseWriter, r *http.Request) {
 		ct, body = "image/png", uiAppleIcon
 	case "/icon-512.png":
 		ct, body = "image/png", uiIcon512
+	case "/icon-192.png":
+		ct, body = "image/png", uiIcon192
+	case "/icon-maskable-512.png":
+		ct, body = "image/png", uiIconMaskable
 	default:
 		http.NotFound(w, r)
 		return

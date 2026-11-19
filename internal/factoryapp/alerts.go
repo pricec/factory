@@ -115,6 +115,7 @@ func (a *App) raiseAlert(ctx context.Context, in mcpfactory.RaiseAlertInput, sou
 		return tasks.Alert{}, err
 	}
 	a.publishAlertChanged(alert)
+	a.pushAlert(alert)
 	a.queueAlertWake(alert)
 	return alert, nil
 }
