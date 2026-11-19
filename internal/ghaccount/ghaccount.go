@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -94,6 +95,10 @@ func (s Selection) Env() []string {
 	return []string{"GH_ENTERPRISE_TOKEN=" + s.Token, "GH_HOST=" + s.Account.Host}
 }
 
+// MergeAccount is the only gh account merge jobs act as. The host is also
+// logged in to an unrelated account that must never merge for the factory.
+const MergeAccount = "pricec"
+
 // ErrNoAccount is wrapped by Select when no account qualifies.
 var ErrNoAccount = errors.New("no logged-in gh account can push")
 
@@ -111,6 +116,13 @@ func SplitRepo(repo string) (owner, name string, err error) {
 // active account. When none qualifies the error wraps ErrNoAccount and
 // names every account tried and why it was rejected.
 func Select(ctx context.Context, gh GH, host, repo string) (Selection, error) {
+	return SelectAs(ctx, gh, host, repo, "")
+}
+
+// SelectAs is Select restricted to the account named login (case
+// insensitive); no other account is tried or queried. An empty login means
+// any account, as Select.
+func SelectAs(ctx context.Context, gh GH, host, repo, login string) (Selection, error) {
 	if host == "" {
 		host = DefaultHost
 	}
@@ -121,6 +133,12 @@ func Select(ctx context.Context, gh GH, host, repo string) (Selection, error) {
 	accts, err := Accounts(ctx, gh, host)
 	if err != nil {
 		return Selection{}, err
+	}
+	if login != "" {
+		accts = slices.DeleteFunc(slices.Clone(accts), func(a Account) bool { return !strings.EqualFold(a.Login, login) })
+		if len(accts) == 0 {
+			return Selection{}, fmt.Errorf("%w to %s on %s; account %s is not logged in", ErrNoAccount, repo, host, login)
+		}
 	}
 	var tried []string
 	for _, a := range Order(accts, owner) {
