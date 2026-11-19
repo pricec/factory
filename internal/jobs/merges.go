@@ -864,7 +864,7 @@ func writeMergeError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "bad_request", bad.Error(), false)
 	case errors.Is(err, ErrMergeNotFound):
 		writeError(w, http.StatusNotFound, "not_found", err.Error(), false)
-	case errors.Is(err, ErrMergeTerminal):
+	case errors.Is(err, ErrMergeTerminal), errors.Is(err, ErrMergeNotDismissable):
 		writeError(w, http.StatusConflict, "already_terminal", err.Error(), false)
 	case errors.Is(err, ErrMergeDuplicate):
 		writeError(w, http.StatusConflict, "duplicate_request", err.Error(), false)

@@ -304,8 +304,8 @@ func TestNoTaskStore(t *testing.T) {
 	defer srv.Close()
 	bare := &env{t: t, svc: e.svc, base: srv.URL, planner: e.planner, wokenTask: "task_ignored"}
 	_, out := bare.rpc(bare.planner, "tools/list", nil)
-	if tools := resultOf(t, out)["tools"].([]any); len(tools) != 10 { // 7 core + raise_alert (inbox S3) + request_merge (§6.11) + set_job_priority, always registered
-		t.Errorf("tools without a task store = %d, want 10", len(tools))
+	if tools := resultOf(t, out)["tools"].([]any); len(tools) != 11 { // 7 core + raise_alert (inbox S3) + request_merge (§6.11) + set_job_priority + dismiss_merge, always registered
+		t.Errorf("tools without a task store = %d, want 11", len(tools))
 	}
 	sc := structured(t, resultOf(t, bare.callTool("notify_operator", map[string]any{"text": "hi"})))
 	if _, has := sc["task_id"]; has {

@@ -58,6 +58,9 @@ type Config struct {
 	// MergeQueued, when set, is called after request_merge queues a merge
 	// request (the factory kicks its merge-queue loop, spec §6.11).
 	MergeQueued func()
+	// DismissMerge backs the dismiss_merge tool (spec §6.11): closes a
+	// needs_attention merge request. nil -> the tool errors.
+	DismissMerge DismissMergeFunc
 	// TaskPriorityChanged, when set, is called after update_task changes a
 	// task's priority (the factory re-evaluates that task's held jobs).
 	TaskPriorityChanged func(ctx context.Context, taskID string)
@@ -133,6 +136,7 @@ func Handler(cfg Config) (http.Handler, error) {
 	addSetJobPriorityTool(srv, cfg)
 	addRaiseAlertTool(srv, cfg)
 	addAlertTriageTools(srv, cfg) // list_alerts, ack_alert (spec §9.5.3)
+	addDismissMergeTool(srv, cfg) // merge_dismiss_tool.go
 	addRequestMergeTool(srv, cfg) // spec §6.11 merge queue (merge_tool.go)
 
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv },
