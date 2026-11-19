@@ -2591,6 +2591,17 @@ gesture works: `#/inbox`, `#/task/<id>`, `#/jobs`, `#/job/<id>`, `#/foremen`,
 `#/foreman/<id>`, `#/more` (usage and inboxes), and `#/ibx/<id>`. A bottom tab
 bar has Inbox, Jobs, Foremen and More.
 
+Usage rings (2026-11-19): the phone top bar and the desktop header each show
+two read-only rings, `5h` and `7d` (percent used, countdown to `resets_at`),
+driven only by `GET /v1/usage` (polled every 60s; countdowns tick client-side
+every 15s; no new endpoint). Ring colour and status word are the window's own
+`state` (`usagewin.Classify`, the classifier whose worst window feeds the
+dispatch gate, §6.10): GREEN/YELLOW/ORANGE/RED, UNKNOWN when missing; the UI
+adds no thresholds. A glyph (`✓ ! !! ✕ ?`) and the aria-label repeat the status
+so colour is not the only signal. Tap/hover shows exact percent, reset time,
+pace, the gate level (`gate.level`, `paused`, `mode`, `fail_open`) and whether
+jobs are being held (`gate.held`).
+
 The Inbox shows, in order: open alerts (Ack and Reply buttons), "Needs you",
 then the other open tasks; closed tasks appear on request. "Needs you" is
 exactly the open tasks with `needs_operator` set (§9.5.2; 2026-11-17, this
