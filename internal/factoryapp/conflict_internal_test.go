@@ -395,3 +395,43 @@ func threadHas(t *testing.T, a *App, taskID string, want ...string) bool {
 	}
 	return false
 }
+
+// A blocker that is already terminal when a job is admitted never holds it.
+func TestConflictOwnerTerminalAtCheckTime(t *testing.T) {
+	a, _ := conflictApp(t)
+	first, _, _ := postTouch(t, a, map[string]any{"touches": []string{"x/**"}})
+	if code, _ := doJSON(t, a, "POST", "/v1/jobs/"+first+"/cancel", nil); code != http.StatusOK {
+		t.Fatalf("cancel: %d", code)
+	}
+	if _, state, reason := postTouch(t, a, map[string]any{"touches": []string{"x/y.go"}}); state == jobs.StateHeld {
+		t.Fatalf("held behind a cancelled job: %q", reason)
+	}
+}
+
+// Restart with a stale lock: the owner's merge is orphaned (waits on a
+// branch that will never land); the startup release pass clears the hold.
+func TestConflictStaleLockClearedOnRestart(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	clk := &gateClock{t: time.Date(2026, 11, 18, 10, 0, 0, 0, time.UTC)}
+	a := newGateApp(t, dir, clk)
+	first, _, _ := postTouch(t, a, map[string]any{"touches": []string{"f.go"}})
+	second, state, _ := postTouch(t, a, map[string]any{"touches": []string{"f.go"}})
+	if state != jobs.StateHeld {
+		t.Fatalf("state %s", state)
+	}
+	doneWithMerge(t, a, first)
+	if _, err := a.jobs.CreateMergeRequest(ctx, jobs.NewMergeRequest{Branch: "later", Head: "abcdef1", Note: "n"}); err != nil {
+		t.Fatal(err)
+	}
+	// Make the owner's request wait on a dependency that does not exist.
+	if _, err := a.jobs.DB().ExecContext(ctx, `UPDATE merge_requests SET after_branches = 'ghost' WHERE source_job_id = ?`, first); err != nil {
+		t.Fatal(err)
+	}
+	a.Close()
+	b := newGateApp(t, dir, clk)
+	defer b.Close()
+	if n, err := b.ReleasePass(ctx); err != nil || n != 1 || mustJob(t, b, second).State != jobs.StatePending {
+		t.Fatalf("stale lock not cleared on restart: %d %v", n, err)
+	}
+}

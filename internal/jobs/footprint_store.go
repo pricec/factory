@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"github.com/pricec/factory/internal/wire"
 )
@@ -52,7 +53,27 @@ func (s *Store) ActiveFootprints(ctx context.Context) ([]Footprint, error) {
 		f.Repo = SpecRepo(spec)
 		out = append(out, f)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close() // the store has one connection: free it before the merge lookups
+	live := out[:0]
+	for _, f := range out {
+		if IsTerminalState(f.State) && f.State != StateDone {
+			continue // belt and braces: a terminal job never holds a lock
+		}
+		if f.MergeRequestID != "" {
+			orphan, err := s.mergeOrphaned(ctx, f.MergeRequestID)
+			if err != nil {
+				return nil, err
+			}
+			if orphan {
+				continue // its merge can never run: the lock is stale
+			}
+		}
+		live = append(live, f)
+	}
+	return live, nil
 }
 
 // ConflictSince returns when the job's conflict wait began ("" = not
@@ -114,4 +135,48 @@ func SpecRepo(spec wire.JobSpec) string {
 		return NormalizeRepo(p.Repo)
 	}
 	return ""
+}
+
+// IsTerminalState reports whether a job state is final (no further work
+// can change the repo from the job itself).
+func IsTerminalState(state string) bool {
+	switch state {
+	case StateDone, StateDead, StateTimedOut, StateCancelled, StateSuperseded:
+		return true
+	}
+	return false
+}
+
+// mergeOrphaned reports whether a queued merge request can never proceed:
+// it waits (after_branches) on a branch that has no queued, merging or
+// landed request in the same repo (e.g. the dependency was filed under
+// another repo, cancelled or needs attention). Such a request would block
+// its done job's footprint forever, so the lock is treated as stale.
+func (s *Store) mergeOrphaned(ctx context.Context, mrID string) (bool, error) {
+	var repo, state, after string
+	err := s.db.QueryRowContext(ctx, `SELECT repo, state, after_branches FROM merge_requests WHERE id = ?`, mrID).
+		Scan(&repo, &state, &after)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if state != MergeQueued {
+		return false, nil
+	}
+	for _, b := range strings.Split(after, "\n") {
+		if b == "" {
+			continue
+		}
+		var n int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM merge_requests WHERE repo = ? AND branch = ? AND state IN (?, ?, ?)`,
+			repo, b, MergeQueued, MergeMerging, MergeLanded).Scan(&n); err != nil {
+			return false, err
+		}
+		if n == 0 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
