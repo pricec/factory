@@ -1440,7 +1440,7 @@ $("newtaskform").onsubmit = async (ev) => {
   $("newtask-send").disabled = true;
   try {
     const out = await sendText(text, null);
-    $("newtask-input").value = "";
+    $("newtask-input").value = ""; fitTextarea($("newtask-input"), 140);
     if (st.tasksAvailable) { await loadTasks(); if (out && out.task_id) await selectTask(out.task_id); }
     else await loadLegacy();
   } catch (e) {
@@ -1457,7 +1457,7 @@ $("chatform").onsubmit = async (ev) => {
   try {
     const replied = st.selected;
     await sendText(text, st.tasksAvailable ? st.selected : null);
-    $("chat-input").value = "";
+    $("chat-input").value = ""; fitTextarea($("chat-input"), 140);
     if (st.tasksAvailable && st.mode === "focus") {
       // advance to the next waiting task (computed from the queue as it was
       // when the reply was sent); loadQueue drops the answered one.
@@ -1469,12 +1469,27 @@ $("chatform").onsubmit = async (ev) => {
     $("chatlog").insertAdjacentHTML("beforeend", '<div class="err">' + esc(e.message) + "</div>");
   } finally { $("chat-send").disabled = false; }
 };
+/* Composer keys. Desktop: Enter sends, Shift+Enter is a newline. Touch devices
+ * and the phone layout: Enter is always a newline and only the send button
+ * sends. Enter that confirms an IME composition never sends. */
+const isTouchInput = () => isPhone() || matchMedia("(pointer: coarse)").matches;
+function enterSends(ev, touch) {
+  if (ev.key !== "Enter" || ev.shiftKey || ev.isComposing || ev.keyCode === 229) return false;
+  return !touch;
+}
+// grow a composer textarea to its content, up to maxPx (then it scrolls)
+function fitTextarea(ta, maxPx) {
+  ta.style.height = "auto";
+  ta.style.height = Math.min(ta.scrollHeight + 2, maxPx) + "px";
+}
 $("chat-input").addEventListener("keydown", (ev) => {
-  if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); $("chatform").requestSubmit(); }
+  if (enterSends(ev, isTouchInput())) { ev.preventDefault(); $("chatform").requestSubmit(); }
 });
 $("newtask-input").addEventListener("keydown", (ev) => {
-  if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); $("newtaskform").requestSubmit(); }
+  if (enterSends(ev, isTouchInput())) { ev.preventDefault(); $("newtaskform").requestSubmit(); }
 });
+$("chat-input").addEventListener("input", () => fitTextarea($("chat-input"), 140));
+$("newtask-input").addEventListener("input", () => fitTextarea($("newtask-input"), 140));
 
 $("needs-input").onchange = () => { st.needsInput = $("needs-input").checked; loadTasks(); };
 $("modetoggle").onclick = () => setMode(st.mode === "focus" ? "list" : "focus");
@@ -3140,6 +3155,7 @@ function pInit() {
 
   const ta = $("p-input");
   ta.addEventListener("input", pAutosize);
+  // no Enter-to-send here: on the phone Enter is a newline, #p-send submits.
   ta.addEventListener("focus", () => { setTimeout(() => { pViewport(); pScrollBottom(); }, 350); });
   $("p-composer").onsubmit = async (ev) => {
     ev.preventDefault();
