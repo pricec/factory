@@ -106,7 +106,7 @@ func TestUISpokenReplies(t *testing.T) {
 		`createSpeaker`, `createHandsFree`, `spokenFor`, `stripMarkdown`,
 		`/v1/speech/tts/plan`, `/v1/speech/tts`, `decodeAudioData`, `webkitAudioContext`,
 		`factory.voice.speak`, `bar.id = "voice-out"`, `"factory:envelope"`, `window.FactoryHost`,
-		`p.spoken`, `hangoverMs`, `getFloatTimeDomainData`,
+		`p.spoken`, `silenceMs`, `getFloatTimeDomainData`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("UI page missing spoken-reply markup %q", want)
@@ -510,5 +510,46 @@ func TestUICopyPaste(t *testing.T) {
 		if strings.Contains(line, "user-select: all") && !strings.Contains(line, ".sid") {
 			t.Errorf("user-select:all on a non-id selector: %s", strings.TrimSpace(line))
 		}
+	}
+}
+
+// TestUIHandsFreeHooks: the hands-free loop ships its VAD state machine, the
+// iOS-safe mic setup, the no-talk-over gating and the visible state pill
+// (spec §6.15). Behaviour of the state machine itself is in
+// TestHandsFreeTurnMachine (ui_handsfree_test.go).
+func TestUIHandsFreeHooks(t *testing.T) {
+	e := newEnv(t)
+	resp, err := http.Get(e.ts.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	body := string(b)
+	for _, want := range []string{
+		`id="voice-turn"`, `window.FactoryTurn`, `speech_start`, `utterance_end`, `bargeIn`, `playMult`,
+		`autoGainControl: true`, `echoCancellation: true`,
+		`onSpeechStart`, `isPlaying`, `quiet()`, `visibilitychange`,
+		`id = "hf-status"`, `Hearing you`, `Sending`, `Speaking`, `Listening`, `hf-end`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("UI page missing hands-free hook %q", want)
+		}
+	}
+	// The old push-to-send hooks are gone: no pause/resume of the mic, no
+	// per-turn reply wait.
+	for _, bad := range []string{"resumeListening", "hangoverMs", "waitTimer"} {
+		if strings.Contains(body, bad) {
+			t.Errorf("UI page still has retired hands-free hook %q", bad)
+		}
+	}
+	// AudioContext must be created before the getUserMedia await (iOS gesture).
+	i := strings.Index(body, "async function start() {\n      if (state !== \"off\" || actx)")
+	if i < 0 {
+		t.Fatal("hands-free start() not found")
+	}
+	seg := body[i:]
+	if a, g := strings.Index(seg, "new C()"), strings.Index(seg, "await navigator.mediaDevices.getUserMedia"); a < 0 || g < 0 || a > g {
+		t.Error("hands-free must create the AudioContext before awaiting getUserMedia")
 	}
 }
