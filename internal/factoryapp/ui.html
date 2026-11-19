@@ -3333,6 +3333,110 @@ window.FactoryTurn = (function () {
   return { create, DEFAULTS };
 })();
 </script>
+<script id="voice-wake">
+"use strict";
+/* ---------- FactoryWake: keep the screen awake while hands-free is on ----------
+ * Zero-touch hands-free dies the moment iOS auto-locks, so while it is ON we hold
+ * a Screen Wake Lock: navigator.wakeLock.request("screen"), re-acquired whenever the
+ * UA releases it (tab hidden, low power, ...) and on visibilitychange/pageshow, plus a
+ * slow watchdog (no gesture needed). Without the API (iOS < 16.4, home-screen PWAs
+ * before iOS 18.4) - or if the request is refused - it falls back to a muted, inline,
+ * looping video (NoSleep.js trick; the clip is NoSleep.js 0.12's, MIT, (c) Rich Tibbett).
+ * acquire() must be called synchronously inside the user's tap so video.play() is allowed.
+ * Pure of globals apart from window.FactoryWake; unit-tested under node with mocks
+ * (ui_wakelock_test.go extracts this block). The video-chat wake lock is separate.
+ *   create({nav, doc, watchMs}) -> {acquire(), release(), ensure(), mode(), held()}
+ *   mode(): "off" | "wakelock" | "video" */
+(function () {
+  const MP4 = "data:video/mp4;base64,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";
+  function create(env) {
+    const e = env || {};
+    const nav = e.nav || (typeof navigator !== "undefined" ? navigator : {});
+    const doc = e.doc || document;
+    const watchMs = e.watchMs || 15000;
+    let wanted = false, sentinel = null, pending = false, video = null, timer = 0, listening = false;
+    const visible = () => !doc.hidden && doc.visibilityState !== "hidden";
+    const hasNative = () => !!(nav.wakeLock && typeof nav.wakeLock.request === "function");
+
+    function mkVideo() {
+      const v = doc.createElement("video");
+      v.setAttribute("title", "Keep awake");
+      v.setAttribute("playsinline", ""); v.setAttribute("webkit-playsinline", "");
+      v.setAttribute("muted", ""); v.muted = true; v.defaultMuted = true;
+      v.setAttribute("loop", ""); v.loop = true;
+      v.setAttribute("aria-hidden", "true");
+      // Off-screen but still "rendered": display:none videos may not hold the screen awake on iOS.
+      v.style.cssText = "position:fixed;left:0;bottom:0;width:1px;height:1px;opacity:0.01;pointer-events:none;z-index:-1";
+      v.src = MP4;
+      v.addEventListener("timeupdate", () => { if (v.currentTime > 0.5) v.currentTime = Math.random(); });
+      (doc.body || doc.documentElement).appendChild(v);
+      return v;
+    }
+    function playVideo() {
+      if (!video) video = mkVideo();
+      let p;
+      try { p = video.play(); } catch (_) { return; }
+      if (p && typeof p.catch === "function") p.catch(() => {}); // retried by ensure()/visibilitychange
+    }
+    function stopVideo() {
+      if (!video) return;
+      try { video.pause(); } catch (_) {}
+      try { video.removeAttribute("src"); video.load && video.load(); } catch (_) {}
+      if (video.parentNode) video.parentNode.removeChild(video);
+      video = null;
+    }
+    function request() {
+      if (!wanted || sentinel || pending || !hasNative() || !visible()) return;
+      pending = true;
+      let p;
+      try { p = Promise.resolve(nav.wakeLock.request("screen")); } catch (err) { p = Promise.reject(err); }
+      p.then((s) => {
+        pending = false;
+        if (!wanted) { try { s.release(); } catch (_) {} return; } // turned off while the request was in flight
+        sentinel = s;
+        stopVideo();                                // the real lock supersedes the fallback
+        const gone = () => { if (sentinel === s) { sentinel = null; request(); } };
+        if (s.addEventListener) s.addEventListener("release", gone); else s.onrelease = gone;
+      }, () => {
+        pending = false;                            // refused (low power mode, PWA before 18.4, ...)
+        if (wanted && !sentinel) playVideo();
+      });
+    }
+    function ensure() {
+      if (!wanted) return;
+      if (hasNative()) {
+        if (!sentinel) { if (visible()) { request(); if (video) playVideo(); } }
+      } else playVideo();
+    }
+    function onVis() { if (visible()) ensure(); }
+    function acquire() {
+      wanted = true;
+      if (!listening) {
+        listening = true;
+        doc.addEventListener("visibilitychange", onVis);
+        if (typeof window !== "undefined" && window.addEventListener) window.addEventListener("pageshow", onVis);
+        timer = setInterval(ensure, watchMs);
+      }
+      if (hasNative()) request(); else playVideo(); // sync: still inside the tap
+    }
+    function release() {
+      wanted = false;
+      if (listening) {
+        listening = false;
+        doc.removeEventListener("visibilitychange", onVis);
+        if (typeof window !== "undefined" && window.removeEventListener) window.removeEventListener("pageshow", onVis);
+        clearInterval(timer); timer = 0;
+      }
+      const s = sentinel; sentinel = null;
+      if (s) { try { s.release(); } catch (_) {} }
+      stopVideo();
+    }
+    return { acquire, release, ensure, held: () => !!sentinel || !!video,
+      mode: () => (sentinel ? "wakelock" : video ? "video" : "off") };
+  }
+  window.FactoryWake = { create };
+})();
+</script>
 <script id="voice-client">
 "use strict";
 /* ---------- FactoryVoice: speech-to-text capture client ----------
@@ -3597,6 +3701,7 @@ window.FactoryVoice = (function () {
       onSpeechStart() {}, isPlaying: () => false, rollMs: 3000, minBlobBytes: 1200, tickMs: 50 }, opts);
     let stream = null, actx = null, an = null, src = null, timer = 0, rec = null, chunks = [];
     let recAt = 0, gen = 0, inflight = 0, chain = Promise.resolve(), state = "off", turn = null, vis = null;
+    const wake = window.FactoryWake.create();
     const buf = new Float32Array(1024);
     function cur() { return !actx ? "off" : turn.phase() === "speech" ? "speech" : inflight > 0 ? "sending" : "listening"; }
     function emit() { const s = cur(); if (s !== state) { state = s; try { o.onState(s); } catch (_) {} } }
@@ -3655,6 +3760,7 @@ window.FactoryVoice = (function () {
       if (state !== "off" || actx) return true;
       if (!supported()) { o.onError("Microphone not available (needs HTTPS and a modern browser)"); return false; }
       const my = ++gen, C = audioCtor();
+      wake.acquire(); // zero-touch: keep the screen on while hands-free is ON (sync, inside the tap)
       // iOS: create + resume the AudioContext synchronously inside the user's tap, BEFORE
       // the permission await, or it stays suspended and the analyser reads silence.
       const ctx = new C();
@@ -3662,7 +3768,7 @@ window.FactoryVoice = (function () {
       let s;
       try {
         s = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-      } catch (e) { try { ctx.close(); } catch (_) {} o.onError(micMessage(e), e); return false; }
+      } catch (e) { try { ctx.close(); } catch (_) {} if (my === gen) wake.release(); o.onError(micMessage(e), e); return false; }
       if (my !== gen) { s.getTracks().forEach((t) => t.stop()); try { ctx.close(); } catch (_) {} return false; }
       stream = s; actx = ctx; inflight = 0; chain = Promise.resolve();
       turn = window.FactoryTurn.create(o);
@@ -3679,6 +3785,7 @@ window.FactoryVoice = (function () {
     }
     function stop() {
       gen++;
+      wake.release();
       clearInterval(timer); timer = 0;
       const r = rec; rec = null; chunks = [];
       if (r && r.state !== "inactive") { r.onstop = null; try { r.stop(); } catch (_) {} }
