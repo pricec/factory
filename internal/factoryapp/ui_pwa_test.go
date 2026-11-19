@@ -196,3 +196,38 @@ func TestFactoryPushClient(t *testing.T) {
 	}
 	runNode(t, pushDriver, "push.js", m[1])
 }
+
+// TestStandaloneHeaderNav pins the Home Screen app navigation: with no browser
+// chrome, a header nav (#p-hnav) links every top-level phone page on every
+// phone route (thread, focus, keyboard up), gated on html.standalone and
+// inset by the safe areas; the desktop header and the bottom tab bar stay.
+func TestStandaloneHeaderNav(t *testing.T) {
+	e := newEnv(t)
+	_, body := getBody(t, e.ts.URL+"/")
+	for _, want := range []string{
+		`navigator.standalone`, `classList.add("standalone")`,
+		`<nav id="p-hnav"`,
+		`html.phone.standalone #p-hnav { display: flex;`,
+		`#p-hnav { display: none; }`,
+		`html.phone.standalone { --topx:`,
+		`var(--sar)`, `var(--sal)`,
+		`top: calc(52px + var(--sat) + var(--topx))`,
+		`#p-tabs button, #p-hnav button`,
+		`<nav id="p-tabs">`, `<button id="tab-planner"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page missing %q", want)
+		}
+	}
+	nav := body[strings.Index(body, `<nav id="p-hnav"`):]
+	nav = nav[:strings.Index(nav, "</nav>")]
+	for _, tab := range []string{"planner", "inbox", "alerts", "jobs", "foremen", "more"} {
+		if !strings.Contains(nav, `data-tab="`+tab+`"`) {
+			t.Errorf("#p-hnav missing tab %q", tab)
+		}
+	}
+	// the nav is only ever shown by the standalone+phone rule
+	if strings.Contains(body, "\n  #p-hnav { display: flex") || strings.Count(body, "#p-hnav { display: none; }") != 1 {
+		t.Error("#p-hnav must be hidden by default and shown only under html.phone.standalone")
+	}
+}
