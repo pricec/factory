@@ -471,3 +471,24 @@ func TestDeadLetterRefusesMergeJob(t *testing.T) {
 		t.Fatalf("state = %s, want dead", st)
 	}
 }
+
+func TestDismissMergeRequestStore(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	if _, err := s.DismissMergeRequest(ctx, "mr_nope", "planner", "r", false); !errors.Is(err, ErrMergeNotFound) {
+		t.Fatalf("unknown: %v", err)
+	}
+	mr, err := s.CreateMergeRequest(ctx, NewMergeRequest{Branch: "feat/d", Head: "0123456789abcdef0123456789abcdef01234567", RequestedBy: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DismissMergeRequest(ctx, mr.ID, "planner", " ", false); !IsBadMergeRequest(err) {
+		t.Fatalf("empty reason: %v", err)
+	}
+	if _, err := s.DismissMergeRequest(ctx, mr.ID, "planner", "r", false); !errors.Is(err, ErrMergeNotDismissable) {
+		t.Fatalf("queued: %v", err)
+	}
+	if n, err := s.NeedsAttentionMerges(ctx); err != nil || len(n) != 0 {
+		t.Fatalf("needs_attention = %v %v", n, err)
+	}
+}

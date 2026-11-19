@@ -137,8 +137,11 @@ type App struct {
 
 	// Merge queue (spec §6.11, mergequeue.go): mergeMu serializes passes,
 	// mergeKick wakes the loop, mergeForeman is the integration pin.
-	mergeMu      sync.Mutex
-	mergeKick    chan struct{}
+	mergeMu   sync.Mutex
+	mergeKick chan struct{}
+	// branches inspects a merge request's branch against its base
+	// (mergedismiss.go); tests replace it.
+	branches     BranchInspector
 	mergeForeman string
 	// mergeStallAlerted dedupes the stalled-dependency alert per request
 	// (mergeowner.go); guarded by mergeMu.
@@ -171,6 +174,7 @@ func New(cfg Config) (*App, error) {
 		advertise:          cfg.AdvertiseURL,
 		pendingAlertedJobs: map[string]string{},
 		mergeKick:          make(chan struct{}, 1),
+		branches:           ghInspector{},
 		mergeStallAlerted:  map[string]bool{},
 		mergeForeman:       mergeForemanFrom(cfg.MergeForeman, os.Getenv(EnvMergeForeman)),
 	}
@@ -278,6 +282,8 @@ func New(cfg Config) (*App, error) {
 		MarkSelfCancel: a.markSelfCancel,
 		// request_merge kicks the merge queue (spec §6.11).
 		MergeQueued: a.kickMergeQueue,
+		// dismiss_merge closes stale needs_attention requests.
+		DismissMerge: a.DismissMerge,
 		// update_task priority / set_job_priority re-evaluate held jobs.
 		TaskPriorityChanged: a.taskPriorityChanged,
 		JobPriorityChanged:  a.jobPriorityChanged,
@@ -394,6 +400,7 @@ func (a *App) Run(ctx context.Context) error {
 	run("alert expiry", func() error { a.alertExpiryLoop(ctx); return nil })
 	run("pending alert", func() error { a.pendingAlertLoop(ctx); return nil })
 	run("merge queue", func() error { a.mergeQueueLoop(ctx); return nil })
+	run("merge sweep", func() error { a.mergeSweepLoop(ctx); return nil })
 	if a.usagePoll != nil {
 		run("usage poller", func() error { a.usagePoll.Run(ctx); return nil })
 	}
@@ -515,6 +522,8 @@ func buildMux(a *App, mcpH http.Handler) http.Handler {
 	mux.Handle("/v1/schedules/", a.jobs.SchedulesHandler())
 	// Merge queue (spec §6.11): every mutation kicks the dispatch loop.
 	mergeH := a.jobs.MergeRequestsHandler(a.kickMergeQueue)
+	mux.HandleFunc("POST /v1/merge-requests/{id}/dismiss", a.handleDismissMerge) // mergedismiss.go
+	mux.HandleFunc("POST /v1/merge-requests/sweep", a.handleMergeSweep)
 	mux.Handle("/v1/merge-requests", mergeH)
 	mux.Handle("/v1/merge-requests/", mergeH)
 	mux.Handle("/v1/deadletter", a.jobs.DeadLetterHandler())

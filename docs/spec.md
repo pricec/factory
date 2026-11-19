@@ -817,6 +817,8 @@ host facts are descriptive and never matched on).
 | `GET /v1/merge-requests?limit=` | `200 {paused, paused_changed_at?, requests: [...]}`: the persisted pause flag plus the newest `limit` (default 200, 1-1000) requests ordered **oldest first** (§6.11) |
 | `POST /v1/merge-requests/{id}/cancel` | optional body `{reason?}`; queued or merging -> `cancelled` (a merging request's merge job is cancelled first, §6.11); `200` + the request; `404 not_found`; `409 already_terminal` |
 | `POST /v1/merge-requests/pause`, `POST /v1/merge-requests/resume` | set / clear the persisted pause flag (§6.11); `200` + the `GET` view |
+| `POST /v1/merge-requests/{id}/dismiss` | body `{reason, force?}` (2026-11-19 amendment): closes a `needs_attention` request (which `cancel` refuses) to `cancelled`, result `dismissed (<actor>[, forced]): <reason>`, an audit row in `merge_request_audit`, and acks the request's open alerts (title names the id). `reason` required (`400 bad_request`); `409 not_dismissable` when not `needs_attention` or when the branch has commits the base branch lacks and `force` is not true; `502 branch_unknown` when the branch cannot be inspected (via `gh api compare`) and `force` is not true; `404 not_found`. The planner tool is `dismiss_merge{id, reason, force?}` |
+| `POST /v1/merge-requests/sweep` | runs the needs_attention sweep once (also every 10 min, 2026-11-19 amendment): closes requests whose branch is merged into the base, deleted or empty (audit actor `sweep`, alerts acked); unverifiable or unmerged ones stay. `200 {cleared: [ids], kept, alerts_resolved}` |
 | `GET /v1/deadletter` | job + `last_error` + results (#10) |
 | `POST /v1/deadletter/{id}/requeue` | resets attempts, state `pending` (#10) |
 | `POST /v1/schedules` | (#8) |
@@ -2521,7 +2523,7 @@ task_id|null}`; `priority` is an integer, 0 = most urgent.
   returns open alerts; `ack_alert(ids[])` acks (resolves) open alerts,
   reporting unknown or already-closed ids under `skipped`, and publishes
   `alert.changed`. Both need the task store. The planner MCP surface budget
-  is now < 8KB.
+  is now < 9KB (dismiss_merge, 2026-11-19).
 - **SSE.** Every create and state change publishes a synthetic,
   non-persisted `alert.changed` envelope (payload = Alert JSON) on the
   `planner:main` stream (contract I5).

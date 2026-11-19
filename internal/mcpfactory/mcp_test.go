@@ -268,15 +268,15 @@ func TestToolsListAndBudget(t *testing.T) {
 	_, out = e.rpc(e.planner, "tools/list", nil)
 	res := resultOf(t, out)
 	tools, ok := res["tools"].([]any)
-	if !ok || len(tools) != 19 {
-		t.Fatalf("tools/list: want 19 tools, got %v", res["tools"])
+	if !ok || len(tools) != 20 {
+		t.Fatalf("tools/list: want 20 tools, got %v", res["tools"])
 	}
 	want := map[string]bool{
 		"list_foremen": false, "list_jobs": false, "create_job": false,
 		"read_result": false, "cancel_job": false, "message_foreman": false,
 		"notify_operator": false, "raise_alert": false,
 		"list_tasks": false, "get_task": false, "update_task": false, "set_priority_criteria": false,
-		"request_merge": false, "set_job_priority": false, "get_message": false, "create_task": false, "update_standing_summary": false,
+		"request_merge": false, "dismiss_merge": false, "set_job_priority": false, "get_message": false, "create_task": false, "update_standing_summary": false,
 		"list_alerts": false, "ack_alert": false,
 	}
 	var budget int
@@ -328,8 +328,9 @@ func TestToolsListAndBudget(t *testing.T) {
 	// gains follow_up_of/parent_task_id/message, list_tasks parent_task_id.
 	// Raised to 7.5KB (7680) by set_job_priority (schema + description).
 	// Raised to 8KB (8192) by list_alerts/ack_alert (alert triage, §9.5.3).
-	if budget >= 8192 {
-		t.Errorf("description budget = %d bytes, want < 8192", budget)
+	// Raised to 9KB (9216) by dismiss_merge (needs_attention merge cleanup).
+	if budget >= 9216 {
+		t.Errorf("description budget = %d bytes, want < 9216", budget)
 	}
 	t.Logf("description budget: %d bytes", budget)
 }
