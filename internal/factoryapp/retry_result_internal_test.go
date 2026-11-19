@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/pricec/factory/internal/inbox"
+	"github.com/pricec/factory/internal/jobs"
 	"github.com/pricec/factory/internal/wire"
 )
 
@@ -49,5 +50,52 @@ func TestNotifyDispatchedReleasesPriorAttemptResult(t *testing.T) {
 	}
 	if _, err := a.inbox.Post(ctx, FactoryMainInbox, res); err != nil {
 		t.Fatalf("retry attempt result rejected after re-dispatch: %v", err)
+	}
+}
+
+// A worker that finished posts its job.result and exits, so the foreman's
+// capabilities push no longer lists it as active. If the factory has not
+// consumed that result yet (busy consumer, restart/deploy), reconcile must
+// not reap the job as "does not claim it": the consumer will settle it.
+func TestReconcileSparesJobWithUnconsumedResult(t *testing.T) {
+	a := newInternalApp(t)
+	ctx := context.Background()
+	id := "job_inflight_x"
+	spec := wire.JobSpec{ID: id, Task: "work", Priority: 5}
+	spec.Normalize()
+	if err := a.jobs.Create(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.jobs.Dispatch(ctx, id, "fm_1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.jobs.DB().ExecContext(ctx,
+		`UPDATE jobs SET state = 'running', updated_at = '2000-01-01T00:00:00Z' WHERE id = ?`, id); err != nil {
+		t.Fatal(err)
+	}
+	res := wire.MessageEnvelope{Type: "job.result", JobID: id, From: "foreman:fm_1", Payload: []byte(`{"status":"done"}`)}
+	posted, err := a.inbox.Post(ctx, FactoryMainInbox, res)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := a.reconcileForeman(ctx, "fm_1", nil); err != nil {
+		t.Fatal(err)
+	}
+	job, _, _ := a.jobs.Get(ctx, id)
+	if job.State != jobs.StateRunning {
+		t.Fatalf("state with unconsumed result = %s, want running", job.State)
+	}
+
+	// Once consumed (acked) and the job is somehow still running, it is lost.
+	if err := a.inbox.Ack(ctx, FactoryMainInbox, []string{posted.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.reconcileForeman(ctx, "fm_1", nil); err != nil {
+		t.Fatal(err)
+	}
+	job, _, _ = a.jobs.Get(ctx, id)
+	if job.State == jobs.StateRunning {
+		t.Fatalf("state after result consumed = running, want reaped")
 	}
 }
