@@ -3656,6 +3656,14 @@ window.FactoryVoice = (function () {
     }
     return buf;
   }
+  // The TTS service emits 24 kHz mono 16-bit WAV with no clipping and silent edges (checked
+  // offline). Pin the playback context to that rate so decodeAudioData does not resample
+  // 24k -> 44.1/48k (iOS Safari's resampler plus the voice-processing session that an open
+  // hands-free mic forces made it crackle); the OS converts once, at the output.
+  const TTS_RATE = 24000;
+  function newCtx(C) {
+    try { return new C({ sampleRate: TTS_RATE }); } catch (_) { return new C(); }
+  }
   async function postJSON(url, body, signal) {
     const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal });
     if (!r.ok) { const e = new Error("Speech playback failed (" + r.status + ")"); e.status = r.status; throw e; }
@@ -3672,7 +3680,7 @@ window.FactoryVoice = (function () {
     function unlock() {
       const C = audioCtor();
       if (!C) return false;
-      if (!ctx) ctx = new C();
+      if (!ctx) ctx = newCtx(C);
       if (!master) { master = ctx.createGain(); master.gain.value = MASTER_GAIN; master.connect(ctx.destination); }
       if (ctx.state === "suspended") ctx.resume().catch(() => {});
       try { // iOS: a started (silent) source inside the gesture unlocks output

@@ -45,7 +45,7 @@ function buf(rate, len, ch) {
   const log = { gain: null, connects: [] };
   const dest = { name: "dest" };
   class Ctx {
-    constructor() { this.state = "running"; this.currentTime = 0; this.destination = dest; }
+    constructor(o) { global.ctxOpts = o; this.state = "running"; this.currentTime = 0; this.destination = dest; }
     createBuffer() { return buf(22050, 1, 1); }
     createGain() { const g = { gain: { value: 1 }, connect: (t) => log.connects.push(["gain", t]) }; log.gain = g; return g; }
     createBufferSource() { const s = { connect: (t) => log.connects.push(["src", t]), start() { setTimeout(() => s.onended && s.onended(), 1); }, stop() {}, disconnect() {} }; return s; }
@@ -55,6 +55,7 @@ function buf(rate, len, ch) {
   global.fetch = async (u) => ({ ok: true, status: 200, json: async () => ({ chunks: ["a", "b"] }), arrayBuffer: async () => new ArrayBuffer(8) });
   const sp = V.createSpeaker({});
   sp.unlock();
+  assert.strictEqual(global.ctxOpts && global.ctxOpts.sampleRate, 24000, "context pinned to the TTS native rate");
   assert.ok(log.gain.gain.value < 1 && log.gain.gain.value > 0.5);
   assert.ok(log.connects.some((c) => c[0] === "gain" && c[1] === dest));
   log.connects.length = 0; // drop the silent iOS-unlock source
