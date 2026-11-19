@@ -3449,6 +3449,7 @@ window.FactoryTurn = (function () {
  *   FactoryVoice.fetchEnabled(configUrl)     Promise<bool> (never rejects)
  *   FactoryVoice.pickMime()                  best supported recorder mime, "" = default
  *   FactoryVoice.transcribe(blob, endpoint)  Promise<string>
+ *   FactoryVoice.transcribeRetry(blob, endpoint)  same, auto-retries transient errors; failure carries err.blob
  *   FactoryVoice.createRecorder({endpoint, onState(state), onText(text), onError(msg, err)})
  *       -> {start(), stop(), cancel(), state()}; states: idle|requesting|recording|transcribing
  *   FactoryVoice.spokenFor(payload)          text to read aloud for a brain.reply payload
@@ -3497,6 +3498,22 @@ window.FactoryVoice = (function () {
     const j = await r.json();
     return (j && typeof j.text === "string" ? j.text : "").trim();
   }
+  // transcribeRetry resends the SAME blob on transient failures (network, 5xx, 429)
+  // with backoff; permanent errors (404/413/other 4xx) fail at once. The final error
+  // carries the blob (err.blob) so callers can keep the audio and offer a manual retry.
+  const RETRY_DELAYS = [700, 2000];
+  function transient(e) { return !!e && (e.kind === "down" || e.status === 429); }
+  async function transcribeRetry(blob, endpoint, o) {
+    const delays = (o && o.delays) || RETRY_DELAYS;
+    for (let i = 0; ; i++) {
+      try { return await transcribe(blob, endpoint, o && o.signal); }
+      catch (e) {
+        if (e && e.name === "AbortError") throw e;
+        if (!transient(e) || i >= delays.length) { if (e && typeof e === "object") e.blob = blob; throw e; }
+        await new Promise((r) => setTimeout(r, delays[i]));
+      }
+    }
+  }
   function micMessage(e) {
     switch (e && e.name) {
       case "NotAllowedError": case "SecurityError": return "Microphone permission denied";
@@ -3508,7 +3525,7 @@ window.FactoryVoice = (function () {
 
   function createRecorder(opts) {
     const o = Object.assign({ endpoint: "/v1/speech/stt", onState() {}, onText() {}, onError() {} }, opts);
-    let state = "idle", stream = null, rec = null, chunks = [], t0 = 0, wantStop = false, cancelled = false, gen = 0;
+    let state = "idle", stream = null, rec = null, chunks = [], t0 = 0, wantStop = false, cancelled = false, gen = 0, failed = null;
     function set(s) { state = s; try { o.onState(s); } catch (_) {} }
     function release() {
       if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
@@ -3541,13 +3558,22 @@ window.FactoryVoice = (function () {
       const dur = Date.now() - t0, parts = chunks; chunks = [];
       if (cancelled || my !== gen) { set("idle"); return; }
       if (dur < MIN_MS || !parts.length) { set("idle"); o.onError("Hold the button or tap again while you speak", null, "short"); return; }
+      await send(new Blob(parts, { type }));
+    }
+    // send transcribes blob; on failure the audio is KEPT (failed) for retry().
+    async function send(blob) {
       set("transcribing");
       try {
-        const text = await transcribe(new Blob(parts, { type }), o.endpoint);
+        const text = await transcribeRetry(blob, o.endpoint);
+        failed = null;
         set("idle");
         if (!text) o.onError("Didn't catch that", null, "empty"); else o.onText(text);
-      } catch (e) { set("idle"); o.onError(e.message, e); }
+      } catch (e) {
+        failed = blob; set("idle");
+        o.onError(e.message, e, "retry");
+      }
     }
+    function retry() { if (failed && state === "idle") return send(failed); }
     function stop() {
       wantStop = true;
       if (rec && rec.state !== "inactive") rec.stop();
@@ -3556,7 +3582,7 @@ window.FactoryVoice = (function () {
       cancelled = true; wantStop = true;
       if (rec && rec.state !== "inactive") rec.stop(); else if (state === "requesting") { /* resolved in start() */ }
     }
-    return { start, stop, cancel, state: () => state };
+    return { start, stop, cancel, retry, state: () => state, hasFailed: () => !!failed };
   }
 
   /* ---- spoken text selection ---- */
@@ -3701,6 +3727,7 @@ window.FactoryVoice = (function () {
       onSpeechStart() {}, isPlaying: () => false, rollMs: 3000, minBlobBytes: 1200, tickMs: 50 }, opts);
     let stream = null, actx = null, an = null, src = null, timer = 0, rec = null, chunks = [];
     let recAt = 0, gen = 0, inflight = 0, chain = Promise.resolve(), state = "off", turn = null, vis = null;
+    const failed = []; // utterance blobs whose STT failed: kept until retried (never dropped)
     const wake = window.FactoryWake.create();
     const buf = new Float32Array(1024);
     function cur() { return !actx ? "off" : turn.phase() === "speech" ? "speech" : inflight > 0 ? "sending" : "listening"; }
@@ -3732,12 +3759,32 @@ window.FactoryVoice = (function () {
         try {
           const blob = await blobP;
           if (my !== gen || !blob || blob.size < o.minBlobBytes) return;
-          const text = (await transcribe(blob, o.sttUrl)).trim();
+          const text = (await transcribeRetry(blob, o.sttUrl)).trim();
           if (my !== gen || !text) return; // empty / whitespace transcript: nothing to send
           await o.onUtterance(text);
-        } catch (e) { if (my === gen) o.onError((e && e.message) || "Transcription failed"); }
+        } catch (e) {
+          if (e && e.blob) { failed.push(e.blob); o.onError((e.message) || "Transcription failed", e, "retry"); }
+          else if (my === gen) o.onError((e && e.message) || "Transcription failed");
+        }
         finally { inflight = Math.max(0, inflight - 1); emit(); }
       });
+    }
+    // retryFailed resends every kept utterance, oldest first, through the same ordered chain.
+    function retryFailed() {
+      const todo = failed.splice(0);
+      for (const blob of todo) {
+        inflight++; emit();
+        chain = chain.then(async () => {
+          try {
+            const text = (await transcribeRetry(blob, o.sttUrl)).trim();
+            if (text) await o.onUtterance(text);
+          } catch (e) {
+            if (e && e.blob) { failed.push(e.blob); o.onError((e.message) || "Transcription failed", e, "retry"); }
+            else o.onError((e && e.message) || "Transcription failed");
+          }
+          finally { inflight = Math.max(0, inflight - 1); emit(); }
+        });
+      }
     }
     function tick() {
       if (!an) return;
@@ -3796,9 +3843,9 @@ window.FactoryVoice = (function () {
       if (stream) { stream.getTracks().forEach((t) => { t.onended = null; t.stop(); }); stream = null; }
       emit();
     }
-    return { start, stop, state: () => state, active: () => state !== "off", quiet: () => state === "listening" };
+    return { start, stop, retryFailed, hasFailed: () => failed.length > 0, state: () => state, active: () => state !== "off", quiet: () => state === "listening" };
   }
-  return { supported, pickMime, fetchEnabled, transcribe, createRecorder, stripMarkdown, spokenFor, createSpeaker, createHandsFree };
+  return { supported, pickMime, fetchEnabled, transcribe, transcribeRetry, createRecorder, stripMarkdown, spokenFor, createSpeaker, createHandsFree };
 })();
 </script>
 <script id="voice-wiring">
@@ -3817,10 +3864,20 @@ window.FactoryVoice = (function () {
     { ta: "p-input", before: "p-send" },
   ];
   let toastEl = null, toastTimer = 0;
-  function toast(msg, err) {
+  // toast(msg, err, action): with action {label, fn} the toast stays until dismissed and shows a button.
+  function toast(msg, err, action) {
     if (!toastEl) { toastEl = document.createElement("div"); toastEl.id = "voice-toast"; toastEl.setAttribute("role", "status"); document.body.appendChild(toastEl); }
     toastEl.textContent = msg; toastEl.className = err ? "err" : ""; toastEl.hidden = false;
-    clearTimeout(toastTimer); toastTimer = setTimeout(() => { toastEl.hidden = true; }, err ? 5000 : 2000);
+    clearTimeout(toastTimer);
+    if (action) {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "voice-retry"; b.textContent = action.label;
+      b.style.cssText = "margin-left:10px;padding:6px 12px;font:inherit;border-radius:6px;border:1px solid currentColor;background:transparent;color:inherit;cursor:pointer";
+      b.addEventListener("click", () => { toastEl.hidden = true; action.fn(); });
+      toastEl.appendChild(b);
+      return; // sticky until retried; a newer toast replaces it
+    }
+    toastTimer = setTimeout(() => { toastEl.hidden = true; }, err ? 5000 : 2000);
   }
   function insertText(ta, text) {
     const v = ta.value;
@@ -3855,7 +3912,7 @@ window.FactoryVoice = (function () {
         if (s === "recording") toast("Listening… tap the mic again to stop");
       },
       onText(text) { insertText(ta, text); toast("Transcript added - edit and send"); },
-      onError(msg, _e, kind) { toast(msg, kind !== "short"); },
+      onError(msg, _e, kind) { toast(msg, kind !== "short", kind === "retry" ? { label: "Retry", fn: () => rec.retry() } : null); },
     });
     let downAt = 0, active = false;
     btn.addEventListener("pointerdown", (e) => {
@@ -3961,7 +4018,7 @@ window.FactoryVoice = (function () {
         if (s === "listening") flush();
       },
       onUtterance: onUtterance,
-      onError(msg) { toast(msg, true); },
+      onError(msg, _e, kind) { toast(msg, true, kind === "retry" ? { label: "Retry", fn: () => hf.retryFailed() } : null); },
     });
 
     function persist() { try { localStorage.setItem(LS_SPEAK, speakOn ? "1" : "0"); } catch (_) {} }
