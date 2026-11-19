@@ -40,6 +40,19 @@ function buf(rate, len, ch) {
   const d = V.fadeEdges(buf(24000, 10, 1)).getChannelData(0);
   assert.strictEqual(d[0], 0); assert.strictEqual(d[9], 0);
 }
+// 2b. nextSlot: sample-exact gapless chaining, re-prime on underrun.
+{
+  const a = V.nextSlot(null, 1.0003, 24000, 2400);
+  assert.strictEqual(a.startFrame, Math.ceil(1.0603 * 24000));
+  assert.strictEqual(a.start * 24000, a.startFrame);
+  assert.strictEqual(a.underrun, false);
+  const b = V.nextSlot(a.endFrame, 1.01, 24000, 1000); // still ahead of the clock: back to back
+  assert.strictEqual(b.startFrame, a.endFrame);
+  assert.strictEqual(b.underrun, false);
+  const c = V.nextSlot(b.endFrame, b.endFrame / 24000 + 0.2, 24000, 1000); // late chunk
+  assert.strictEqual(c.underrun, true);
+  assert.ok(c.start > b.endFrame / 24000 + 0.2);
+}
 // 3. The speaker plays through a master gain below unity, not straight to destination.
 (async () => {
   const log = { gain: null, connects: [] };
