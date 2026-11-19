@@ -170,8 +170,10 @@ func IsDocGlob(g string) bool {
 
 // Footprint is one job's declared footprint as the coordinator sees it.
 type Footprint struct {
-	JobID     string
-	Touches   []string
+	JobID   string
+	Touches []string
+	// Repo is the normalized target repo ("" = unknown).
+	Repo      string
 	CreatedAt string
 	Priority  int
 	// State is the job state; Held jobs count as blockers only for jobs
@@ -183,10 +185,53 @@ type Footprint struct {
 
 // Candidate is the job being admitted.
 type Candidate struct {
-	JobID     string
-	Touches   []string
+	JobID   string
+	Touches []string
+	// Repo is the normalized target repo ("" = unknown).
+	Repo      string
 	CreatedAt string
 	Priority  int
+}
+
+// NormalizeRepo returns the canonical OWNER/REPO form of a repo name: a
+// bare name ("video-chat") gets the default owner, case is folded, and a
+// ".git" suffix or surrounding space is dropped. "" stays "" (unknown).
+func NormalizeRepo(r string) string {
+	r = strings.ToLower(strings.TrimSpace(r))
+	r = strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(r, "https://github.com/"), "github.com/"), ".git")
+	r = strings.Trim(r, "/")
+	if r == "" {
+		return ""
+	}
+	if !strings.Contains(r, "/") {
+		r = defaultRepoOwner + "/" + r
+	}
+	return r
+}
+
+const defaultRepoOwner = "pricec"
+
+// reposMayConflict scopes conflicts per repo: different known repos never
+// conflict; two unknown repos are compared as usual; a known repo against
+// an unknown one conflicts only through a TouchAll ("*") footprint on
+// either side.
+func reposMayConflict(a, b string, aTouches, bTouches []string) bool {
+	switch {
+	case a == b:
+		return true
+	case a != "" && b != "":
+		return false
+	}
+	return hasTouchAll(aTouches) || hasTouchAll(bTouches)
+}
+
+func hasTouchAll(touches []string) bool {
+	for _, t := range touches {
+		if isAll(t) {
+			return true
+		}
+	}
+	return false
 }
 
 // Conflict says which active job a candidate overlaps, and on which globs.
@@ -215,6 +260,9 @@ func (f Footprint) before(c Candidate) bool {
 //   - a candidate with no touches conflicts with nothing; a blocker with
 //     none is ignored;
 //   - a candidate never waits on a job that sorts after it;
+//   - conflicts are per repo: jobs in different known repos never
+//     conflict; a job of unknown repo conflicts with another unknown-repo
+//     job, and with a known-repo job only when one side declares "*";
 //   - overlap where either glob is a doc glob is soft, unless either is
 //     TouchAll (exclusivity is never soft).
 //
@@ -225,7 +273,7 @@ func CheckConflict(c Candidate, active []Footprint) (hard *Conflict, soft []Conf
 		return nil, nil
 	}
 	for _, f := range active {
-		if f.JobID == c.JobID || len(f.Touches) == 0 || !f.before(c) {
+		if f.JobID == c.JobID || len(f.Touches) == 0 || !f.before(c) || !reposMayConflict(c.Repo, f.Repo, c.Touches, f.Touches) {
 			continue
 		}
 		cf, ok := overlapBetween(c.Touches, f)

@@ -45,6 +45,8 @@ type (
 		// Touches is the declared file footprint (spec §6.10 conflict
 		// coordinator): repo-relative path globs.
 		Touches []string `json:"touches,omitempty"`
+		// Repo is the job's target repo; touches conflicts are per repo.
+		Repo string `json:"repo,omitempty"`
 		// Foreman is the explicit routing pin (spec §6.7): bare or
 		// foreman:-prefixed id of the foreman the job runs on; empty
 		// means the Matcher's capability pick.
@@ -206,6 +208,7 @@ func createJobTool(cfg Config) mcp.ToolHandlerFor[createJobArgs, any] {
 		spec.Requires = in.Requires
 		spec.Secrets = in.Secrets
 		spec.Touches = in.Touches
+		spec.Repo = in.Repo
 		if in.ResultSchema != nil {
 			b, err := wire.MarshalPayload(in.ResultSchema)
 			if err != nil {

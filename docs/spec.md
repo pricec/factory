@@ -314,6 +314,15 @@ create paths as the other fields (MCP `create_job` `touches`, UI
 job spec. A violation is a create-time error (MCP tool error / `400`).
 Absent/empty means "no declared footprint".
 
+`repo` (optional, string; MCP `create_job` `repo`) records the job's target
+repo (OWNER/REPO or a bare name, normalised to `pricec/<name>`; a `repo`
+key in the payload is used when the field is absent). Touches conflicts
+(§6.14) are scoped per repo: jobs in different known repos never conflict.
+A job of unknown repo conflicts with other unknown-repo jobs, and with a
+known-repo job only when one side declares `["*"]`. A done job whose merge
+request is `merging` under a dead / timed-out / cancelled / superseded merge
+job no longer holds its touches.
+
 `parent_job_id` (2026-11-15 sub-spawning amendment, §9.2) appears only on
 child jobs spawned by a worker's `spawn_child` tool and is absent otherwise
 (factory-dispatched and brain-spawned jobs never carry it): it names the
@@ -2008,8 +2017,10 @@ Tools (exact):
   change and `reason` are posted on the job's task thread. `update_task`
   with a priority likewise re-evaluates the held jobs immediately. Throttle
   limits are unchanged.
-- `request_merge(branch, head, note?, after?)` - queues a merge request
-  (§6.11; `requested_by` `planner`, repo the default) and returns
+- `request_merge(branch, head, note?, after?, repo?)` - queues a merge request
+  (§6.11; `requested_by` `planner`; `repo` defaults to `pricec/factory`, a
+  bare name such as `video-chat` gets owner `pricec`; the merge targets the
+  repo's default branch: `master` for factory, `main` otherwise) and returns
   `{id, state, waiting_on?}`. Invalid input and a duplicate active branch
   are tool errors. The description tells the planner that EVERY "merge (and
   deploy) X" request is a `request_merge` call, never a `create_job` prose

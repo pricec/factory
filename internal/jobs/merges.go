@@ -79,6 +79,22 @@ func MergeStateForJob(jobState string) (state string, ok bool) {
 // (the gh OWNER/REPO form).
 const DefaultMergeRepo = "pricec/factory"
 
+// DefaultMergeBranch is the integration branch of DefaultMergeRepo.
+const DefaultMergeBranch = "master"
+
+// MergeBaseBranch is the default (integration) branch a merge request for
+// repo targets: master for the factory repo, main for every other repo
+// (e.g. video-chat). The merge job still reads the real default branch
+// from GitHub (docs/merging.md step 2); this is the value the request and
+// its task text state up front. repo may be a bare name.
+func MergeBaseBranch(repo string) string {
+	r := NormalizeRepo(repo)
+	if r == "" || r == DefaultMergeRepo {
+		return DefaultMergeBranch
+	}
+	return "main"
+}
+
 // Merge request field bounds (spec §6.11).
 const (
 	maxMergeNoteBytes   = 2000
@@ -229,6 +245,8 @@ func (in *NewMergeRequest) validate() error {
 	in.Note = strings.TrimSpace(in.Note)
 	if in.Repo == "" {
 		in.Repo = DefaultMergeRepo
+	} else if !strings.Contains(in.Repo, "/") && repoRe.MatchString("x/"+in.Repo) {
+		in.Repo = defaultRepoOwner + "/" + in.Repo // bare name, e.g. "video-chat"
 	}
 	switch {
 	case in.Branch == "":
