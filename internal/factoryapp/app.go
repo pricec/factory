@@ -251,6 +251,13 @@ func New(cfg Config) (*App, error) {
 	a.matcher = matcher
 	a.sweeper = jobs.NewSweeper(a.jobs)
 	a.scheduler = jobs.NewScheduler(a.jobs, matcher)
+	a.scheduler.LinkTask = func(ctx context.Context, taskID, jobID string) error {
+		if err := a.tasks.LinkJob(ctx, taskID, jobID); err != nil {
+			return err
+		}
+		a.publishTaskChanged(ctx, taskID)
+		return nil
+	}
 	a.picker = jobs.NewRetryPicker(a.jobs)
 	a.pending = jobs.NewPendingPicker(a.jobs, matcher)
 

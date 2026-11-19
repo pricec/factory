@@ -329,7 +329,7 @@ func createJobTool(cfg Config) mcp.ToolHandlerFor[createJobArgs, any] {
 			template := spec
 			template.ID = ""
 			template.CreatedAt = ""
-			if _, err := cfg.Store.CreateSchedule(ctx, in.ScheduleCron, template); err != nil {
+			if _, err := cfg.Store.CreateScheduleForTask(ctx, in.ScheduleCron, template, taskID); err != nil {
 				return nil, nil, fmt.Errorf("create schedule: %w", err)
 			}
 		}
