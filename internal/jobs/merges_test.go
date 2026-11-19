@@ -113,7 +113,8 @@ func TestCreateMergeRequestValidation(t *testing.T) {
 		{"shell chars", NewMergeRequest{Branch: "x;rm -rf /", Head: testHead}, false},
 		{"dotdot", NewMergeRequest{Branch: "a..b", Head: testHead}, false},
 		{"leading dash", NewMergeRequest{Branch: "-x", Head: testHead}, false},
-		{"bad repo", NewMergeRequest{Repo: "nope", Branch: "x", Head: testHead}, false},
+		{"bare repo name", NewMergeRequest{Repo: "video-chat", Branch: "x", Head: testHead}, true},
+		{"bad repo", NewMergeRequest{Repo: "no pe", Branch: "x", Head: testHead}, false},
 		{"long note", NewMergeRequest{Branch: "x", Head: testHead, Note: strings.Repeat("n", 2001)}, false},
 	}
 	for _, tc := range cases {

@@ -61,7 +61,7 @@ func (a *App) conflictAdmit(ctx context.Context, spec wire.JobSpec, createdAt, t
 		return false, ""
 	}
 	hard, soft := jobs.CheckConflict(jobs.Candidate{
-		JobID: spec.ID, Touches: spec.Touches, CreatedAt: createdAt, Priority: spec.Priority,
+		JobID: spec.ID, Touches: spec.Touches, Repo: jobs.SpecRepo(spec), CreatedAt: createdAt, Priority: spec.Priority,
 	}, active)
 	for _, c := range soft {
 		if !existing {

@@ -26,10 +26,12 @@ func (s *Store) ActiveFootprints(ctx context.Context) ([]Footprint, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT j.id, j.spec, j.state, j.created_at, IFNULL(m.id, '')
 		FROM jobs j
 		LEFT JOIN merge_requests m ON m.source_job_id = j.id AND m.state IN (?, ?) AND j.state = ?
+		  AND NOT (m.state = ? AND EXISTS (SELECT 1 FROM jobs mj WHERE mj.id = m.job_id AND mj.state IN (?, ?, ?, ?)))
 		WHERE IFNULL(json_array_length(json_extract(j.spec, '$.touches')), 0) > 0
 		  AND (j.state IN (?, ?, ?, ?, ?) OR (j.state = ? AND m.id IS NOT NULL))
 		GROUP BY j.id`,
 		MergeQueued, MergeMerging, StateDone,
+		MergeMerging, StateDead, StateTimedOut, StateCancelled, StateSuperseded,
 		StateHeld, StatePending, StateDispatched, StateRunning, StateFailed, StateDone)
 	if err != nil {
 		return nil, err
@@ -47,6 +49,7 @@ func (s *Store) ActiveFootprints(ctx context.Context) ([]Footprint, error) {
 			continue // unreadable spec: no footprint
 		}
 		f.Touches, f.Priority = spec.Touches, spec.Priority
+		f.Repo = SpecRepo(spec)
 		out = append(out, f)
 	}
 	return out, rows.Err()
@@ -96,4 +99,19 @@ func (s *Store) CountHeldByKind(ctx context.Context) (map[string]int, error) {
 		out[HeldKind(r)]++
 	}
 	return out, rows.Err()
+}
+
+// SpecRepo is the normalized target repo of a job spec: spec.Repo, else a
+// "repo" string in the JSON payload; "" when unknown.
+func SpecRepo(spec wire.JobSpec) string {
+	if r := NormalizeRepo(spec.Repo); r != "" {
+		return r
+	}
+	var p struct {
+		Repo string `json:"repo"`
+	}
+	if len(spec.Payload) > 0 && json.Unmarshal(spec.Payload, &p) == nil {
+		return NormalizeRepo(p.Repo)
+	}
+	return ""
 }

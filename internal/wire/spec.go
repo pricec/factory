@@ -101,6 +101,10 @@ type JobSpec struct {
 	// crosses directories; `*` alone means "everything"). Optional: a job
 	// that declares none is never held for conflicts and blocks nobody.
 	Touches []string `json:"touches,omitempty"`
+	// Repo is the target repository (gh OWNER/REPO or a bare name) the job
+	// works in. Touches conflicts are scoped per repo: jobs in different
+	// repos never conflict. "" = unknown (see jobs.CheckConflict).
+	Repo string `json:"repo,omitempty"`
 	// Foreman is the explicit routing pin (§6.7, 2026-11-16
 	// foreman-pin amendment): when set, the job dispatches to that
 	// foreman instead of the Matcher's capability pick. Full
