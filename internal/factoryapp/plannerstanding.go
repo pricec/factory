@@ -84,6 +84,9 @@ func buildStandingWakePrompt(w PlannerWake) string {
 		}
 	}
 	sb.WriteString(standingWakeFooter)
+	if hasType(w.Triggers, alertRaisedType) {
+		sb.WriteString(alertWakePrompt)
+	}
 	if fold != "" {
 		fmt.Fprintf(&sb, "\nBefore you finish, fold the older messages into the summary: call update_standing_summary with a merged, compact summary "+
 			"(old summary + the messages above except the newest %d; keep decisions, task ids, open questions) and through_message_id=%s.\n", standingKeepRecent, fold)

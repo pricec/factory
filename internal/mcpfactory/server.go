@@ -42,6 +42,9 @@ type Config struct {
 	TaskChanged func(ctx context.Context, taskID string)
 	// RaiseAlert backs the raise_alert tool (spec §9.5.3); nil -> tool errors.
 	RaiseAlert RaiseAlertFunc
+	// AlertChanged, when set, is told about alerts ack_alert transitions
+	// (the factory publishes alert.changed on SSE).
+	AlertChanged func(tasks.Alert)
 	// MarkSelfCancel, when set, is called before cancel_job cancels a job
 	// and returns a func that withdraws the mark if the cancel fails; the
 	// factory uses it so the planner's own cancels do not wake it.
@@ -127,6 +130,7 @@ func Handler(cfg Config) (http.Handler, error) {
 
 	addSetJobPriorityTool(srv, cfg)
 	addRaiseAlertTool(srv, cfg)
+	addAlertTriageTools(srv, cfg) // list_alerts, ack_alert (spec §9.5.3)
 	addRequestMergeTool(srv, cfg) // spec §6.11 merge queue (merge_tool.go)
 
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv },

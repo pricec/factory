@@ -476,3 +476,34 @@ func TestCreateTaskLinks(t *testing.T) {
 		t.Errorf("list_tasks parent filter = %v", list)
 	}
 }
+
+// TestAlertTriageTools: list_alerts shows open alerts; ack_alert resolves
+// them and reports unknown / already-closed ids without failing.
+func TestAlertTriageTools(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	al, err := e.tasks.CreateAlert(ctx, tasks.NewAlert{Priority: 1, Title: "disk", Source: "factory:x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := structured(t, resultOf(t, e.callTool("list_alerts", map[string]any{})))
+	list, _ := sc["alerts"].([]any)
+	if len(list) != 1 || list[0].(map[string]any)["id"] != al.ID {
+		t.Fatalf("list_alerts = %v", sc)
+	}
+	sc = structured(t, resultOf(t, e.callTool("ack_alert", map[string]any{"ids": []string{al.ID, "alert_nope"}})))
+	if acked, _ := sc["acked"].([]any); len(acked) != 1 || acked[0] != al.ID {
+		t.Fatalf("ack_alert = %v", sc)
+	}
+	if sk, _ := sc["skipped"].(map[string]any); sk["alert_nope"] != "unknown" {
+		t.Fatalf("skipped = %v", sc["skipped"])
+	}
+	sc = structured(t, resultOf(t, e.callTool("ack_alert", map[string]any{"ids": []string{al.ID}})))
+	if sk, _ := sc["skipped"].(map[string]any); sk[al.ID] != "already acked" {
+		t.Fatalf("re-ack = %v", sc)
+	}
+	sc = structured(t, resultOf(t, e.callTool("list_alerts", map[string]any{})))
+	if list, _ := sc["alerts"].([]any); len(list) != 0 {
+		t.Fatalf("acked alert still listed: %v", sc)
+	}
+}
