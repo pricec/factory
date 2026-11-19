@@ -7,7 +7,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="factory">
+<meta name="apple-mobile-web-app-title" content="Factory">
 <meta name="format-detection" content="telephone=no">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
@@ -31,6 +31,9 @@
     --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
   * { box-sizing: border-box; }
+  /* Home Screen app: the page owns every pixel, notch to home indicator. */
+  html { background: var(--bg); }
+  @media (display-mode: standalone) { html, body { overscroll-behavior-y: none; } }
   body { margin: 0; background: var(--bg); color: var(--text);
     font: 14px/1.5 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
   header { display: flex; align-items: baseline; gap: 16px;
@@ -307,7 +310,7 @@
     --tabh: 56px; --kb: 0px; --composer-h: 62px; --fnav-h: 60px; --fbar-h: 48px; -webkit-text-size-adjust: 100%; }
   html.phone body { font-size: 16px; -webkit-tap-highlight-color: transparent; }
   html.phone body > header, html.phone #usagepanel, html.phone #credpanel, html.phone body > main { display: none !important; }
-  html.phone #phone { display: block; overflow-x: clip; min-height: 100vh; }
+  html.phone #phone { display: block; overflow-x: clip; min-height: 100vh; min-height: 100dvh; }
   #phone button { font-family: inherit; cursor: pointer; }
   #phone .p-sys { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
   #p-top { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 2px;
@@ -763,6 +766,8 @@
       <button type="submit">save credential</button>
     </form>
   </section>
+    <h2 class="sethead">Notifications</h2>
+    <div class="panel push-panel" id="push-panel-desktop"></div>
     <h2 class="sethead">Role-default models</h2>
     <form class="panel" id="settingsform">
       <div class="toolbar" style="margin-bottom:4px">
@@ -2232,6 +2237,7 @@ async function loadSettings() {
   try { data = await getJSON("/v1/settings"); }
   catch (e) { $("settingsrows").innerHTML = '<div class="err">' + esc(e.message) + "</div>"; return; }
   renderSettings(data.roles);
+  if (window.FactoryPush && FactoryPush.render) FactoryPush.render();
   if (allModels === null || modelFetchError) loadModels();
 }
 
@@ -2943,8 +2949,10 @@ function pRenderMore() {
       '<div class="p-row"><div class="p-item" data-go="ibx/' + esc(s.inbox_id) + '"><span></span><div class="p-title" style="font-family:var(--mono);font-size:15px">' + esc(s.inbox_id) +
       '</div><span class="p-time">' + esc(pShort(rel(s.last_ts))) + '</span><div class="p-meta">' + s.total + " messages" +
       (s.unacked > 0 ? ' <span class="badge hot">' + s.unacked + " unacked</span>" : "") + "</div></div></div>")) : '<div class="p-empty">no inboxes</div>') +
+    pSec("Notifications") + '<div class="p-card push-panel"></div>' +
     pSec("Display") + '<div class="p-menu"><button class="p-btn" data-act="desktop">Use the desktop layout on this device</button></div>' +
     '<p class="p-hint">' + esc(location.host) + ' · Add to Home Screen from the Share menu for a full-screen app.</p>';
+  if (window.FactoryPush && FactoryPush.render) FactoryPush.render();
 }
 function pRenderInboxLog() {
   pTop(esc(P.r.arg), "");
@@ -3516,7 +3524,12 @@ window.FactoryVoice = (function () {
   }
   function micMessage(e) {
     switch (e && e.name) {
-      case "NotAllowedError": case "SecurityError": return "Microphone permission denied";
+      case "NotAllowedError": case "SecurityError":
+        // A Home Screen app asks for the mic itself (and iOS may ask again on a
+        // later launch); after "Don't Allow" it will not prompt until reopened.
+        return (navigator.standalone || (window.matchMedia && matchMedia("(display-mode: standalone)").matches))
+          ? "Microphone permission denied - close and reopen the app, then tap Allow"
+          : "Microphone permission denied";
       case "NotFoundError": case "OverconstrainedError": return "No microphone found";
       case "NotReadableError": return "Microphone is busy or unavailable";
       default: return "Microphone error: " + ((e && e.message) || e);
@@ -4137,6 +4150,136 @@ window.FactoryVoice = (function () {
     wireSheets();
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init); else init();
+})();
+</script>
+<script id="push-client">
+/* ---------- FactoryPush: service worker registration + Web Push (#push-client) ----------
+ * The service worker (/sw.js) caches only the app shell and never touches API,
+ * SSE or websocket traffic. Web Push on iOS (16.4+) works only for a page added
+ * to the Home Screen, and only when Notification.requestPermission() and
+ * pushManager.subscribe() run inside a user gesture - so enabling is a button.
+ *
+ *   FactoryPush.status()  -> { state, standalone } where state is one of
+ *       unsupported | install | denied | off | on | disabled
+ *   FactoryPush.enable()  / .disable()   (call from a click handler)
+ *   FactoryPush.render()  fills every .push-panel element
+ */
+window.FactoryPush = (function () {
+  "use strict";
+  function create(env) {
+    const nav = env.navigator, win = env.window, N = env.Notification;
+    const fetchJ = env.fetch;
+    let reg = null;
+    const standalone = () => !!((nav && nav.standalone) || (win.matchMedia && win.matchMedia("(display-mode: standalone)").matches));
+    const iosLike = () => /iPad|iPhone|iPod/.test(nav.userAgent || "") || (nav.platform === "MacIntel" && nav.maxTouchPoints > 1);
+    const canPush = () => !!(nav.serviceWorker && win.PushManager && N);
+    function b64ToBytes(s) {
+      const pad = "=".repeat((4 - (s.length % 4)) % 4);
+      const raw = win.atob((s + pad).replace(/-/g, "+").replace(/_/g, "/"));
+      const out = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+      return out;
+    }
+    async function getReg() {
+      if (reg) return reg;
+      reg = await nav.serviceWorker.ready;
+      return reg;
+    }
+    async function status() {
+      const sa = standalone();
+      // iOS exposes PushManager only to Home Screen apps: in plain Safari the
+      // fix is "Add to Home Screen", not "unsupported".
+      if (!canPush()) return { state: iosLike() && !sa ? "install" : "unsupported", standalone: sa };
+      if (N.permission === "denied") return { state: "denied", standalone: sa };
+      let sub = null;
+      try { sub = await (await getReg()).pushManager.getSubscription(); } catch (_) { /* no worker yet */ }
+      if (sub) return { state: "on", standalone: sa, endpoint: sub.endpoint };
+      return { state: "off", standalone: sa };
+    }
+    // enable must be invoked synchronously from a click: requestPermission is
+    // the first await so the gesture is still live.
+    async function enable() {
+      const perm = await N.requestPermission();
+      if (perm !== "granted") throw new Error("Notifications were not allowed (" + perm + ")");
+      const r = await getReg();
+      const k = await fetchJ("/v1/push/key");
+      if (!k.ok) throw new Error(k.status === 404 ? "Push is disabled on this factory" : "Could not get the push key (" + k.status + ")");
+      const key = (await k.json()).public_key;
+      let sub = await r.pushManager.getSubscription();
+      if (!sub) sub = await r.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(key) });
+      const res = await fetchJ("/v1/push/subscribe", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(sub.toJSON ? sub.toJSON() : sub) });
+      if (!res.ok) throw new Error("Server rejected the subscription (" + res.status + ")");
+      try { win.localStorage.setItem("factory.push", "1"); } catch (_) {}
+    }
+    async function disable() {
+      const r = await getReg();
+      const sub = await r.pushManager.getSubscription();
+      if (!sub) { try { win.localStorage.removeItem("factory.push"); } catch (_) {} return; }
+      const endpoint = sub.endpoint;
+      await fetchJ("/v1/push/unsubscribe", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ endpoint }) });
+      await sub.unsubscribe();
+      try { win.localStorage.removeItem("factory.push"); } catch (_) {}
+    }
+    return { status, enable, disable, standalone, b64ToBytes };
+  }
+
+  const api = { create };
+  if (typeof document === "undefined" || typeof navigator === "undefined") return api; // node test harness
+  const P = create({ navigator, window, Notification: window.Notification, fetch: (u, o) => fetch(u, o) });
+  Object.assign(api, P);
+
+  const TEXT = {
+    unsupported: "Push notifications are not supported in this browser.",
+    install: "On iPhone, notifications work from the Home Screen app: Share → Add to Home Screen, then open Factory from there.",
+    denied: "Notifications are blocked. Re-enable them in iOS Settings → Notifications → Factory (or Settings → Apps → Safari → Advanced for websites).",
+    off: "Get a notification when the planner replies, a job finishes or fails, or an alert is raised.",
+    on: "Notifications are on for this device.",
+  };
+  let busy = false, msg = "";
+  api.render = async function () {
+    const els = document.querySelectorAll(".push-panel");
+    if (!els.length) return;
+    const s = await P.status();
+    const btn = s.state === "off" ? '<button type="button" class="p-btn pri" data-push="enable">Enable notifications</button>'
+      : s.state === "on" ? '<button type="button" class="p-btn" data-push="disable">Disable notifications</button>' : "";
+    const html = '<div class="push-text">' + (TEXT[s.state] || "") + "</div>" + btn +
+      (msg ? '<div class="push-err" style="color:var(--bad);margin-top:6px">' + msg.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])) + "</div>" : "");
+    els.forEach((el) => { if (el.innerHTML !== html) el.innerHTML = html; });
+  };
+  document.addEventListener("click", async (ev) => {
+    const b = ev.target.closest && ev.target.closest("[data-push]");
+    if (!b || busy) return;
+    busy = true; msg = ""; b.disabled = true;
+    try { await (b.dataset.push === "enable" ? P.enable() : P.disable()); }
+    catch (e) { msg = (e && e.message) || String(e); }
+    busy = false;
+    api.render();
+  });
+
+  // Service worker: register, keep it fresh while the app stays resident, and
+  // pick up a new deploy at the next safe moment (never mid hands-free).
+  if ("serviceWorker" in navigator) {
+    let hadController = !!navigator.serviceWorker.controller, reloadPending = false;
+    const handsFreeActive = () => { const el = document.getElementById("hf-status"); return !!(el && !el.hidden); };
+    const maybeReload = () => { if (reloadPending && !handsFreeActive()) { reloadPending = false; location.reload(); } };
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (!hadController) { hadController = true; return; } // first install: nothing stale
+      reloadPending = true; maybeReload();
+    });
+    navigator.serviceWorker.addEventListener("message", (ev) => {
+      // The push service rotated our subscription: re-subscribe silently if
+      // this device had notifications on (permission is already granted).
+      if (ev.data && ev.data.type === "push-resubscribe" && localStorage.getItem("factory.push") === "1") P.enable().catch(() => {});
+    });
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("/sw.js", { scope: "/", updateViaCache: "none" }).then((r) => {
+        document.addEventListener("visibilitychange", () => {
+          if (document.visibilityState === "visible") { r.update().catch(() => {}); maybeReload(); api.render(); }
+        });
+      }).catch(() => { /* private mode / http: the app still works uncached */ });
+    });
+  }
+  return api;
 })();
 </script>
 </body>

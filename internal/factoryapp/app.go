@@ -59,6 +59,10 @@ type Config struct {
 	// auth stores (sweeper, liveness, pairing TTLs all become
 	// fake-clockable).
 	Now func() time.Time
+	// PushHTTPClient is the Web Push delivery client (nil -> a 15s default);
+	// PushAnyHost skips the push-service host allowlist. Test seams.
+	PushHTTPClient *http.Client
+	PushAnyHost    bool
 	// Usage configures the S2 usage-window tracker (observe-only).
 	Usage UsageConfig
 	// Throttle configures the S3 dispatch gate (throttle.go).
@@ -91,6 +95,7 @@ type App struct {
 	pending   *jobs.PendingPicker
 	matcher   *registry.CapabilityMatcher
 	planner   *PlannerBrain
+	push      *pushState // Web Push (push.go)
 
 	// Models listing cache (spec §6.9 GET /v1/models, models.go): one
 	// `opencode models` exec reused for modelsCacheTTL; single-flight via
@@ -250,7 +255,12 @@ func New(cfg Config) (*App, error) {
 	// SSE fan-out: every Post pushes a wake-up to live streams.
 	a.hub = notify.NewHub()
 	a.hub.SetObserver(liveness)
-	a.hub.AttachTo(a.inbox)
+	a.initPush(cfg.AdvertiseURL, cfg.PushHTTPClient, cfg.PushAnyHost)
+	// Every post fans out to SSE streams; operator-visible ones also push.
+	a.inbox.SetPublishHook(func(id string, env wire.MessageEnvelope) {
+		a.hub.Publish(id, env)
+		a.pushEnvelope(id, env)
+	})
 
 	matcher := &registry.CapabilityMatcher{Source: &foremanSource{store: a.jobs}}
 	a.matcher = matcher
@@ -470,6 +480,12 @@ func buildMux(a *App, mcpH http.Handler) http.Handler {
 	mux.HandleFunc("GET /manifest.webmanifest", a.handleUIAsset)
 	mux.HandleFunc("GET /apple-touch-icon.png", a.handleUIAsset)
 	mux.HandleFunc("GET /icon-512.png", a.handleUIAsset)
+	mux.HandleFunc("GET /icon-192.png", a.handleUIAsset)
+	mux.HandleFunc("GET /icon-maskable-512.png", a.handleUIAsset)
+	mux.HandleFunc("GET /sw.js", a.handleServiceWorker)
+	mux.HandleFunc("GET /v1/push/key", a.handlePushKey)
+	mux.HandleFunc("POST /v1/push/subscribe", a.handlePushSubscribe)
+	mux.HandleFunc("POST /v1/push/unsubscribe", a.handlePushUnsubscribe)
 	mux.HandleFunc("GET /v1/inboxes", a.handleInboxSummaries)
 	mux.HandleFunc("GET /v1/inboxes/{id}/recent", a.handleInboxRecent)
 	// Conversational surface (spec §9.5): the UI's send path into the
