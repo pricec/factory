@@ -301,21 +301,38 @@
   .p-icon svg { width: 24px; height: 24px; }
   #p-back { display: none; }
   html.p-thread #p-back, html.p-detail #p-back { display: inline-flex; }
-  .p-uchip { display: inline-flex; align-items: center; height: 44px; padding: 0 4px; background: none; border: 0;
-    color: var(--text); max-width: 100%; }
-  .p-uchip .pill { display: inline-flex; align-items: center; gap: 5px; height: 28px; padding: 0 10px 0 7px;
-    border-radius: 999px; background: rgba(127,127,127,.18); white-space: nowrap;
-    font: 600 12px/1 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
-    font-variant-numeric: tabular-nums; letter-spacing: .01em; }
-  .p-uchip:active .pill { background: rgba(127,127,127,.3); }
-  .p-uchip .ring { width: 15px; height: 15px; flex: none; }
-  .p-uchip .ring circle { fill: none; stroke-width: 3; }
-  .p-uchip .ring .trk { stroke: rgba(127,127,127,.35); }
-  .p-uchip .ring .arc { stroke: var(--accent); stroke-linecap: round; }
-  .p-uchip .pct { color: var(--dim); font-weight: 500; }
-  .p-uchip i { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); flex: none; }
-  .p-uchip i.GREEN { background: var(--ok); } .p-uchip i.YELLOW, .p-uchip i.ORANGE { background: var(--warn); }
-  .p-uchip i.RED { background: var(--bad); }
+  /* Top-bar usage rings (5h + 7d): shared by the phone bar and the desktop header. */
+  .urings { display: inline-flex; align-items: center; gap: 2px; flex: none; position: relative; }
+  .uring { display: inline-flex; align-items: center; gap: 4px; min-height: 44px; padding: 0 5px; background: none; border: 0;
+    border-radius: 10px; color: var(--text); cursor: pointer; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  .uring:active, .uring[aria-expanded="true"] { background: rgba(127,127,127,.22); }
+  .uring:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .uring svg { width: 28px; height: 28px; flex: none; }
+  .uring circle { fill: none; stroke-width: 3.2; }
+  .uring .trk { stroke: rgba(127,127,127,.35); }
+  .uring .arc { stroke: var(--dim); stroke-linecap: round; }
+  .uring text { font: 700 10px/1 -apple-system, "Segoe UI", sans-serif; fill: var(--dim); text-anchor: middle; dominant-baseline: central; }
+  .uring.GREEN .arc { stroke: var(--ok); } .uring.GREEN text { fill: var(--ok); }
+  .uring.YELLOW .arc { stroke: #e3b341; } .uring.YELLOW text { fill: #e3b341; }
+  .uring.ORANGE .arc { stroke: #f0883e; } .uring.ORANGE text { fill: #f0883e; }
+  .uring.RED .arc { stroke: var(--bad); } .uring.RED text { fill: var(--bad); }
+  .uring.stale { opacity: .6; }
+  .uring .utxt { display: flex; flex-direction: column; gap: 2px; text-align: left; white-space: nowrap;
+    font-variant-numeric: tabular-nums; }
+  .uring .ul { font-size: 12px; font-weight: 700; line-height: 1; }
+  .uring .ut { font-size: 11px; font-weight: 500; line-height: 1; color: var(--dim); }
+  .upop { position: absolute; top: 100%; right: 0; z-index: 40; width: min(320px, calc(100vw - 16px)); margin-top: 4px; padding: 10px 12px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.5);
+    font: 12.5px/1.45 -apple-system, "Segoe UI", sans-serif; color: var(--text); text-align: left; white-space: normal; }
+  .upop[hidden] { display: none; }
+  .upop .uph { margin: 0 0 6px; }
+  .upop .uph b { display: block; }
+  .upop .uph span { color: var(--dim); }
+  .upop .upgate { border-top: 1px solid var(--border); padding-top: 6px; }
+  #p-top .urings { position: static; margin-right: 2px; }
+  #p-top .upop { top: 100%; right: 8px; } /* #p-top is sticky = the containing block */
+  header .urings { margin-left: auto; align-self: center; }
+  @media (max-width: 359px) { .uring { gap: 3px; padding: 0 3px; } .uring svg { width: 24px; height: 24px; } .uring .ul { font-size: 11px; } .uring .ut { font-size: 10px; } }
   #p-searchbar { display: none; position: sticky; top: calc(52px + var(--sat) + var(--fbar-h)); z-index: 19; background: var(--bg);
     padding: 8px calc(12px + var(--sar)) 4px calc(12px + var(--sal)); }
   html.p-search #p-searchbar { display: block; }
@@ -560,6 +577,7 @@
 <body>
 <header>
   <h1><span class="prompt">factory</span> : <span id="adv">-</span></h1>
+  <span class="urings" id="d-rings" role="group" aria-label="Subscription usage"></span>
   <nav>
     <button id="tab-planner" class="active">Planner</button>
     <button id="tab-chat">Tasks</button>
@@ -715,6 +733,7 @@
   <div id="p-top">
     <button class="p-icon" id="p-back" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></button>
     <h1 id="p-title">Inbox</h1>
+    <span class="urings" id="p-rings" role="group" aria-label="Subscription usage"></span>
     <span id="p-topacts"></span>
   </div>
   <div id="p-fbar">
@@ -1866,6 +1885,7 @@ function renderUsage() {
   $("u-wins").innerHTML = usageData ? usageHTML(usageData, Date.now(), usageError) : '<div class="uwin stale">no usage data</div>';
   $("u-spend").textContent = usageData ? usageSpendText(usageData.factory_spend) : "";
   if (isPhone()) pRenderUsage();
+  renderRings();
   renderGate();
 }
 /* ---------- S6: gate status, held jobs, pause banner, override controls, alerts ---------- */
@@ -2238,7 +2258,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   setInterval(loadUsage, USAGE_POLL_MS);
   setInterval(renderUsage, 30000); // keep countdowns moving between polls
   pInit();
-  pUsageTick();
+  renderRings();
+  setInterval(renderRings, 15000); // tick the countdowns client-side
   if (isPhone()) pRoute(); else setTab(tab);
   connectStream();
   // SSE is the fast path; the slow poll is the safety net (and the only path
@@ -2469,81 +2490,121 @@ function pRender() {
   }
 }
 
-// ---- 5h reset countdown chip (iOS timer / Dynamic Island style) ----
-// Pure helpers (also exercised by ui_usage_js_test.go when node is available).
-const USAGE_5H_MS = 5 * 3600 * 1000;
+// ---- top-bar usage rings (5h + 7d), phone bar and desktop header ----
+// Pure helpers first (run under node by ui_usage_chip_test.go).
+// Colour = the window's own `state` from GET /v1/usage (usagewin.Classify:
+// the SAME classifier whose worst window drives the dispatch gate, so no new
+// thresholds live here). The gate block gives the throttle level / held count.
+const USAGE_RING_WINS = [["five_hour", "5h", "5-hour"], ["seven_day", "7d", "7-day"]];
+const USAGE_GLYPH = { GREEN: "✓", YELLOW: "!", ORANGE: "!!", RED: "✕", UNKNOWN: "?" };
+const USAGE_STATE_WORD = { GREEN: "OK", YELLOW: "caution", ORANGE: "high", RED: "critical", UNKNOWN: "unknown" };
 // usageResetMs parses a resets_at value; null when missing/invalid.
 function usageResetMs(v) { const t = v ? Date.parse(v) : NaN; return Number.isFinite(t) ? t : null; }
-// usageElapsedFrac is the fraction of the window elapsed, clamped to [0,1]
-// (a past reset -> 1); null when the reset time is unknown.
-function usageElapsedFrac(resetMs, nowMs, winMs) {
-  if (resetMs == null || !Number.isFinite(resetMs)) return null;
-  return Math.min(1, Math.max(0, 1 - (resetMs - nowMs) / (winMs || USAGE_5H_MS)));
-}
-// fmtLeftCompact: "3:42" (h:mm) from 1h up, "m:ss" under an hour, "0:00" once past.
-function fmtLeftCompact(ms) {
-  if (!(ms > 0)) return "0:00";
-  const s = Math.floor(ms / 1000);
-  if (s >= 3600) return Math.floor(s / 3600) + ":" + String(Math.floor(s % 3600 / 60)).padStart(2, "0");
-  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
-}
-// fmtLeftSpoken: "3 hours 42 minutes" for the aria-label.
-function fmtLeftSpoken(ms) {
+// fmtReset: compact countdown, "6d" / "2h 13m" / "13m" / "<1m"; "now" once past.
+function fmtReset(ms) {
   if (!(ms > 0)) return "now";
-  const m = Math.floor(ms / 60000), h = Math.floor(m / 60), r = m % 60;
+  const m = Math.floor(ms / 60000), d = Math.floor(m / 1440), h = Math.floor(m % 1440 / 60);
+  if (d) return d + "d";
+  if (h) return h + "h " + (m % 60) + "m";
+  return m ? m + "m" : "<1m";
+}
+// fmtResetSpoken: "6 days 4 hours" / "2 hours 13 minutes" for aria-labels.
+function fmtResetSpoken(ms) {
+  if (!(ms > 0)) return "now";
+  const m = Math.floor(ms / 60000), d = Math.floor(m / 1440), h = Math.floor(m % 1440 / 60), r = m % 60;
   const pl = (n, u) => n + " " + u + (n === 1 ? "" : "s");
+  if (d) return pl(d, "day") + (h ? " " + pl(h, "hour") : "");
   if (h) return pl(h, "hour") + (r ? " " + pl(r, "minute") : "");
   return m ? pl(m, "minute") : "less than a minute";
 }
-// usageRingSVG draws the window ring: elapsed arc from 12 o'clock, clockwise.
-function usageRingSVG(frac) {
-  const r = 5.5, c = 2 * Math.PI * r, on = c * (frac || 0);
-  return '<svg class="ring" viewBox="0 0 15 15" aria-hidden="true"><circle class="trk" cx="7.5" cy="7.5" r="' + r + '"/>' +
-    (on > 0 ? '<circle class="arc" cx="7.5" cy="7.5" r="' + r + '" stroke-dasharray="' + on.toFixed(2) + " " + c.toFixed(2) +
-      '" transform="rotate(-90 7.5 7.5)"/>' : "") + "</svg>";
-}
-// pUsageChipParts returns {label, html} for the chip at nowMs.
-function pUsageChipParts(nowMs) {
-  const s = usageState(usageData.state), w = usageData.windows && usageData.windows.five_hour;
-  const pctN = w && w.utilization_pct != null ? Math.round(w.utilization_pct) : null;
-  const pct = pctN == null ? "?" : pctN + "%";
-  const reset = w ? usageResetMs(w.resets_at) : null;
-  const dot = '<i class="' + s + '"></i>';
-  if (reset == null) // no reset time upstream: the old static label
-    return { label: "Usage " + pct + ", 5-hour window", html: '<span class="pill">' + dot + "<span>5h</span>" + '<span class="pct">' + pct + "</span></span>" };
-  const left = reset - nowMs, frac = usageElapsedFrac(reset, nowMs);
-  // Past the reset: a fresh window; show an empty ring until usage is refetched.
-  const expired = left <= 0;
-  return {
-    label: "Usage " + pct + ", " + (expired ? "window resetting" : "resets in " + fmtLeftSpoken(left)),
-    html: '<span class="pill">' + usageRingSVG(expired ? 0 : frac) + "<span>" + (expired ? "0:00" : fmtLeftCompact(left)) + "</span>" +
-      '<span class="pct">' + pct + "</span>" + dot + "</span>",
-  };
-}
-function pUsageChip() {
-  if (!usageData) return "";
-  const p = pUsageChipParts(Date.now());
-  return '<button class="p-uchip" id="p-uchip" data-go="more" aria-label="' + esc(p.label) + '">' + p.html + "</button>";
-}
-// pUsageTick updates the chip in place from the cached reset time (no refetch);
-// at/after the reset it refetches usage at most every 15s.
-let pUsageTickT = 0, pUsageRefetchAt = 0;
-function pUsageTick() {
-  clearTimeout(pUsageTickT);
-  let delay = 30000;
-  const c = $("p-uchip");
-  const w = usageData && usageData.windows && usageData.windows.five_hour;
-  const reset = w ? usageResetMs(w.resets_at) : null;
-  if (reset != null) {
-    const now = Date.now(), left = reset - now;
-    if (c) { const p = pUsageChipParts(now); if (c.innerHTML !== p.html) c.innerHTML = p.html; c.setAttribute("aria-label", p.label); }
-    if (left <= 0) { if (now >= pUsageRefetchAt) { pUsageRefetchAt = now + 15000; loadUsage(); } delay = 5000; }
-    else if (left < 3600000) delay = 1000;
+// usageHoldText: what the dispatch gate (internal/throttle) is doing at this
+// level; mirrors throttle.Rule and the S5 pause. held = jobs currently held.
+function usageHoldText(g) {
+  if (!g) return "Throttle status unavailable.";
+  const n = g.held == null ? "" : " (" + Number(g.held) + " held)";
+  if (g.mode === "off") return "Throttle override is ON: jobs are not being held.";
+  if (g.paused) return "Dispatch PAUSED until the limit resets: new jobs are held" + n + ".";
+  if (g.fail_open) return "No fresh usage reading: the gate fails open, jobs are not held.";
+  switch (g.level) {
+    case "RED": return "Jobs ARE being held: RED holds all non-P0 work" + n + ".";
+    case "ORANGE": return "Jobs are being held: ORANGE holds priority 5+ and caps active non-P0 jobs at 2" + n + ".";
+    case "YELLOW": return "Jobs are being slowed: YELLOW spaces non-P0 starts 60s apart" + n + ".";
+    case "GREEN": return "Jobs are not being held.";
   }
-  pUsageTickT = setTimeout(pUsageTick, delay);
+  return "Throttle level unknown: jobs are not being held.";
 }
+// usageRingModel derives one ring from a /v1/usage window (nil -> "no data").
+function usageRingModel(w, short, long, nowMs) {
+  const st = w ? usageState(w.state) : "UNKNOWN";
+  const pct = w && w.utilization_pct != null && Number.isFinite(w.utilization_pct) ? Math.max(0, Math.min(100, w.utilization_pct)) : null;
+  const reset = w ? usageResetMs(w.resets_at) : null;
+  const left = reset == null ? null : reset - nowMs;
+  const stale = !w || !!w.stale || w.age_s == null || w.age_s > USAGE_STALE_S;
+  const pctTxt = pct == null ? "?" : Math.round(pct) + "%";
+  const word = USAGE_STATE_WORD[st];
+  const label = long + " usage window: " + (pct == null ? "usage unknown" : pctTxt + " used") + ", status " + word + " (" + st + "), " +
+    (left == null ? "reset time unknown" : left > 0 ? "resets in " + fmtResetSpoken(left) : "resetting now") + (stale ? ", reading may be stale" : "") +
+    ". Tap for details.";
+  return { short, long, st, word, pct, pctTxt, reset, left, stale, label,
+    text1: short + " " + pctTxt, text2: left == null ? "—" : fmtReset(left) };
+}
+// usageRingSVG: ring filled to % used, status glyph in the middle (not colour alone).
+function usageRingSVG(pct, st) {
+  const r = 11, c = 2 * Math.PI * r, on = c * ((pct || 0) / 100);
+  return '<svg viewBox="0 0 28 28" aria-hidden="true"><circle class="trk" cx="14" cy="14" r="' + r + '"/>' +
+    (on > 0 ? '<circle class="arc" cx="14" cy="14" r="' + r + '" stroke-dasharray="' + on.toFixed(2) + " " + c.toFixed(2) +
+      '" transform="rotate(-90 14 14)"/>' : "") + '<text x="14" y="14.5">' + USAGE_GLYPH[st] + "</text></svg>";
+}
+function usageRingBtn(m, id) {
+  return '<button type="button" class="uring ' + m.st + (m.stale ? " stale" : "") + '" data-ring="' + id + '" aria-expanded="false" aria-haspopup="dialog" aria-label="' + esc(m.label) +
+    '" title="' + esc(m.short + " " + m.pctTxt + " · " + m.word + " · resets in " + m.text2) + '">' +
+    usageRingSVG(m.pct, m.st) + '<span class="utxt"><span class="ul">' + esc(m.text1) + '</span><span class="ut">' + esc(m.text2) + "</span></span></button>";
+}
+function usagePopHTML(d, models, nowMs) {
+  const wins = (d && d.windows) || {};
+  let out = "";
+  USAGE_RING_WINS.forEach(([k], i) => {
+    const m = models[i], w = wins[k];
+    out += '<p class="uph"><b>' + esc(m.long) + " window: " + (m.pct == null ? "?" : Math.round(m.pct * 10) / 10 + "%") + " used</b>" +
+      "<span>status " + esc(m.st) + " (" + esc(m.word) + ")" + (w && w.pace != null ? " · pace " + w.pace.toFixed(2) + "x" : "") + "<br>" +
+      (m.reset == null ? "reset time unknown" : "resets " + fmtUTC(w.resets_at) + " (" + (m.left > 0 ? "in " + fmtResetSpoken(m.left) : "now") + ")") +
+      (m.stale ? "<br>reading may be stale" : "") + "</span></p>";
+  });
+  const g = d && d.gate;
+  out += '<div class="upgate"><b>Throttle ' + esc(g ? (g.paused ? "PAUSED" : g.level || "UNKNOWN") : "n/a") + "</b><br>" + esc(usageHoldText(g)) + "</div>";
+  return out;
+}
+// renderRings paints both containers (phone bar + desktop header) and keeps
+// the open popover in sync; called on every usage fetch and by a 15s tick.
+function renderRings() {
+  const now = Date.now();
+  const models = USAGE_RING_WINS.map(([k, s, l]) => usageRingModel(usageData && usageData.windows && usageData.windows[k], s, l, now));
+  const open = ringOpen;
+  for (const [id, host] of [["p", $("p-rings")], ["d", $("d-rings")]]) {
+    if (!host) continue;
+    const html = usageData ? models.map((m, i) => usageRingBtn(m, id + i)).join("") + '<div class="upop" role="dialog" aria-label="Usage details" hidden></div>' : "";
+    if (host.dataset.sig !== html) { host.dataset.sig = html; host.innerHTML = html; }
+    const pop = host.querySelector(".upop");
+    if (!pop) continue;
+    const mine = open && open[0] === id;
+    pop.hidden = !mine;
+    for (const b of host.querySelectorAll(".uring")) b.setAttribute("aria-expanded", mine && b.dataset.ring === open);
+    if (mine) pop.innerHTML = usagePopHTML(usageData, models, now);
+  }
+  // Past a reset: refetch (at most every 15s) so the ring shows the new window.
+  if (usageData && models.some(m => m.left != null && m.left <= 0) && now >= usageRefetchAt) { usageRefetchAt = now + 15000; loadUsage(); }
+}
+let ringOpen = null, usageRefetchAt = 0;
+document.addEventListener("click", (e) => {
+  const t = e.target.closest ? e.target : e.target.parentElement, b = t && t.closest(".uring");
+  if (b) ringOpen = ringOpen === b.dataset.ring ? null : b.dataset.ring;
+  else if (ringOpen && !(t && t.closest(".upop"))) ringOpen = null;
+  else return;
+  renderRings();
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && ringOpen) { ringOpen = null; renderRings(); } });
+// ---- end top-bar usage rings ----
 function pRenderUsage() {
-  if (P.r.name === "inbox") { const c = $("p-uchip"); if (c) c.outerHTML = pUsageChip(); else if (usageData) pRender(); }
   if (P.r.name === "more" && $("p-usage")) $("p-usage").innerHTML = pUsageHTML();
 }
 function pUsageHTML() {
@@ -2555,7 +2616,7 @@ function pUsageHTML() {
     (usageData ? '<div class="udetail" style="margin-top:10px">' + esc(usageSpendText(usageData.factory_spend)) + "</div>" : "");
 }
 function pInboxActs() {
-  return pUsageChip() + '<button class="p-icon" data-act="search" aria-label="Search">' + P_ICON.search + "</button>";
+  return '<button class="p-icon" data-act="search" aria-label="Search">' + P_ICON.search + "</button>";
 }
 
 function pTaskRow(t) {
@@ -2629,10 +2690,10 @@ function pTaskLinks(t) {
 }
 function pRenderThreadView(th, focus) {
   if (!th) { if (P.err) $("p-body").innerHTML = pErr(); return; }
-  if (th.missing) { pTop(focus ? "Tasks" : "Task not found", focus ? pUsageChip() : ""); $("p-body").innerHTML = '<div class="p-empty">This task no longer exists.</div>'; return; }
+  if (th.missing) { pTop(focus ? "Tasks" : "Task not found", ""); $("p-body").innerHTML = '<div class="p-empty">This task no longer exists.</div>'; return; }
   const t = th.task, msgs = th.messages || [];
   if (document.visibilityState === "visible") markSeen(t);
-  pTop(t.standing ? "Planner" : esc(t.title), (focus ? pUsageChip() : "") + '<button class="p-icon" data-act="task-menu" aria-label="Task actions">' + P_ICON.more + "</button>");
+  pTop(t.standing ? "Planner" : esc(t.title), '<button class="p-icon" data-act="task-menu" aria-label="Task actions">' + P_ICON.more + "</button>");
   const shown = P.showInternal ? msgs : msgs.filter(m => !isInternalEnv(m));
   const last = shown[shown.length - 1];
   const typing = !!(last && last.from === "human:operator" && t.status === "open");
@@ -2682,7 +2743,7 @@ function pRenderFbar() {
 function pRenderFocus() {
   pRenderFbar();
   if (!st.focusId) {
-    pTop("Tasks", pUsageChip());
+    pTop("Tasks", "");
     $("p-body").innerHTML = pErr() + '<div id="p-fempty"><div class="big">Nothing needs your input</div>' +
       '<div class="sub">New tasks waiting on you will show up here.</div>' +
       '<button type="button" class="p-btn" data-act="view-list">View all tasks</button></div>';
@@ -2716,7 +2777,7 @@ function pSetMode(m) {
   window.scrollTo(0, 0);
   pSyncFocus(); pRenderFbar();
   $("p-body").innerHTML = '<div class="p-empty">loading…</div>';
-  pTop("Tasks", pUsageChip());
+  pTop("Tasks", "");
   pLoad();
 }
 function pScrollBottom() { requestAnimationFrame(() => window.scrollTo(0, document.documentElement.scrollHeight)); }
