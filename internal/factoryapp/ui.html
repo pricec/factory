@@ -21,6 +21,9 @@
   var f = ""; try { f = localStorage.getItem("factory.layout") || ""; } catch (e) {}
   var m = window.matchMedia && matchMedia("(max-width: 760px), (pointer: coarse) and (max-height: 520px)").matches;
   if (f === "phone" || (f !== "desktop" && m)) document.documentElement.classList.add("phone");
+  // Home Screen app (no browser chrome): html.standalone turns on the always-visible header nav (#p-hnav).
+  var sa = false; try { sa = !!navigator.standalone || !!(window.matchMedia && matchMedia("(display-mode: standalone)").matches); } catch (e) {}
+  if (sa) document.documentElement.classList.add("standalone");
 })();
 </script>
 <style>
@@ -307,14 +310,15 @@
   #phone { display: none; }
   html.phone { --sat: env(safe-area-inset-top, 0px); --sab: env(safe-area-inset-bottom, 0px);
     --sal: env(safe-area-inset-left, 0px); --sar: env(safe-area-inset-right, 0px);
-    --tabh: 56px; --kb: 0px; --composer-h: 62px; --fnav-h: 60px; --fbar-h: 48px; -webkit-text-size-adjust: 100%; }
+    --tabh: 56px; --topx: 0px; --kb: 0px; --composer-h: 62px; --fnav-h: 60px; --fbar-h: 48px; -webkit-text-size-adjust: 100%; }
   html.phone body { font-size: 16px; -webkit-tap-highlight-color: transparent; }
   html.phone body > header, html.phone #usagepanel, html.phone #credpanel, html.phone body > main { display: none !important; }
   html.phone #phone { display: block; overflow-x: clip; min-height: 100vh; min-height: 100dvh; }
   #phone button { font-family: inherit; cursor: pointer; }
   #phone .p-sys { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+  html.phone.standalone { --topx: 42px; }
   #p-top { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 2px;
-    min-height: calc(52px + var(--sat)); padding: var(--sat) calc(6px + var(--sar)) 0 calc(6px + var(--sal));
+    min-height: calc(52px + var(--sat) + var(--topx)); padding: var(--sat) calc(6px + var(--sar)) var(--topx) calc(6px + var(--sal));
     background: rgba(13,17,23,.94); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
     border-bottom: 1px solid var(--border); }
   #p-top h1 { flex: 1; min-width: 0; margin: 0 6px; font: 700 20px/1.2 -apple-system, "Segoe UI", sans-serif;
@@ -359,7 +363,7 @@
   #p-top .upop { top: 100%; right: 8px; } /* #p-top is sticky = the containing block */
   header .urings { margin-left: auto; align-self: center; }
   @media (max-width: 359px) { .uring { gap: 3px; padding: 0 3px; } .uring svg { width: 24px; height: 24px; } .uring .ul { font-size: 11px; } .uring .ut { font-size: 10px; } }
-  #p-searchbar { display: none; position: sticky; top: calc(52px + var(--sat) + var(--fbar-h)); z-index: 19; background: var(--bg);
+  #p-searchbar { display: none; position: sticky; top: calc(52px + var(--sat) + var(--topx) + var(--fbar-h)); z-index: 19; background: var(--bg);
     padding: 8px calc(12px + var(--sar)) 4px calc(12px + var(--sal)); }
   html.p-search #p-searchbar { display: block; }
   #p-searchbar input, #phone textarea, #phone input, #phone select { font-size: 16px; }
@@ -369,7 +373,7 @@
   html.p-thread #p-body, html.p-fthread.kb-open #p-body { padding-bottom: calc(var(--composer-h) + var(--sab) + var(--kb) + 16px); }
   html.p-fthread #p-body { padding-bottom: calc(var(--composer-h) + var(--fnav-h) + var(--sab) + var(--kb) + 16px); }
   /* focus mode (phone): focus/list switch + "N waiting" under the top bar, prev/skip/next above the composer */
-  #p-fbar { display: none; position: sticky; top: calc(52px + var(--sat)); z-index: 19; align-items: center; gap: 10px;
+  #p-fbar { display: none; position: sticky; top: calc(52px + var(--sat) + var(--topx)); z-index: 19; align-items: center; gap: 10px;
     min-height: var(--fbar-h); padding: 4px calc(12px + var(--sar)) 4px calc(12px + var(--sal));
     background: var(--bg); border-bottom: 1px solid var(--border); }
   html.p-inbox #p-fbar { display: flex; }
@@ -493,6 +497,16 @@
     justify-content: center; gap: 2px; background: none; border: 0; color: var(--dim); font-size: 11px; font-weight: 600; }
   #p-tabs button svg { width: 25px; height: 25px; }
   #p-tabs button.active { color: var(--accent); }
+  /* Home Screen app only: no Safari chrome, so the page nav is pinned in the header on EVERY phone route
+     (incl. task threads, focus mode and with the keyboard up, where the bottom tab bar is hidden). */
+  #p-hnav { display: none; }
+  html.phone.standalone #p-hnav { display: flex; position: absolute; left: 0; right: 0; bottom: 0; height: var(--topx);
+    padding: 0 calc(6px + var(--sar)) 0 calc(6px + var(--sal)); border-top: 1px solid var(--border); }
+  #p-hnav button { flex: 1; min-width: 0; background: none; border: 0; color: var(--dim); font-size: 13px; font-weight: 600;
+    padding: 0 2px; position: relative; }
+  #p-hnav button.active { color: var(--accent); }
+  #p-hnav button.active::after { content: ""; position: absolute; left: 18%; right: 18%; bottom: 0; height: 2px; background: var(--accent); border-radius: 2px; }
+  #p-hnav button:active { background: #1c2128; }
   #p-tabs .cnt { position: absolute; top: 5px; left: calc(50% + 5px); min-width: 19px; height: 19px; padding: 0 5px;
     border-radius: 10px; background: var(--bad); color: #fff; font: 700 12px/19px -apple-system, sans-serif; }
   html.p-thread #p-tabs, html.p-thread #p-fab, html.kb-open #p-fab, html.kb-open #p-tabs { display: none; }
@@ -786,6 +800,14 @@
     <h1 id="p-title">Inbox</h1>
     <span class="urings" id="p-rings" role="group" aria-label="Subscription usage"></span>
     <span id="p-topacts"></span>
+    <nav id="p-hnav" aria-label="Pages">
+      <button type="button" data-tab="planner">Planner</button>
+      <button type="button" data-tab="inbox">Tasks</button>
+      <button type="button" data-tab="alerts">Alerts</button>
+      <button type="button" data-tab="jobs">Jobs</button>
+      <button type="button" data-tab="foremen">Foremen</button>
+      <button type="button" data-tab="more">More</button>
+    </nav>
   </div>
   <div id="p-fbar">
     <span id="p-fcount" aria-live="polite"></span>
@@ -2459,7 +2481,7 @@ function pRoute() {
   P_ROOT.classList.toggle("p-detail", !!P_PARENT[r.name] && r.name !== "task");
   P_ROOT.classList.toggle("p-search", r.name === "inbox" && P.searchOpen === true && P.mode === "list");
   pSyncFocus();
-  for (const b of document.querySelectorAll("#p-tabs button")) b.classList.toggle("active", b.dataset.tab === P_TAB[r.name]);
+  for (const b of document.querySelectorAll("#p-tabs button, #p-hnav button")) b.classList.toggle("active", b.dataset.tab === P_TAB[r.name]);
   const fab = $("p-fab");
   fab.classList.toggle("on", r.name === "inbox" || r.name === "jobs");
   $("p-fab-label").textContent = r.name === "jobs" ? "New job" : "New task";
@@ -3216,7 +3238,7 @@ function pInit() {
       if (P_TAB[name] === name && !arg) pGo(name, null, true); else pGo(name, arg);
     }
   });
-  for (const b of document.querySelectorAll("#p-tabs button")) {
+  for (const b of document.querySelectorAll("#p-tabs button, #p-hnav button")) {
     b.onclick = () => {
       if (P.r.name === b.dataset.tab) { window.scrollTo({ top: 0, behavior: "smooth" }); pLoad(); return; }
       pGo(b.dataset.tab, null, true);
