@@ -133,9 +133,18 @@ func (a *App) upsertCaps(ctx context.Context, identity string, caps map[string]s
 }
 
 // reconcileForeman reaps identity's running jobs it does not claim (spec
-// §6.2); the reaped jobs' retry and terminal hooks fire as usual.
+// §6.2); the reaped jobs' retry and terminal hooks fire as usual. A job whose
+// final job.result is already posted to factory:main but not yet consumed
+// (consumer busy, or factory just restarted/deployed) is treated as claimed:
+// the foreman's worker has exited because it finished, not because it was
+// lost, and the consumer will settle the job.
 func (a *App) reconcileForeman(ctx context.Context, identity string, active []string) error {
-	_, err := a.jobs.ReconcileForeman(ctx, identity, active)
+	pending, err := a.inbox.PendingResultJobIDs(ctx, FactoryMainInbox)
+	if err != nil {
+		return err
+	}
+	active = append(append([]string(nil), active...), pending...)
+	_, err = a.jobs.ReconcileForeman(ctx, identity, active)
 	return err
 }
 

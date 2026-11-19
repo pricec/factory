@@ -222,6 +222,28 @@ func (s *Service) ReleaseResult(ctx context.Context, inboxID, jobID string) (int
 	return res.RowsAffected()
 }
 
+// PendingResultJobIDs returns the job ids that have a job.result in inboxID
+// which has been posted but not yet consumed (unacked). Reconcile uses it to
+// avoid reaping a job whose final result is merely in flight.
+func (s *Service) PendingResultJobIDs(ctx context.Context, inboxID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT job_id FROM messages WHERE inbox_id = ? AND type = 'job.result' AND acked = 0 AND job_id != ''`,
+		inboxID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func (s *Service) existingResult(ctx context.Context, inboxID, jobID string) (id string, dup bool, err error) {
 	err = s.db.QueryRowContext(ctx,
 		`SELECT id FROM messages WHERE inbox_id = ? AND job_id = ? AND type = 'job.result'`,
