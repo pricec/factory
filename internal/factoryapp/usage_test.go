@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -128,5 +129,25 @@ func TestHandleUsageEvents(t *testing.T) {
 	}
 	if k := u.Spend["today"].ByKind; k["planner"].Runs != 1 || k["brain"].CostUSD != 0.25 || k["worker"].Runs != 0 {
 		t.Fatalf("by_kind = %+v", k)
+	}
+}
+
+// TestUsageEndpointsNoStore: live usage/throttle state must never be cached by
+// the browser, a proxy or a service worker.
+func TestUsageEndpointsNoStore(t *testing.T) {
+	a, err := New(Config{DataDir: t.TempDir(), Addr: ":8091", AdvertiseURL: "http://factory.test", Usage: UsageConfig{F: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	for _, path := range []string{"/v1/usage", "/v1/throttle"} {
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status %d: %s", path, rec.Code, rec.Body)
+		}
+		if cc := rec.Header().Get("Cache-Control"); !strings.Contains(cc, "no-store") {
+			t.Errorf("%s Cache-Control = %q, want no-store", path, cc)
+		}
 	}
 }

@@ -360,6 +360,7 @@ func (a *App) gateStatus(ctx context.Context) (gateView, error) {
 
 // handleGetThrottle serves GET /v1/throttle: the gate block alone.
 func (a *App) handleGetThrottle(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
 	v, err := a.gateStatus(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())

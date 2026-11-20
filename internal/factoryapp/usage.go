@@ -86,6 +86,13 @@ func (a *App) recordUsage(ctx context.Context, ev wire.UsageEvent) error {
 	return a.jobs.RecordUsage(ctx, ev)
 }
 
+// noStore marks a live-state response uncacheable: browsers (iOS standalone
+// PWAs in particular) and proxies must always re-ask for usage/throttle state.
+func noStore(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store, max-age=0")
+	w.Header().Set("Pragma", "no-cache")
+}
+
 type usageResponse struct {
 	usagewin.Snapshot
 	Spend map[string]jobs.UsageSums `json:"factory_spend"`
@@ -97,6 +104,7 @@ type usageResponse struct {
 // /v1/spend): per-window utilization, resets_at, pace, state, source, age,
 // plus the factory's own spend (5h, 7d, today UTC) from usage_events.
 func (a *App) handleUsage(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
 	now := time.Now()
 	if a.jobs.Now != nil {
 		now = a.jobs.Now()
