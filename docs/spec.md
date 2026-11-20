@@ -842,6 +842,7 @@ host facts are descriptive and never matched on).
 | `POST /v1/chat` | `{text, task_id?, client?}` -> chat.message envelope in the operator inbox, filed under a task (new without `task_id`; 404 for an unknown one); wakes the LLM planner (§9.5, §9.5.2) |
 | `GET /v1/tasks`, `GET /v1/tasks/{id}`, `POST /v1/tasks`, `PATCH /v1/tasks/{id}` | task list, task + thread, the "new task" alias of chat, and operator rename `{title}` (§9.5.2) |
 | `POST /v1/tasks/{id}/close` | (400 `standing_chat` for the standing chat, §9.5.7) operator closes a task from the UI; clears `needs_operator` and wakes the planner with `task.closed_by_operator` (§9.5.2) |
+| `POST /v1/tasks/{id}/reset_context` | operator wipes the planner's context for a thread (also chat text `/reset`): posts a `brain.reply` "Planner context cleared" (no wake), stores it as the thread's context cutoff (setting `context_cutoff:<task id>`; messages up to it are no longer fed to the planner prompt, none are deleted) and, for the standing chat, clears the standing summary. `priority_criteria` is untouched |
 | `GET /v1/alerts`, `POST /v1/alerts/{id}/ack`, `POST /v1/alerts/{id}/reply` | open alerts, ack, and reply-creates-a-task (§9.5.3) |
 | `GET /v1/inboxes/planner:main/stream` | permissive SSE stream of the operator inbox for the chat UI (§9.5) |
 | `GET /` | operator web UI (single page; §4.1) |

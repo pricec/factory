@@ -172,6 +172,11 @@ func (a *App) runTaskWake(ctx context.Context, taskID string, wakers []wire.Mess
 		log.Printf("factoryapp: planner: thread %s: %v", taskID, err)
 		thread = nil
 	}
+	if cutoff, err := a.tasks.ContextCutoff(ctx, taskID); err != nil {
+		log.Printf("factoryapp: planner: context cutoff %s: %v", taskID, err)
+	} else {
+		thread = afterCutoff(thread, cutoff)
+	}
 	criteria, err := a.tasks.PriorityCriteria(ctx)
 	if err != nil {
 		log.Printf("factoryapp: planner: priority criteria: %v", err)
@@ -443,6 +448,15 @@ func (a *App) postChat(w http.ResponseWriter, r *http.Request, text, taskID, cli
 			writeError(w, http.StatusNotFound, "unknown_task", "unknown task "+taskID)
 			return
 		}
+	}
+	if taskID != "" && isResetCommand(text) {
+		note, err := a.resetTaskContext(r, taskID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, chatResponse{MessageEnvelope: note, TaskID: taskID})
+		return
 	}
 	if posted, tid, ok := a.interceptClaudeChat(ctx, text, taskID); ok {
 		writeJSON(w, http.StatusCreated, chatResponse{MessageEnvelope: posted, TaskID: tid})
