@@ -57,7 +57,10 @@ type (
 		TimeoutS     *int   `json:"timeout_s,omitempty"`
 		Priority     *int   `json:"priority,omitempty"`
 		ScheduleCron string `json:"schedule_cron,omitempty"`
-		TaskID       string `json:"task_id,omitempty"`
+		// NotifyStanding (default true): with schedule_cron, post each run's
+		// result summary into the standing Planner chat; false = quiet.
+		NotifyStanding *bool  `json:"notify_standing,omitempty"`
+		TaskID         string `json:"task_id,omitempty"`
 	}
 	readResultArgs struct {
 		JobID string `json:"job_id"`
@@ -329,7 +332,7 @@ func createJobTool(cfg Config) mcp.ToolHandlerFor[createJobArgs, any] {
 			template := spec
 			template.ID = ""
 			template.CreatedAt = ""
-			if _, err := cfg.Store.CreateScheduleForTask(ctx, in.ScheduleCron, template, taskID); err != nil {
+			if _, err := cfg.Store.CreateScheduleNotify(ctx, in.ScheduleCron, template, taskID, in.NotifyStanding == nil || *in.NotifyStanding); err != nil {
 				return nil, nil, fmt.Errorf("create schedule: %w", err)
 			}
 		}

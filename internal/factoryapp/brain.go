@@ -37,6 +37,9 @@ type createJobRequest struct {
 	TimeoutS     int    `json:"timeout_s,omitempty"`
 	Priority     int    `json:"priority,omitempty"`
 	ScheduleCron string `json:"schedule_cron,omitempty"`
+	// NotifyStanding (default true) posts each scheduled run's result
+	// into the standing Planner chat.
+	NotifyStanding *bool `json:"notify_standing,omitempty"`
 	// TaskID files the job under a task (spec §9.5.2): recorded in
 	// task_jobs before dispatch, so the job's reports thread onto it.
 	TaskID string `json:"task_id,omitempty"`
@@ -175,7 +178,7 @@ func (a *App) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	if in.ScheduleCron != "" {
 		template := spec
 		template.ID, template.CreatedAt = "", ""
-		if _, err := a.jobs.CreateScheduleForTask(r.Context(), in.ScheduleCron, template, in.TaskID); err != nil {
+		if _, err := a.jobs.CreateScheduleNotify(r.Context(), in.ScheduleCron, template, in.TaskID, in.NotifyStanding == nil || *in.NotifyStanding); err != nil {
 			writeError(w, http.StatusInternalServerError, "internal", "create schedule: "+err.Error())
 			return
 		}

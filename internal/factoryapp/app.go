@@ -452,6 +452,7 @@ func (a *App) onTerminal(jobID, finalState string) {
 	// Audit runs and their fix jobs (spec §6.12, auditor.go).
 	a.auditTerminal(ctx, jobID, finalState)
 	a.notifyOperatorJob(ctx, jobID)
+	a.postScheduleSummary(ctx, jobID, finalState)
 	job, ok, err := a.jobs.Get(ctx, jobID)
 	if err != nil || !ok {
 		return

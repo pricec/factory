@@ -86,7 +86,7 @@ func (a *App) EnsureAuditSchedule(ctx context.Context) error {
 	if !cfg.Enabled || kept {
 		return nil
 	}
-	sch, err := a.jobs.CreateSchedule(ctx, cfg.CronSpec(), want)
+	sch, err := a.jobs.CreateScheduleNotify(ctx, cfg.CronSpec(), want, "", false)
 	if err != nil {
 		return err
 	}
