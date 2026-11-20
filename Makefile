@@ -6,7 +6,7 @@ GOFUMPT := $(GOBIN)/gofumpt
 # Computed on the host (the release-docker container has no .git).
 BUILD_ID ?= $(shell TZ=UTC git log -1 --format=%cd --date=format-local:%Y%m%dT%H%M%SZ 2>/dev/null)-$(shell git rev-parse --short=12 HEAD 2>/dev/null)
 LDFLAGS := -X github.com/pricec/factory/internal/buildinfo.ID=$(BUILD_ID)
-CMDS := ./cmd/factory ./cmd/foreman ./cmd/worker
+CMDS := ./cmd/factory ./cmd/foreman ./cmd/worker ./cmd/vision
 
 .PHONY: gofumpt fmt fmt-check vet test build release release-docker ci
 
@@ -39,6 +39,8 @@ release:
 	GOOS=linux GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o dist/factory-linux-arm64 ./cmd/factory
 	GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/foreman-linux-amd64 ./cmd/foreman
 	GOOS=linux GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o dist/foreman-linux-arm64 ./cmd/foreman
+	GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/vision-linux-amd64 ./cmd/vision
+	GOOS=linux GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o dist/vision-linux-arm64 ./cmd/vision
 	go run ./internal/tools/mkmanifest -dir dist -build "$(BUILD_ID)"
 
 DOCKER_GOIMG ?= golang:1.27
@@ -54,6 +56,8 @@ release-docker:
 			GOOS=linux GOARCH=arm64 go build -buildvcs=false -ldflags "-X github.com/pricec/factory/internal/buildinfo.ID=$$BUILD_ID" -o dist/factory-linux-arm64 ./cmd/factory && \
 			GOOS=linux GOARCH=amd64 go build -buildvcs=false -ldflags "-X github.com/pricec/factory/internal/buildinfo.ID=$$BUILD_ID" -o dist/foreman-linux-amd64 ./cmd/foreman && \
 			GOOS=linux GOARCH=arm64 go build -buildvcs=false -ldflags "-X github.com/pricec/factory/internal/buildinfo.ID=$$BUILD_ID" -o dist/foreman-linux-arm64 ./cmd/foreman && \
+			GOOS=linux GOARCH=amd64 go build -buildvcs=false -ldflags "-X github.com/pricec/factory/internal/buildinfo.ID=$$BUILD_ID" -o dist/vision-linux-amd64 ./cmd/vision && \
+			GOOS=linux GOARCH=arm64 go build -buildvcs=false -ldflags "-X github.com/pricec/factory/internal/buildinfo.ID=$$BUILD_ID" -o dist/vision-linux-arm64 ./cmd/vision && \
 			go run -buildvcs=false ./internal/tools/mkmanifest -dir dist -build "$$BUILD_ID"'
 	-docker run --rm -v "$(CURDIR):/src" -w /src "$(DOCKER_GOIMG)" \
 		chown -R $$(id -u):$$(id -g) dist

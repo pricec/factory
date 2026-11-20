@@ -36,7 +36,7 @@ func TestRunWritesManifest(t *testing.T) {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatal(err)
 	}
-	if m.Build != "20261116T141100Z-38a6368abcde" || len(m.Files) != 4 {
+	if m.Build != "20261116T141100Z-38a6368abcde" || len(m.Files) != len(Files) {
 		t.Fatalf("bad manifest: %+v", m)
 	}
 	for _, n := range Files {

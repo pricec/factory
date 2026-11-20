@@ -1346,7 +1346,7 @@ Onboarding endpoints (#24, #25) - all outside `/v1`:
   default runs the Claude Code CLI) - and a foreman onboarded here needs
   opencode plus the Claude Code CLI for its spawned workers.
 - `GET /download/{kind}/{platform}` (#24, #25): serves the {kind} =
-  `factory` | `foreman` binary from the factory's `-downloads` dir for
+  `factory` | `foreman` | `vision` binary from the factory's `-downloads` dir for
   `{platform}` = `{kind}-linux-amd64` | `{kind}-linux-arm64` (i.e. the full
   servable name `factory-linux-amd64`, `foreman-linux-arm64`, ... - a bare
   `linux-$GOARCH` platform is rejected with 400; 400 otherwise is also the
@@ -1469,7 +1469,7 @@ no shared state.
 ### 8.3 Prompt construction (#5, #28)
 
 ```
-{task}\n\nMachine input:\n{payload JSON}{ownership note}\n\nReport with the inbox_report_result tool. If you cannot, your final stdout is used as fallback.\nIf this job is a duplicate of, or superseded by, another job, report status=failed with error.kind=superseded (it is never retried). Use error.kind=validation for failures that will fail the same way again (permissions, auth, configuration).
+{task}\n\nMachine input:\n{payload JSON}{vision note}{ownership note}\n\nReport with the inbox_report_result tool. If you cannot, your final stdout is used as fallback.\nIf this job is a duplicate of, or superseded by, another job, report status=failed with error.kind=superseded (it is never retried). Use error.kind=validation for failures that will fail the same way again (permissions, auth, configuration).
 ```
 
 The tool name is `inbox_report_result` (#28): the generated config mounts
@@ -1491,6 +1491,21 @@ gets, between the machine input and the reporting instruction:
 ```
 
 The two tool names follow the runner spelling like `report_result`.
+
+Vision note (2026-11-20 amendment). Every job gets, between the machine
+input and the ownership note, a one-line pointer to the `vision` CLI
+(docs/vision.md), identical across runners:
+
+```
+\n\nTool: `vision [--prompt "..."] <image path|URL>` describes an image via the LAN vision model (LAN-only, run serially, ~7s/img, weak on chart numbers and cropped text; see docs/vision.md).
+```
+
+`make release` also builds `vision-linux-{amd64,arm64}` (listed in the
+release manifest, served by `GET /download/vision/{platform}`), and
+`/install.sh` installs it to `/var/lib/factory-foreman/bin/vision` with a
+`/usr/local/bin/vision` symlink (best-effort: a factory without the binary
+only warns). Auto-update swaps only the foreman binary; re-run the installer
+to refresh `vision`.
 
 ### 8.4 Child CLI invocation & generated config (#5, #13, #28, #31; claude amendment 2026-11-16)
 

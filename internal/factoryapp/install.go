@@ -30,10 +30,10 @@ var installScript string
 var installServerScript string
 
 // downloadPattern is the pinned set of servable binaries (spec §7.1):
-// factory and foreman, linux amd64 + arm64 only. The anchored regexp
+// factory, foreman and vision, linux amd64 + arm64 only. The anchored regexp
 // doubles as the path-safety check - no user-controlled subdirectory ever
 // reaches the filesystem path.
-var downloadPattern = regexp.MustCompile(`^(factory|foreman)-(linux)-(amd64|arm64)$`)
+var downloadPattern = regexp.MustCompile(`^(factory|foreman|vision)-(linux)-(amd64|arm64)$`)
 
 // renderInstall substitutes the factory URL and a fresh pairing token into
 // the onboarding script.

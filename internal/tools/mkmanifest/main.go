@@ -20,6 +20,8 @@ var Files = []string{
 	"foreman-linux-arm64",
 	"factory-linux-amd64",
 	"factory-linux-arm64",
+	"vision-linux-amd64",
+	"vision-linux-arm64",
 }
 
 type fileEntry struct {

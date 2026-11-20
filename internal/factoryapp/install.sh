@@ -69,6 +69,19 @@ fi
 chmod 755 "$BIN_DIR/foreman.new"
 chown factory-foreman "$BIN_DIR/foreman.new"
 mv -f "$BIN_DIR/foreman.new" "$BIN_DIR/foreman"
+# vision CLI (docs/vision.md): jobs call it from the worker PATH. Best-effort:
+# it is LAN-only and optional, so a factory that does not serve it yet (404)
+# warns instead of aborting the onboarding. Re-run this script to refresh it
+# (auto-update swaps only the foreman binary).
+if curl -fsSL "$FACTORY_URL/download/vision/vision-linux-$GOARCH" -o "$BIN_DIR/vision.new" && [ -s "$BIN_DIR/vision.new" ]; then
+	chmod 755 "$BIN_DIR/vision.new"
+	chown factory-foreman "$BIN_DIR/vision.new"
+	mv -f "$BIN_DIR/vision.new" "$BIN_DIR/vision"
+	ln -sfn "$BIN_DIR/vision" /usr/local/bin/vision
+else
+	rm -f "$BIN_DIR/vision.new"
+	echo "warning: vision binary not available from $FACTORY_URL; skipping (docs/vision.md)" >&2
+fi
 # A reinstall supersedes any in-flight auto-update: drop a stale marker and
 # boot counter so the guard cannot roll back over the fresh binary.
 rm -f "$BIN_DIR/update-pending.json" "$BIN_DIR/update-boots"

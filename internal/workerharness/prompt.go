@@ -55,6 +55,11 @@ func ownershipNote(runner string) string {
 // (§5.2, §6.4, §8.3).
 const supersededNote = "\nIf this job is a duplicate of, or superseded by, another job, report status=failed with error.kind=superseded (it is never retried). Use error.kind=validation for failures that will fail the same way again (permissions, auth, configuration)."
 
+// visionNote tells every job about the vision CLI (docs/vision.md); the
+// binary is installed on the foreman's service PATH by install.sh.
+const visionNote = "\n\nTool: `vision [--prompt \"...\"] <image path|URL>` describes an image via the LAN vision model " +
+	"(LAN-only, run serially, ~7s/img, weak on chart numbers and cropped text; see docs/vision.md)."
+
 // payloadNull is the payload stand-in when the spec has no payload (§8.3).
 const payloadNull = "null"
 
@@ -62,7 +67,8 @@ const payloadNull = "null"
 // input, the ownership note (jobs that own a merge only), and the
 // reporting instruction. A missing payload becomes null.
 // runner selects only the tool-name spelling (§8.3); everything else is
-// byte-identical across runners.
+// byte-identical across runners. The vision tool line follows the machine
+// input.
 func buildPrompt(spec wire.JobSpec, runner string) string {
 	payload := payloadNull
 	if len(spec.Payload) > 0 {
@@ -72,5 +78,5 @@ func buildPrompt(spec wire.JobSpec, runner string) string {
 	if OwnsMerge(spec) {
 		note = ownershipNote(runner)
 	}
-	return spec.Task + "\n\nMachine input:\n" + payload + note + promptSuffix(runner)
+	return spec.Task + "\n\nMachine input:\n" + payload + visionNote + note + promptSuffix(runner)
 }
