@@ -1,6 +1,9 @@
 package wire
 
-import "strings"
+import (
+	"math"
+	"strings"
+)
 
 // Limits applied by HostInfo.Sanitize (the factory never trusts a foreman's
 // host report to be small).
@@ -29,10 +32,32 @@ type HostInfo struct {
 	// MemTotalBytes / MemAvailBytes come from /proc/meminfo.
 	MemTotalBytes int64 `json:"mem_total_bytes,omitempty"`
 	MemAvailBytes int64 `json:"mem_avail_bytes,omitempty"`
+	// SwapTotalBytes / SwapFreeBytes come from /proc/meminfo (0 total = no swap).
+	SwapTotalBytes int64 `json:"swap_total_bytes,omitempty"`
+	SwapFreeBytes  int64 `json:"swap_free_bytes,omitempty"`
+	// Load is the 1/5/15-minute load average (/proc/loadavg); nil when
+	// unavailable. A pointer so a genuine 0.00 is still reported.
+	Load *HostLoad `json:"load,omitempty"`
+	// CPUUsagePct is whole-machine CPU busy % (0-100) over the interval
+	// between this foreman's previous two reports (delta of /proc/stat).
+	// nil on the first report after start or when unavailable.
+	CPUUsagePct *float64 `json:"cpu_usage_pct,omitempty"`
+	// CPUModel is the first "model name" from /proc/cpuinfo.
+	CPUModel string `json:"cpu_model,omitempty"`
+	// PrimaryIP is the first non-virtual address (IPv4 preferred), the one
+	// an operator would use to reach the machine; "" when none.
+	PrimaryIP string `json:"primary_ip,omitempty"`
 	// Disks reports "/" and the foreman's work dir.
 	Disks    []HostDisk `json:"disks,omitempty"`
 	UptimeS  int64      `json:"uptime_s,omitempty"`
 	Reported string     `json:"reported_at,omitempty"` // RFC3339, set by the factory on receipt
+}
+
+// HostLoad is the classic 1/5/15-minute load average.
+type HostLoad struct {
+	One     float64 `json:"1m"`
+	Five    float64 `json:"5m"`
+	Fifteen float64 `json:"15m"`
 }
 
 // HostIP is one interface address. Virtual marks container/bridge noise
@@ -70,6 +95,15 @@ func (h *HostInfo) Sanitize() bool {
 		return false
 	}
 	h.Hostname, h.OS, h.Kernel, h.Arch = clip(h.Hostname), clip(h.OS), clip(h.Kernel), clip(h.Arch)
+	h.CPUModel, h.PrimaryIP = clip(h.CPUModel), clip(h.PrimaryIP)
+	if h.CPUUsagePct != nil {
+		v := math.Min(100, math.Max(0, *h.CPUUsagePct))
+		if math.IsNaN(*h.CPUUsagePct) {
+			h.CPUUsagePct = nil
+		} else {
+			h.CPUUsagePct = &v
+		}
+	}
 	if len(h.IPs) > maxHostIPs {
 		h.IPs = h.IPs[:maxHostIPs]
 	}

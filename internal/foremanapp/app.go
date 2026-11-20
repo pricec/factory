@@ -90,6 +90,7 @@ type Config struct {
 
 // App is the wired foreman agent host.
 type App struct {
+	cpu        cpuSampler // previous /proc/stat sample for the host report
 	cfg        Config
 	factoryURL string
 	id         string
