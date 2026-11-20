@@ -53,6 +53,22 @@ CREATE TABLE IF NOT EXISTS schedule_runs (
 			return err
 		}
 	}
+	// notify_standing: post each run's result into the standing Planner
+	// chat (default on). schedule_runs.job_id: the job a tick fired, so a
+	// job's terminal hook can find its schedule.
+	for _, c := range []struct{ table, col, ddl string }{
+		{"schedules", "notify_standing", `ALTER TABLE schedules ADD COLUMN notify_standing INTEGER NOT NULL DEFAULT 1`},
+		{"schedule_runs", "job_id", `ALTER TABLE schedule_runs ADD COLUMN job_id TEXT NOT NULL DEFAULT ''`},
+	} {
+		if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, c.table, c.col).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			if _, err := db.Exec(c.ddl); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 
@@ -80,6 +96,9 @@ type Schedule struct {
 	// TaskID is the task every fired job is linked to (and admitted under,
 	// so a P0 task's runs bypass the usage throttle). Empty = unlinked.
 	TaskID string `json:"task_id,omitempty"`
+	// NotifyStanding posts a short result summary of each run into the
+	// standing Planner chat when the run finishes (default on).
+	NotifyStanding bool `json:"notify_standing"`
 	// LastRunAt is the fire-time anchor: seeded with the schedule's
 	// creation time (the pinned schema has no created_at column) and
 	// advanced to each fire time, so the next fire is always the first
@@ -100,6 +119,12 @@ func (s *Store) CreateSchedule(ctx context.Context, cronSpec string, template wi
 // CreateScheduleForTask is CreateSchedule with the originating task: each
 // fired job is linked to taskID before dispatch and admitted under it.
 func (s *Store) CreateScheduleForTask(ctx context.Context, cronSpec string, template wire.JobSpec, taskID string) (Schedule, error) {
+	return s.CreateScheduleNotify(ctx, cronSpec, template, taskID, true)
+}
+
+// CreateScheduleNotify is CreateScheduleForTask with an explicit
+// notifyStanding flag (post each run's result into the standing chat).
+func (s *Store) CreateScheduleNotify(ctx context.Context, cronSpec string, template wire.JobSpec, taskID string, notifyStanding bool) (Schedule, error) {
 	if _, err := cron.ParseStandard(cronSpec); err != nil {
 		return Schedule{}, badSchedule("cron_spec: %v", err)
 	}
@@ -116,14 +141,16 @@ func (s *Store) CreateScheduleForTask(ctx context.Context, cronSpec string, temp
 		Enabled:     true,
 		TaskID:      taskID,
 		LastRunAt:   s.now(),
+
+		NotifyStanding: notifyStanding,
 	}
 	tmplJSON, err := json.Marshal(sch.JobTemplate)
 	if err != nil {
 		return Schedule{}, err
 	}
 	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO schedules (id, cron_spec, job_template, enabled, last_run_at, task_id) VALUES (?, ?, ?, 1, ?, ?)`,
-		sch.ID, sch.CronSpec, string(tmplJSON), sch.LastRunAt, sch.TaskID); err != nil {
+		`INSERT INTO schedules (id, cron_spec, job_template, enabled, last_run_at, task_id, notify_standing) VALUES (?, ?, ?, 1, ?, ?, ?)`,
+		sch.ID, sch.CronSpec, string(tmplJSON), sch.LastRunAt, sch.TaskID, boolInt(notifyStanding)); err != nil {
 		return Schedule{}, err
 	}
 	return sch, nil
@@ -135,7 +162,7 @@ func (s *Store) Schedules(ctx context.Context) ([]Schedule, error) {
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, cron_spec, job_template, enabled, IFNULL(last_run_at, ''), IFNULL(task_id, '') FROM schedules ORDER BY id`)
+		`SELECT id, cron_spec, job_template, enabled, IFNULL(last_run_at, ''), IFNULL(task_id, ''), notify_standing FROM schedules ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -144,14 +171,15 @@ func (s *Store) Schedules(ctx context.Context) ([]Schedule, error) {
 	for rows.Next() {
 		var sch Schedule
 		var tmplJSON string
-		var enabled int
-		if err := rows.Scan(&sch.ID, &sch.CronSpec, &tmplJSON, &enabled, &sch.LastRunAt, &sch.TaskID); err != nil {
+		var enabled, notify int
+		if err := rows.Scan(&sch.ID, &sch.CronSpec, &tmplJSON, &enabled, &sch.LastRunAt, &sch.TaskID, &notify); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(tmplJSON), &sch.JobTemplate); err != nil {
 			return nil, fmt.Errorf("schedule %s template: %w", sch.ID, err)
 		}
 		sch.Enabled = enabled != 0
+		sch.NotifyStanding = notify != 0
 		out = append(out, sch)
 	}
 	return out, rows.Err()
@@ -202,6 +230,48 @@ func (s *Store) SetScheduleEnabled(ctx context.Context, id string, enabled bool)
 		return fmt.Errorf("set schedule %s enabled: %w", id, ErrScheduleNotFound)
 	}
 	return nil
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// SetScheduleNotifyStanding toggles the standing-chat result summary of a
+// schedule; wraps ErrScheduleNotFound when the id is absent.
+func (s *Store) SetScheduleNotifyStanding(ctx context.Context, id string, on bool) error {
+	if err := EnsureScheduleTables(s.db); err != nil {
+		return err
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE schedules SET notify_standing = ? WHERE id = ?`, boolInt(on), id)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		return fmt.Errorf("set schedule %s notify_standing: %w", id, ErrScheduleNotFound)
+	}
+	return nil
+}
+
+// ScheduleForJob returns the schedule that fired jobID; ok is false for a
+// job no schedule fired (or whose schedule was deleted).
+func (s *Store) ScheduleForJob(ctx context.Context, jobID string) (Schedule, bool, error) {
+	if err := EnsureScheduleTables(s.db); err != nil {
+		return Schedule{}, false, err
+	}
+	var id string
+	err := s.db.QueryRowContext(ctx, `SELECT schedule_id FROM schedule_runs WHERE job_id = ?`, jobID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Schedule{}, false, nil
+	}
+	if err != nil {
+		return Schedule{}, false, err
+	}
+	return s.scheduleByID(ctx, id)
 }
 
 // scheduleByID finds a schedule by id (handler responses).
@@ -284,8 +354,9 @@ func (s *Scheduler) Pump(ctx context.Context) (int, error) {
 			continue
 		}
 		runAt := fire.UTC().Format(time.RFC3339)
+		specID := wire.NewJobID()
 		res, err := s.store.db.ExecContext(ctx,
-			`INSERT OR IGNORE INTO schedule_runs (schedule_id, run_at) VALUES (?, ?)`, sch.ID, runAt)
+			`INSERT OR IGNORE INTO schedule_runs (schedule_id, run_at, job_id) VALUES (?, ?, ?)`, sch.ID, runAt, specID)
 		if err != nil {
 			return enqueued, err
 		}
@@ -303,7 +374,6 @@ func (s *Scheduler) Pump(ctx context.Context) (int, error) {
 			continue
 		}
 		spec := sch.JobTemplate
-		specID := wire.NewJobID()
 		spec.ID = specID
 		spec.CreatedAt = runAt
 		if s.Prepare != nil {
@@ -407,6 +477,8 @@ func (s *Store) SchedulesHandler() http.Handler {
 	mux.HandleFunc("DELETE /v1/schedules/{id}", s.handleDeleteSchedule)
 	mux.HandleFunc("POST /v1/schedules/{id}/enable", s.handleSetScheduleEnabled(true))
 	mux.HandleFunc("POST /v1/schedules/{id}/disable", s.handleSetScheduleEnabled(false))
+	mux.HandleFunc("POST /v1/schedules/{id}/notify/enable", s.handleSetScheduleNotify(true))
+	mux.HandleFunc("POST /v1/schedules/{id}/notify/disable", s.handleSetScheduleNotify(false))
 	return mux
 }
 
@@ -458,6 +530,23 @@ func (s *Store) handleSetScheduleEnabled(enabled bool) http.HandlerFunc {
 		}
 		if !ok {
 			writeError(w, http.StatusNotFound, "not_found", "no such schedule", false)
+			return
+		}
+		writeJSON(w, http.StatusOK, sch)
+	}
+}
+
+// handleSetScheduleNotify toggles the standing-chat result summary.
+func (s *Store) handleSetScheduleNotify(on bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if err := s.SetScheduleNotifyStanding(r.Context(), id, on); err != nil {
+			writeScheduleError(w, err)
+			return
+		}
+		sch, ok, err := s.scheduleByID(r.Context(), id)
+		if err != nil || !ok {
+			writeError(w, http.StatusInternalServerError, "internal", "schedule lookup failed", true)
 			return
 		}
 		writeJSON(w, http.StatusOK, sch)

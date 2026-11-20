@@ -795,6 +795,15 @@ host facts are descriptive and never matched on).
   fired run: pinned runs dispatch when the pinned foreman is online and
   pend otherwise - the Matcher is bypassed, so the schedule stays on the
   pinned machine.
+- Standing-chat summary (2026-11-20 amendment): `schedules.notify_standing`
+  (default 1; `create_job`/`POST /v1/jobs` `notify_standing:false` opts out;
+  `POST /v1/schedules/{id}/notify/enable|disable` toggles; the factory's
+  audit schedule is created off) and `schedule_runs.job_id` (the job a tick
+  fired). When a fired job reaches `done`, `dead` or `timed_out`
+  (cancelled/superseded post nothing), the factory posts ONE `brain.reply`
+  `{text, spoken}` into the standing Planner chat (`task_standing`), naming
+  the run's task id; failures read "Scheduled run FAILED". `spoken` is
+  <=300 chars with no ids. It never wakes the planner.
 
 ### 6.9 Control-plane HTTP API (#8, #9, #10, #12, #13)
 
