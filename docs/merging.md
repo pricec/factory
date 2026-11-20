@@ -204,11 +204,12 @@ go to step 8 and report `done` with `merged: true` once the merge is verified.
 | Repo | Hook (run in `$WORK` at `$MERGED`) |
 |---|---|
 | `pricec/video-chat` | `scripts/deploy.sh` |
+| `pricec/movies-chat` | `scripts/deploy.sh` (builds the Go binary, restarts `movies-chat.service`, checks `/healthz`) |
 
 The table lives in this reviewed document on purpose: a repo gets host-level
 deploy only when listed here, never because a merged PR added a script. A hook
 runs on this host (the integration foreman), from a clean checkout of the merged
-commit, and must itself tag a rollback image, verify health, and restore the
+commit, and must itself keep a rollback (image tag or binary copy), verify health, and restore the
 previous version on failure (`scripts/deploy.sh` does all three and exits
 non-zero on failure):
 
