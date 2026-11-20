@@ -81,3 +81,26 @@ func (s *Store) SetStandingSummary(ctx context.Context, summary, through string)
 	}
 	return s.SetSetting(ctx, KeyStandingSummaryThrough, through)
 }
+
+// KeyContextCutoffPrefix + task id: the id of the newest message the
+// operator has wiped from that thread's planner context. Messages up to and
+// including it are never fed to the planner prompt (they stay stored).
+const KeyContextCutoffPrefix = "context_cutoff:"
+
+// ContextCutoff returns the thread's context cutoff message id ("" = none).
+func (s *Store) ContextCutoff(ctx context.Context, taskID string) (string, error) {
+	v, _, err := s.GetSetting(ctx, KeyContextCutoffPrefix+taskID)
+	return v, err
+}
+
+// ResetContext records throughID as the thread's context cutoff. For the
+// standing chat it also clears the running summary. Operator priority
+// criteria are policy and are left untouched.
+func (s *Store) ResetContext(ctx context.Context, taskID, throughID string) error {
+	if taskID == StandingID {
+		if err := s.SetStandingSummary(ctx, "", ""); err != nil {
+			return err
+		}
+	}
+	return s.SetSetting(ctx, KeyContextCutoffPrefix+taskID, throughID)
+}

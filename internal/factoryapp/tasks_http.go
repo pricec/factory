@@ -36,6 +36,7 @@ func (a *App) registerTaskRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/tasks/{id}", a.handleGetTask)
 	mux.HandleFunc("PATCH /v1/tasks/{id}", a.handleRenameTask)
 	mux.HandleFunc("POST /v1/tasks/{id}/close", a.handleCloseTask)
+	mux.HandleFunc("POST /v1/tasks/{id}/reset_context", a.handleResetContext)
 }
 
 // taskTitleLimit bounds an operator rename, in characters (runes). It

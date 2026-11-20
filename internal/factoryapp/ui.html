@@ -3107,6 +3107,7 @@ function pTaskMenu() {
     '<button class="p-btn" data-act="toggle-internal">' + (P.showInternal ? "Hide" : "Show") + " internal messages (jobs, reports)</button>" +
     (t.status === "open" && !t.standing ? '<button class="p-btn" data-act="close" data-id="' + esc(t.id) + '">Close task</button>' : "") +
     (t.standing ? "" : '<button class="p-btn" data-act="mark-unread" data-id="' + esc(t.id) + '">Mark unread and go back</button>') +
+    '<button class="p-btn" data-act="reset-context" data-id="' + esc(t.id) + '">Clear planner context</button>' +
     '<button class="p-btn" data-act="copy-id" data-id="' + esc(t.id) + '">Copy task id</button>' +
     (jobs.length ? pSec("Linked jobs", jobs.length) + jobs.map(j => '<button class="p-btn" style="font-family:var(--mono)" data-go="job/' + esc(j) + '">' + esc(j) + "</button>").join("") : "") +
     "</div>");
@@ -3135,6 +3136,14 @@ async function pAct(act, id, el) {
     case "ack": pAck(id); break;
     case "alert-reply": pAlertReply(id); break;
     case "task-menu": pTaskMenu(); break;
+    case "reset-context": {
+      pCloseSheet();
+      if (!confirm("Clear planner context? The planner forgets this chat so far" + (id === STANDING_ID ? " and its running summary" : "") + ". Messages stay visible here, and your priority criteria are kept.")) break;
+      try { await postJ("/v1/tasks/" + encodeURIComponent(id) + "/reset_context", {}); pToast("Planner context cleared"); }
+      catch (e) { pToast("clear failed: " + e.message, true); }
+      P.threadSig = ""; pLoad();
+      break;
+    }
     case "toggle-internal": pCloseSheet(); P.showInternal = !P.showInternal; P.threadSig = ""; pLoad(); break;
     case "mark-unread":
       pCloseSheet(); markSeen(pTask(id), false);
