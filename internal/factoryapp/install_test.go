@@ -386,7 +386,7 @@ func TestDownloadFactoryBinary(t *testing.T) {
 // TestInstallScriptsDownloadServablePlatforms: every download URL rendered
 // into /install.sh and /install-server.sh must name a platform the server
 // actually serves - the same anchored set handleDownload enforces
-// (`^(factory|foreman)-(linux)-(amd64|arm64)$`, spec §7.1). A URL like
+// (`^(factory|foreman|vision)-(linux)-(amd64|arm64)$`, spec §7.1). A URL like
 // /download/foreman/linux-$GOARCH is rejected with 400 "unknown platform",
 // which made every fresh onboarding fail at the curl step.
 func TestInstallScriptsDownloadServablePlatforms(t *testing.T) {
@@ -415,7 +415,7 @@ func TestInstallScriptsDownloadServablePlatforms(t *testing.T) {
 	}
 
 	// Same platform set handleDownload serves (install.go downloadPattern).
-	servable := regexp.MustCompile(`^(factory|foreman)-(linux)-(amd64|arm64)$`)
+	servable := regexp.MustCompile(`^(factory|foreman|vision)-(linux)-(amd64|arm64)$`)
 	// /download/{kind}/{...} URLs as the scripts curl them ($GOARCH still
 	// unexpanded - the shell substitutes amd64|arm64 at runtime).
 	urlRe := regexp.MustCompile(`/download/[a-z]+/[A-Za-z0-9.$_-]+`)

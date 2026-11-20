@@ -26,7 +26,9 @@ func wantPrompt(runner, task, payload string, owns bool) string {
 			"Decide details yourself; use " + prefix + "ask_parent or a failed report only when you need coordination with other jobs " +
 			"or a decision only the operator can make."
 	}
-	return task + "\n\nMachine input:\n" + payload + note +
+	return task + "\n\nMachine input:\n" + payload +
+		"\n\nTool: `vision [--prompt \"...\"] <image path|URL>` describes an image via the LAN vision model " +
+		"(LAN-only, run serially, ~7s/img, weak on chart numbers and cropped text; see docs/vision.md)." + note +
 		"\n\nReport with the " + prefix + "report_result tool. If you cannot, your final stdout is used as fallback." + supersededNote
 }
 
