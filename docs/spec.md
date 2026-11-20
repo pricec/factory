@@ -1695,7 +1695,7 @@ Kill the entire process group when a limit fires; post a JobResult whose
 
 | reason | fires when | `error.kind` |
 |---|---|---|
-| `idle` | no stdout/stderr output for `idle_timeout_s` (default 900; any output is a heartbeat) | `timeout` |
+| `idle` | no stdout/stderr output for `idle_timeout_s` (default 900, max 7200; any output is a heartbeat). Settable per job on `create_job` / `POST /v1/jobs`; when unset the foreman applies its own default when it persists the job spec (`FACTORY_FOREMAN_IDLE_TIMEOUT_S`, else a built-in table: `megatron` 3600, others 900). Scheduled templates normalize to 900 at creation, so set it explicitly on schedules | `timeout` |
 | `ceiling` | wall clock reaches `timeout_s` (hard backstop; default 14400, or by tier when unset: flash 3600, default 7200, hardest 14400) | `timeout` |
 | `budget` | live spend (claude runner: summed stream-json usage, estimated from tokens until the result event's `total_cost_usd` replaces it) reaches `budget.max_cost_usd` (default $20; an API-equivalent cost ESTIMATE standing in for subscription usage-window consumption - the factory runs on a Claude subscription plan, not API billing, so this is not an invoice); SIGTERM, 5s grace, then SIGKILL of the whole process group (even if the leader already exited); the job is flagged `over_budget`, partial output kept, never retried | `other` |
 | `loop` | the same tool call (identical name, compacted input AND tool result) repeats 8 times in a row (claude runner; override per job with `loop_limit`, 0 = 8, negative = disabled); the job is KILLED (SIGTERM, grace, group SIGKILL), never retried | `other` |

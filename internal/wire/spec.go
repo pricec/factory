@@ -18,6 +18,11 @@ const (
 	// DefaultIdleTimeoutS is how long a worker may produce no output
 	// (idle_timeout_s) before the harness kills it (15m).
 	DefaultIdleTimeoutS = 900
+	// MaxIdleTimeoutS bounds a per-job idle_timeout_s set through the
+	// planner/UI create paths (2h): long enough for transcription, GPU
+	// or scheduled-window waits, short enough that a hung job is still
+	// reaped.
+	MaxIdleTimeoutS = 7200
 	// DefaultLoopLimit is the loop guard default (identical call+result repeats).
 	DefaultLoopLimit       = 8
 	DefaultPriority        = 5
@@ -211,6 +216,9 @@ func (s *JobSpec) validate(requireID bool) error {
 	}
 	if s.IdleTimeoutS < 0 {
 		return fmt.Errorf("idle_timeout_s: must be >= 0, got %d", s.IdleTimeoutS)
+	}
+	if s.IdleTimeoutS > MaxIdleTimeoutS {
+		return fmt.Errorf("idle_timeout_s: must be <= %d, got %d", MaxIdleTimeoutS, s.IdleTimeoutS)
 	}
 	if s.Priority < MinPriority || s.Priority > MaxPriority {
 		return fmt.Errorf("priority: must be %d-%d, got %d", MinPriority, MaxPriority, s.Priority)

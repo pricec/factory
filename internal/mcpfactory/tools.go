@@ -55,6 +55,8 @@ type (
 		Tier         string `json:"tier,omitempty"`
 		Model        string `json:"model,omitempty"`
 		TimeoutS     *int   `json:"timeout_s,omitempty"`
+		// IdleTimeoutS: no-output kill limit (default 900; max 7200).
+		IdleTimeoutS *int   `json:"idle_timeout_s,omitempty"`
 		Priority     *int   `json:"priority,omitempty"`
 		ScheduleCron string `json:"schedule_cron,omitempty"`
 		// NotifyStanding (default true): with schedule_cron, post each run's
@@ -223,6 +225,9 @@ func createJobTool(cfg Config) mcp.ToolHandlerFor[createJobArgs, any] {
 		spec.Model = in.Model
 		if in.TimeoutS != nil {
 			spec.TimeoutS = *in.TimeoutS
+		}
+		if in.IdleTimeoutS != nil {
+			spec.IdleTimeoutS = *in.IdleTimeoutS
 		}
 		if in.Priority != nil {
 			spec.Priority = *in.Priority

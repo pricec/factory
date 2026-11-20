@@ -35,6 +35,7 @@ type createJobRequest struct {
 	// amendment): it overrides the tier on the foreman.
 	Model        string `json:"model,omitempty"`
 	TimeoutS     int    `json:"timeout_s,omitempty"`
+	IdleTimeoutS int    `json:"idle_timeout_s,omitempty"`
 	Priority     int    `json:"priority,omitempty"`
 	ScheduleCron string `json:"schedule_cron,omitempty"`
 	// NotifyStanding (default true) posts each scheduled run's result
@@ -75,6 +76,9 @@ func (a *App) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	spec.Model = in.Model
 	if in.TimeoutS != 0 {
 		spec.TimeoutS = in.TimeoutS
+	}
+	if in.IdleTimeoutS != 0 {
+		spec.IdleTimeoutS = in.IdleTimeoutS
 	}
 	if in.Priority != 0 {
 		spec.Priority = in.Priority

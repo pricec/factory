@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/pricec/factory/internal/ocusage"
 	"github.com/pricec/factory/internal/wire"
@@ -39,6 +40,9 @@ func (f spawnerFunc) Spawn(ctx context.Context, spec wire.JobSpec) error { retur
 // freshly started opencode child was killed while the dispatch had already
 // returned {job_id} - a silent fake success (2026-11-15 bug report).
 func (a *App) SpawnWorker(ctx context.Context, spec wire.JobSpec) error {
+	if spec.IdleTimeoutS == 0 {
+		spec.IdleTimeoutS = a.defaultIdleTimeoutS()
+	}
 	bearer, err := a.auth.MintWorkerToken(ctx, a.inboxID, spec.ID)
 	if err != nil {
 		return fmt.Errorf("mint worker token for %s: %w", spec.ID, err)
@@ -275,6 +279,25 @@ func (a *App) defaultHarnessConfig(spec wire.JobSpec, bearer string) workerharne
 		// opencode database (the claude route parses stdout instead).
 		ReadUsage: opencodeUsageReader,
 	}
+}
+
+// foremanIdleTimeoutS holds per-foreman idle_timeout_s defaults for
+// foremen whose jobs routinely wait silently (transcription, GPU work,
+// scheduled windows). Others keep wire.DefaultIdleTimeoutS.
+var foremanIdleTimeoutS = map[string]int{"megatron": 3600}
+
+// defaultIdleTimeoutS resolves this foreman's idle default: Config
+// (FACTORY_FOREMAN_IDLE_TIMEOUT_S), else the per-foreman table, else the
+// wire default. A job's own idle_timeout_s always wins.
+func (a *App) defaultIdleTimeoutS() int {
+	if a.cfg.IdleTimeoutS > 0 {
+		return min(a.cfg.IdleTimeoutS, wire.MaxIdleTimeoutS)
+	}
+	id := strings.TrimPrefix(a.cfg.ID, "foreman:")
+	if s, ok := foremanIdleTimeoutS[id]; ok {
+		return s
+	}
+	return wire.DefaultIdleTimeoutS
 }
 
 // workerModelForTier resolves the tier's worker model from the
