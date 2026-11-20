@@ -347,6 +347,7 @@
   .uring.ORANGE .arc { stroke: #f0883e; } .uring.ORANGE text { fill: #f0883e; }
   .uring.RED .arc { stroke: var(--bad); } .uring.RED text { fill: var(--bad); }
   .uring.stale { opacity: .6; }
+  .ustale { font: 700 10px/1 var(--mono); color: var(--warn); border: 1px solid var(--warn); border-radius: 4px; padding: 1px 4px; margin-left: 2px; }
   .uring .utxt { display: flex; flex-direction: column; gap: 2px; text-align: left; white-space: nowrap;
     font-variant-numeric: tabular-nums; }
   .uring .ul { font-size: 12px; font-weight: 700; line-height: 1; }
@@ -973,7 +974,9 @@ function rel(ts) {
 }
 
 async function getJSON(url) {
-  const r = await fetch(url);
+  // no-store: the usage/throttle readings must never come from the HTTP cache
+  // (iOS standalone PWAs otherwise keep showing an old level).
+  const r = await fetch(url, { cache: "no-store" });
   if (!r.ok) throw new Error(url + " -> HTTP " + r.status);
   return r.json();
 }
@@ -1664,6 +1667,7 @@ function connectStream() {
   // Any message (persisted thread rows, synthetic task.changed /
   // alert.changed) is a "something changed" hint: debounce and refetch.
   es.addEventListener("message", scheduleRefresh);
+  es.addEventListener("message", loadUsageSoon); // throttle level may have changed
   // Live envelopes also feed the voice client (spoken replies, hands-free);
   // only events that arrive on the open stream, never history.
   es.addEventListener("message", (ev) => {
@@ -1956,7 +1960,7 @@ $("createjob").onsubmit = async (ev) => {
 
 /* ---------- factory usage panel (read-only; GET /v1/usage) ---------- */
 
-const USAGE_POLL_MS = 60000, USAGE_STALE_S = 300;
+const USAGE_POLL_MS = 30000, USAGE_STALE_S = 300, USAGE_FETCH_STALE_MS = 120000;
 const USAGE_WINDOWS = [["five_hour", "5-hour"], ["seven_day", "weekly"]];
 const USAGE_STATES = ["GREEN", "YELLOW", "ORANGE", "RED"];
 let usageData = null, usageFetchedAt = 0, usageError = "";
@@ -2176,6 +2180,14 @@ async function loadGateAlerts() {
   } catch (e) { gateAlertsError = e.message; }
 }
 
+// loadUsageSoon: event-driven refresh (foreground, SSE); rate-limited to 1/2s.
+let usageSoonAt = 0;
+function loadUsageSoon() {
+  const now = Date.now();
+  if (now < usageSoonAt) return;
+  usageSoonAt = now + 2000;
+  loadUsage();
+}
 async function loadUsage() {
   try { usageData = await getJSON("/v1/usage"); usageFetchedAt = Date.now(); usageError = ""; }
   catch (e) { usageError = e.message; }
@@ -2398,6 +2410,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   loadModels(); // populate the create-form picker; never blocks the page
   loadUsage();
   setInterval(loadUsage, USAGE_POLL_MS);
+  // iOS standalone PWAs freeze timers in the background: refetch on return.
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") loadUsageSoon(); });
+  window.addEventListener("focus", loadUsageSoon);
+  window.addEventListener("pageshow", loadUsageSoon);
+  window.addEventListener("online", loadUsageSoon);
   setInterval(renderUsage, 30000); // keep countdowns moving between polls
   pInit();
   renderRings();
@@ -2676,13 +2693,29 @@ function usageHoldText(g) {
   }
   return "Throttle level unknown: jobs are not being held.";
 }
+// usageEffectiveLevel: the level the ring shows. The dispatch throttle's own
+// effective level (gate.level: hysteresis + pause applied) is the source of
+// truth; the window's raw state is only the fallback when there is no gate or it
+// has no fresh reading (fail_open). Mirrors throttle.Eval; no thresholds here.
+function usageEffectiveLevel(w, gate) {
+  const own = w ? usageState(w.state) : "UNKNOWN";
+  if (!gate) return own;
+  if (gate.paused) return "RED";
+  if (gate.fail_open) return own;
+  const lv = usageState(gate.level);
+  return lv === "UNKNOWN" ? own : lv;
+}
+// usageFetchStale: true when the last successful /v1/usage fetch is too old
+// (timers freeze while an iOS home-screen app is backgrounded).
+function usageFetchStale(fetchedAt, nowMs) { return !fetchedAt || nowMs - fetchedAt > USAGE_FETCH_STALE_MS; }
 // usageRingModel derives one ring from a /v1/usage window (nil -> "no data").
-function usageRingModel(w, short, long, nowMs) {
-  const st = w ? usageState(w.state) : "UNKNOWN";
+// gate = the /v1/usage gate block; fetchStale = client-side fetch age marker.
+function usageRingModel(w, short, long, nowMs, gate, fetchStale) {
+  const st = usageEffectiveLevel(w, gate);
   const pct = w && w.utilization_pct != null && Number.isFinite(w.utilization_pct) ? Math.max(0, Math.min(100, w.utilization_pct)) : null;
   const reset = w ? usageResetMs(w.resets_at) : null;
   const left = reset == null ? null : reset - nowMs;
-  const stale = !w || !!w.stale || w.age_s == null || w.age_s > USAGE_STALE_S;
+  const stale = !w || !!w.stale || w.age_s == null || w.age_s > USAGE_STALE_S || !!fetchStale;
   const pctTxt = pct == null ? "?" : Math.round(pct) + "%";
   const word = USAGE_STATE_WORD[st];
   const label = long + " usage window: " + (pct == null ? "usage unknown" : pctTxt + " used") + ", status " + word + " (" + st + "), " +
@@ -2721,11 +2754,12 @@ function usagePopHTML(d, models, nowMs) {
 // the open popover in sync; called on every usage fetch and by a 15s tick.
 function renderRings() {
   const now = Date.now();
-  const models = USAGE_RING_WINS.map(([k, s, l]) => usageRingModel(usageData && usageData.windows && usageData.windows[k], s, l, now));
+  const gate = usageData && usageData.gate, fstale = usageFetchStale(usageFetchedAt, now) || !!usageError;
+  const models = USAGE_RING_WINS.map(([k, s, l]) => usageRingModel(usageData && usageData.windows && usageData.windows[k], s, l, now, gate, fstale));
   const open = ringOpen;
   for (const [id, host] of [["p", $("p-rings")], ["d", $("d-rings")], ["l", $("pl-rings")]]) {
     if (!host) continue;
-    const html = usageData ? models.map((m, i) => usageRingBtn(m, id + i)).join("") + '<div class="upop" role="dialog" aria-label="Usage details" hidden></div>' : "";
+    const html = usageData ? models.map((m, i) => usageRingBtn(m, id + i)).join("") + (fstale ? '<span class="ustale" title="Usage not refreshed for over 2 minutes">stale</span>' : "") + '<div class="upop" role="dialog" aria-label="Usage details" hidden></div>' : "";
     if (host.dataset.sig !== html) { host.dataset.sig = html; host.innerHTML = html; }
     const pop = host.querySelector(".upop");
     if (!pop) continue;

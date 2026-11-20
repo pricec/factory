@@ -92,7 +92,7 @@ function fetchEv(url, { method = "GET", mode = "cors", accept = "*/*" } = {}) {
   assert.ok(!store["factory-shell-old"] && store["unrelated"] && store["factory-shell-TESTVER"], Object.keys(store));
   // never intercepted: API, SSE, websocket upgrade paths, non-GET, cross-origin, other pages
   for (const [url, o] of [
-    ["https://factory.test/v1/jobs"], ["https://factory.test/v1/inboxes/planner:main/stream", { accept: "text/event-stream" }],
+    ["https://factory.test/v1/jobs"], ["https://factory.test/v1/usage"], ["https://factory.test/v1/throttle"], ["https://factory.test/v1/usage", { mode: "navigate" }], ["https://factory.test/v1/inboxes/planner:main/stream", { accept: "text/event-stream" }],
     ["https://factory.test/v1/chat", { method: "POST" }], ["https://factory.test/", { method: "POST" }],
     ["https://evil.test/", { mode: "navigate" }], ["https://factory.test/anything-else"], ["https://factory.test/v1/push/key"],
     ["wss://factory.test/v1/ws"], ["https://factory.test/v1/x", { mode: "navigate" }],

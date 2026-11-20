@@ -37,7 +37,7 @@ func TestUIUsagePanel(t *testing.T) {
 
 	page := serve("/").Body.String()
 	for _, want := range []string{
-		`id="usagepanel"`, "Factory usage", `getJSON("/v1/usage")`, "USAGE_POLL_MS = 60000",
+		`id="usagepanel"`, "Factory usage", `getJSON("/v1/usage")`, "USAGE_POLL_MS = 30000",
 		`["five_hour", "5-hour"]`, `["seven_day", "weekly"]`,
 		"unavailable:", "stale data", "STALE", "factory spend",
 		"w.utilization_pct", "w.resets_at", "w.pace", "w.state", "w.source", "w.age_s", "w.stale",

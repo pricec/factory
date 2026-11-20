@@ -31,6 +31,22 @@ func TestUIUsageRingsWiring(t *testing.T) {
 	}
 }
 
+// TestUIUsageRefreshWiring: the client must refetch when an iOS home-screen
+// app returns to the foreground, on SSE events, on a 30-60s timer, and never
+// read /v1/usage from the HTTP cache.
+func TestUIUsageRefreshWiring(t *testing.T) {
+	h := string(uiHTML)
+	for _, want := range []string{
+		`document.addEventListener("visibilitychange"`, `window.addEventListener("focus", loadUsageSoon)`,
+		`window.addEventListener("pageshow", loadUsageSoon)`, `es.addEventListener("message", loadUsageSoon)`,
+		"setInterval(loadUsage, USAGE_POLL_MS)", `fetch(url, { cache: "no-store" })`, "usageEffectiveLevel", "USAGE_FETCH_STALE_MS = 120000",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("UI missing %q", want)
+		}
+	}
+}
+
 // TestUIUsageRingsJS runs the pure ring helpers under node (skipped when
 // node is absent; the repo has no other JS runner).
 func TestUIUsageRingsJS(t *testing.T) {
@@ -45,7 +61,7 @@ func TestUIUsageRingsJS(t *testing.T) {
 		t.Fatal("helper block not found")
 	}
 	const pre = `
-const USAGE_STATES = ["GREEN", "YELLOW", "ORANGE", "RED"], USAGE_STALE_S = 300;
+const USAGE_STATES = ["GREEN", "YELLOW", "ORANGE", "RED"], USAGE_STALE_S = 300, USAGE_FETCH_STALE_MS = 120000;
 const usageState = (s) => USAGE_STATES.includes(s) ? s : "UNKNOWN";
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 function fmtUTC(ts) { return ts ? new Date(ts).toISOString().slice(0, 16).replace("T", " ") + "Z" : "-"; }
@@ -99,6 +115,26 @@ const svg = usageRingSVG(50, "RED"); assert.ok(svg.includes("stroke-dasharray") 
 assert.ok(!usageRingSVG(0, "GREEN").includes("stroke-dasharray"));
 const btn = usageRingBtn(usageRingModel(win(), "5h", "5-hour", now), "p0");
 assert.ok(btn.includes("5h 42%") && btn.includes("2h 13m") && btn.includes('aria-label="') && btn.includes('aria-expanded="false"'));
+
+// the ring shows the THROTTLE's level (gate.level), not the window's own state
+const gw = win({ state: "GREEN" });
+assert.strictEqual(usageRingModel(gw, "5h", "5-hour", now, { level: "ORANGE" }).st, "ORANGE");
+assert.strictEqual(usageRingModel(gw, "5h", "5-hour", now, { level: "RED" }).st, "RED");
+assert.strictEqual(usageRingModel(gw, "5h", "5-hour", now, { level: "YELLOW" }).st, "YELLOW");
+assert.strictEqual(usageRingModel(win({ state: "RED" }), "5h", "5-hour", now, { level: "GREEN" }).st, "GREEN"); // hysteresis/override wins
+assert.strictEqual(usageRingModel(gw, "5h", "5-hour", now, { level: "GREEN", paused: true }).st, "RED");
+assert.strictEqual(usageRingModel(win({ state: "YELLOW" }), "5h", "5-hour", now, { level: "GREEN", fail_open: true }).st, "YELLOW");
+assert.strictEqual(usageRingModel(gw, "5h", "5-hour", now, { level: "bogus" }).st, "GREEN");
+assert.strictEqual(usageRingModel(gw, "5h", "5-hour", now, undefined).st, "GREEN");
+// 5h and 7d rings both follow the gate; reset time stays per-window
+const m7 = usageRingModel(win({ resets_at: new Date(now + 6*D).toISOString() }), "7d", "7-day", now, { level: "ORANGE" });
+assert.strictEqual(m7.st, "ORANGE"); assert.strictEqual(m7.text2, "6d");
+// client-side staleness: fetch older than 2 minutes
+assert.strictEqual(usageFetchStale(now - 119e3, now), false);
+assert.strictEqual(usageFetchStale(now - 121e3, now), true);
+assert.strictEqual(usageFetchStale(0, now), true);
+assert.strictEqual(usageRingModel(gw, "5h", "5-hour", now, { level: "GREEN" }, false).stale, false);
+assert.strictEqual(usageRingModel(gw, "5h", "5-hour", now, { level: "GREEN" }, true).stale, true);
 
 // hold text mirrors throttle.Rule
 assert.ok(usageHoldText({ level: "RED", held: 3 }).includes("RED holds all non-P0 work (3 held)"));
