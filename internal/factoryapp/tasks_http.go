@@ -279,6 +279,13 @@ type taskMessage struct {
 // {"task":Task,"messages":[...]}: the thread oldest first (the last limit
 // rows). Internal rows (everything but chat.message and brain.reply) are
 // EXCLUDED unless internal=1 (or true). Unknown id -> 404.
+//
+// The standing Planner chat is windowed: unless all=1, only its last
+// StandingChatTurns turns (chat.message / brain.reply rows) are returned,
+// plus - with internal=1 - the internal rows after the oldest of them, so
+// internal rows never push real turns out. Nothing is deleted; all=1
+// returns the full thread. The reply then carries "window":
+// {"turns":N,"older":M} (M = turns withheld; omitted for other tasks).
 func (a *App) handleGetTask(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	t, err := a.tasks.GetTask(ctx, r.PathValue("id"))
@@ -301,6 +308,12 @@ func (a *App) handleGetTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
+	var window map[string]int
+	if t.Standing && q.Get("all") != "1" && q.Get("all") != "true" {
+		var older int
+		thread, older = windowStanding(thread, a.standingTurns)
+		window = map[string]int{"turns": standingTurns(a.standingTurns), "older": older}
+	}
 	msgs := make([]taskMessage, 0, len(thread))
 	for _, env := range thread {
 		internal := tasks.IsInternal(env.Type)
@@ -316,7 +329,28 @@ func (a *App) handleGetTask(w http.ResponseWriter, r *http.Request) {
 			TS: env.TS, Payload: payload, Internal: internal,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"task": a.taskView(ctx, t), "messages": msgs})
+	out := map[string]any{"task": a.taskView(ctx, t), "messages": msgs}
+	if window != nil {
+		out["window"] = window
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// windowStanding keeps the last `turns` operator-visible rows of thread
+// (oldest first) and every row after the oldest of them; it returns the
+// kept rows and how many turns were cut.
+func windowStanding(thread []wire.MessageEnvelope, turns int) ([]wire.MessageEnvelope, int) {
+	turns = standingTurns(turns)
+	var idxs []int
+	for i, e := range thread {
+		if !tasks.IsInternal(e.Type) {
+			idxs = append(idxs, i)
+		}
+	}
+	if len(idxs) <= turns {
+		return thread, 0
+	}
+	return thread[idxs[len(idxs)-turns]:], len(idxs) - turns
 }
 
 // handleCreateTask serves POST /v1/tasks {text}: the "new task" box, an

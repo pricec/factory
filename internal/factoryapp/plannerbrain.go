@@ -163,6 +163,9 @@ type PlannerWake struct {
 	// for the standing task).
 	Summary        string
 	SummaryThrough string
+	// StandingTurns caps the standing prompt's recent chat at this many
+	// turns (0 -> tasks.DefaultStandingChatTurns).
+	StandingTurns int
 	// Client is the device hint of the operator's newest chat message
 	// ("mobile", "desktop", or "" when unknown).
 	Client string

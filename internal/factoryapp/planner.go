@@ -165,7 +165,7 @@ func (a *App) runTaskWake(ctx context.Context, taskID string, wakers []wire.Mess
 	}
 	cap := plannerThreadCap
 	if t.Standing {
-		cap = standingWindow
+		cap = standingFetchCap(a.standingTurns)
 	}
 	thread, err := a.inbox.ThreadMessages(ctx, taskID, cap)
 	if err != nil {
@@ -182,12 +182,13 @@ func (a *App) runTaskWake(ctx context.Context, taskID string, wakers []wire.Mess
 		log.Printf("factoryapp: planner: priority criteria: %v", err)
 	}
 	w := PlannerWake{
-		Client:   wakeClient(wakers, thread),
-		Reason:   wakeReason(wakers),
-		Task:     t,
-		Criteria: criteria,
-		Thread:   thread,
-		Triggers: wakers,
+		Client:        wakeClient(wakers, thread),
+		Reason:        wakeReason(wakers),
+		Task:          t,
+		Criteria:      criteria,
+		Thread:        thread,
+		Triggers:      wakers,
+		StandingTurns: a.standingTurns,
 	}
 	if t.Standing {
 		w.Reason = reasonStanding

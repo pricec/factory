@@ -469,6 +469,8 @@
   .p-thead { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 2px; color: var(--dim); font: 12px var(--mono); }
   .p-links { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 0 2px 8px; color: var(--dim); font: 12px var(--mono); overflow-wrap: anywhere; }
   .p-links a { color: var(--accent); padding: 4px 0; }
+  .older-btn { align-self: center; background: var(--panel); color: var(--dim); border: 1px solid var(--border);
+    border-radius: 14px; padding: 4px 12px; font: 12px var(--mono); cursor: pointer; margin: 4px auto; }
   .p-log { display: flex; flex-direction: column; gap: 10px; padding-top: 4px; }
   #phone .bubble { max-width: 88%; font: 16px/1.45 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
     overflow-wrap: anywhere; border-radius: 18px; padding: 10px 14px; }
@@ -1001,7 +1003,7 @@ function table(headers, rows) {
 
 const st = {
   tasks: [], alerts: [], selected: null, thread: null, // thread = {task, messages}
-  onlyActive: true, q: "", showInternal: false,
+  onlyActive: true, q: "", showInternal: false, showOlder: false,
   needsInput: false,
   mode: "focus",          // "focus" (default on every load) | "list"
   queue: [], focusId: null, // triage queue: ids awaiting the operator, on-screen order
@@ -1364,11 +1366,30 @@ async function selectTask(id) {
   await loadThread();
 }
 
+// threadURL: GET /v1/tasks/{id}. The standing Planner chat comes back
+// windowed to its last few turns (server setting; see "window" in the reply)
+// unless showOlder asks for the full thread (all=1). Nothing is deleted.
+function threadURL(id, showInternal, showOlder) {
+  const q = [];
+  if (showInternal) q.push("internal=1");
+  if (showOlder && id === STANDING_ID) q.push("all=1");
+  return "/v1/tasks/" + encodeURIComponent(id) + (q.length ? "?" + q.join("&") : "");
+}
+// olderBtnHTML: the "show older" / "show recent only" control above a windowed log.
+function olderBtnHTML(th, showOlder) {
+  const w = th && th.window;
+  if (th && th.task && th.task.standing && (showOlder || (w && w.older > 0))) {
+    return '<button type="button" class="older-btn" data-act="toggle-older" data-testid="show-older">' +
+      (showOlder ? "show recent only" : "show older (" + w.older + " more turn" + (w.older === 1 ? "" : "s") + ")") + "</button>";
+  }
+  return "";
+}
+
 async function loadThread() {
   if (!st.tasksAvailable) return;
   if (!st.selected && st.mode === "focus" && st.focusId) st.selected = st.focusId;
   if (!st.selected) { renderThread(); return; }
-  try { st.thread = await getJ("/v1/tasks/" + encodeURIComponent(st.selected) + (st.showInternal ? "?internal=1" : "")); }
+  try { st.thread = await getJ(threadURL(st.selected, st.showInternal, st.showOlder)); }
   catch (e) {
     if (e.status === 404) { st.selected = null; st.thread = null; renderTasks(); renderThread(); return; }
     $("chatlog").innerHTML = '<div class="err">' + esc(e.message) + "</div>"; return;
@@ -1403,8 +1424,8 @@ function renderThread() {
   const el = log;
   const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
   const shown = st.showInternal ? msgs : msgs.filter(m => !isInternalEnv(m));
-  const rendered = setHTML(log, shown.length ? shown.map(m => (isInternalEnv(m) ? '<div class="internal">' : "") + bubble(m) + (isInternalEnv(m) ? "</div>" : "")).join("")
-    : '<div class="empty">no messages in this task yet</div>');
+  const rendered = setHTML(log, shown.length ? olderBtnHTML(st.thread, st.showOlder) + shown.map(m => (isInternalEnv(m) ? '<div class="internal">' : "") + bubble(m) + (isInternalEnv(m) ? "</div>" : "")).join("")
+    : olderBtnHTML(st.thread, st.showOlder) + '<div class="empty">no messages in this task yet</div>');
   if (rendered && atBottom) log.scrollTop = log.scrollHeight;
   const last = shown[shown.length - 1];
   $("typing").style.display = last && last.from === "human:operator" && t.status === "open" ? "block" : "none";
@@ -1481,6 +1502,10 @@ function startTitleEdit() {
   inp.focus(); inp.select();
 }
 
+$("chatlog").addEventListener("click", async (ev) => {
+  if (!ev.target.closest('[data-act="toggle-older"]')) return;
+  st.showOlder = !st.showOlder; await loadThread();
+});
 $("show-internal").onchange = async () => { st.showInternal = $("show-internal").checked; await loadThread(); };
 
 /* ----- legacy fallback (no /v1/tasks): the old single planner:main log ----- */
@@ -2446,7 +2471,7 @@ function markSeen(t, seen = true) {
 /* ----- state + routing ----- */
 const P = {
   r: { name: "", arg: null }, tasks: [], alerts: [], showClosed: false, q: "",
-  thread: null, threadSig: "", showInternal: false,
+  thread: null, threadSig: "", showInternal: false, showOlder: false,
   jobs: [], jobState: "", job: null, foremen: [], fjobs: [], fmsgs: [], inboxes: [], imsgs: [],
   err: "", busy: false, badge: 0,
   mode: "focus",          // inbox view: "focus" (default on every load) | "list"; queue/focusId live in st
@@ -2530,7 +2555,7 @@ async function pLoadFocus() {
   else if (st.tasksAvailable && !st.queue.length) throw new Error("could not load the waiting tasks");
   const id = st.focusId;
   if (!id) { P.thread = null; return; }
-  try { P.thread = await getJ("/v1/tasks/" + encodeURIComponent(id) + (P.showInternal ? "?internal=1" : "")); }
+  try { P.thread = await getJ(threadURL(id, P.showInternal, P.showOlder)); }
   catch (e) { if (e.status === 404) P.thread = { missing: true, id }; else throw e; }
 }
 
@@ -2542,7 +2567,7 @@ async function pLoadOnce() {
     switch (r.name) {
       case "inbox": if (P.mode === "focus") await pLoadFocus(); break;
       case "planner":
-        try { P.thread = await getJ("/v1/tasks/" + encodeURIComponent(STANDING_ID) + (P.showInternal ? "?internal=1" : "")); }
+        try { P.thread = await getJ(threadURL(STANDING_ID, P.showInternal, P.showOlder)); }
         catch (e) { if (e.status === 404) P.thread = { missing: true }; else throw e; }
         break;
       case "task":
@@ -2826,7 +2851,7 @@ function pRenderThreadView(th, focus) {
   const shown = P.showInternal ? msgs : msgs.filter(m => !isInternalEnv(m));
   const last = shown[shown.length - 1];
   const typing = !!(last && last.from === "human:operator" && t.status === "open");
-  const sig = [t.id, t.title, t.status, t.priority, shown.length, last ? last.id : "", (t.follow_up_of || "") + (t.parent_task_id || "") + (t.follow_up_task_ids || []).join() + (t.child_task_ids || []).join(), P.showInternal, typing, P.err].join("|");
+  const sig = [t.id, t.title, t.status, t.priority, shown.length, last ? last.id : "", P.showOlder, th.window ? th.window.older : 0, (t.follow_up_of || "") + (t.parent_task_id || "") + (t.follow_up_task_ids || []).join() + (t.child_task_ids || []).join(), P.showInternal, typing, P.err].join("|");
   $("p-input").placeholder = t.standing ? "Ask the planner…" : t.status === "closed" ? "Reply to reopen…" : "Reply…";
   if (sig === P.threadSig) return; // nothing new: keep the scroll position and avoid flicker
   const first = !P.threadSig;
@@ -2836,7 +2861,7 @@ function pRenderThreadView(th, focus) {
   $("p-body").innerHTML = pErr() +
     '<div class="p-thead">' + (t.standing ? '<span class="badge">standing chat</span>' : prioBadge(t.priority) + ' <span class="st ' + (t.status === "open" ? "running" : "") + '">' + esc(t.status) + "</span>") +
     "<span class=\"sid\">" + esc(t.id) + "</span>" + (P.showInternal ? '<span class="badge">showing internal</span>' : "") + "</div>" + pTaskLinks(t) +
-    '<div class="p-log">' + (shown.length ? shown.map(m => (isInternalEnv(m) ? '<div class="internal">' + bubble(m) + "</div>" : bubble(m))).join("")
+    '<div class="p-log">' + olderBtnHTML(th, P.showOlder) + (shown.length ? shown.map(m => (isInternalEnv(m) ? '<div class="internal">' + bubble(m) + "</div>" : bubble(m))).join("")
       : '<div class="p-empty">no messages in this task yet</div>') +
     (typing ? '<div class="typing">the planner is thinking…</div>' : "") + "</div>";
   if (atBottom) pScrollBottom();
@@ -3144,6 +3169,7 @@ async function pAct(act, id, el) {
       P.threadSig = ""; pLoad();
       break;
     }
+    case "toggle-older": P.showOlder = !P.showOlder; P.threadSig = ""; pLoad(); break;
     case "toggle-internal": pCloseSheet(); P.showInternal = !P.showInternal; P.threadSig = ""; pLoad(); break;
     case "mark-unread":
       pCloseSheet(); markSeen(pTask(id), false);
