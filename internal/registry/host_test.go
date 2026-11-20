@@ -70,3 +70,28 @@ func TestRefreshHandlerHost(t *testing.T) {
 		})
 	}
 }
+
+func TestGroupHostsMetricsNotSummedAndFreshest(t *testing.T) {
+	pct := func(v float64) *float64 { return &v }
+	j := func(h wire.HostInfo) string { b, _ := json.Marshal(h); return string(b) }
+	got := GroupHosts([]HostedForeman{
+		{ID: "foreman:a", Host: j(wire.HostInfo{HostID: "h", SwapTotalBytes: 100, CPUUsagePct: pct(90), Load: &wire.HostLoad{One: 9}, Reported: "2026-01-02T00:00:00Z"})},
+		{ID: "foreman:b", Host: j(wire.HostInfo{HostID: "h", SwapTotalBytes: 100, CPUUsagePct: pct(10), Load: &wire.HostLoad{One: 1}, Reported: "2026-01-03T00:00:00Z"})},
+		{ID: "foreman:c", Host: j(wire.HostInfo{HostID: "h", SwapTotalBytes: 100, CPUUsagePct: pct(50), Load: &wire.HostLoad{One: 5}, Reported: "2026-01-01T00:00:00Z"})},
+	})
+	if len(got) != 1 || len(got[0].Foremen) != 3 {
+		t.Fatalf("groups = %+v", got)
+	}
+	g := got[0]
+	if g.SwapTotalBytes != 100 || g.CPUUsagePct == nil || *g.CPUUsagePct != 10 || g.Load == nil || g.Load.One != 1 {
+		t.Errorf("host metrics must come from the freshest report only: %+v", g)
+	}
+}
+
+func TestSanitizeClampsCPUUsage(t *testing.T) {
+	v := 250.0
+	h := wire.HostInfo{HostID: "x", CPUUsagePct: &v}
+	if !h.Sanitize() || *h.CPUUsagePct != 100 {
+		t.Errorf("cpu usage = %v", *h.CPUUsagePct)
+	}
+}
