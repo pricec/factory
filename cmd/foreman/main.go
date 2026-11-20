@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -45,6 +46,7 @@ func main() {
 		WorkerFlashModel:   os.Getenv("FACTORY_WORKER_FLASH_MODEL"),
 		WorkerModel:        os.Getenv("FACTORY_WORKER_MODEL"),
 		WorkerHardestModel: os.Getenv("FACTORY_WORKER_HARDEST_MODEL"),
+		IdleTimeoutS:       envInt("FACTORY_FOREMAN_IDLE_TIMEOUT_S"),
 		Harness:            strings.ToLower(strings.TrimSpace(os.Getenv("FACTORY_FOREMAN_HARNESS"))),
 	})
 	if err != nil {
@@ -96,4 +98,13 @@ func main() {
 		log.Printf("foreman: close: %v", err)
 	}
 	os.Exit(code)
+}
+
+// envInt parses a positive integer env var; unset or invalid -> 0.
+func envInt(name string) int {
+	n, err := strconv.Atoi(strings.TrimSpace(os.Getenv(name)))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }

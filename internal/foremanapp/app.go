@@ -67,6 +67,10 @@ type Config struct {
 	// WorkerHardestModel is the model for `tier: "hardest"` jobs (spec
 	// §5.1, §6.5); "" -> the pinned GLM 5.3 default.
 	WorkerHardestModel string
+	// IdleTimeoutS is this foreman's default idle_timeout_s for jobs
+	// that do not set one (spec §8.6); 0 -> DefaultIdleTimeoutS(ID):
+	// the per-foreman table, else wire.DefaultIdleTimeoutS.
+	IdleTimeoutS int
 	// SettingsRefresh is the role-model settings pull interval (spec
 	// §6.5, 2026-11-15 amendment, settings.go); 0/negative -> 60s. A
 	// test seam.

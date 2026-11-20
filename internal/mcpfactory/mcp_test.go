@@ -516,6 +516,8 @@ func TestCreateJobValidation(t *testing.T) {
 		{"empty task", map[string]any{"task": ""}, "task"},
 		{"bad priority", map[string]any{"task": "x", "priority": 42}, "priority"},
 		{"bad timeout", map[string]any{"task": "x", "timeout_s": -1}, "timeout_s"},
+		{"idle timeout too long", map[string]any{"task": "x", "idle_timeout_s": 7201}, "idle_timeout_s"},
+		{"negative idle timeout", map[string]any{"task": "x", "idle_timeout_s": -1}, "idle_timeout_s"},
 		{"bad result_schema", map[string]any{"task": "x", "result_schema": "not json"}, "result_schema"},
 		{"empty require", map[string]any{"task": "x", "requires": []string{""}}, "requires"},
 		{"bad model", map[string]any{"task": "x", "model": "has space"}, "model"},
@@ -632,7 +634,7 @@ func TestCreateJobDescription(t *testing.T) {
 	if !found {
 		t.Fatalf("tools/list has no create_job")
 	}
-	for _, want := range []string{"tag NAMES", "os:linux", "arch:amd64", "tools:<tool>", "linux", "amd64", "unknown_requires"} {
+	for _, want := range []string{"tag NAMES", "os:linux", "arch:amd64", "tools:<tool>", "linux", "amd64", "unknown_requires", "idle_timeout_s", "3600-7200"} {
 		if !strings.Contains(create.Description, want) {
 			t.Errorf("create_job description %q missing %q", create.Description, want)
 		}
@@ -1089,5 +1091,29 @@ func TestListForemenHosts(t *testing.T) {
 		strings.Join(out.Hosts[0].Foremen, ",") != "foreman:agentcloud,foreman:baker" ||
 		out.Hosts[1].HostID != "bbbbbbbbbbbb" || len(out.Hosts[1].Foremen) != 1 {
 		t.Errorf("hosts = %+v", out.Hosts)
+	}
+}
+
+// TestCreateJobIdleTimeout: idle_timeout_s passes through to the spec
+// (max 7200); unset stays 0 so the foreman's default applies.
+func TestCreateJobIdleTimeout(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		args map[string]any
+		want int
+	}{
+		{"set", map[string]any{"task": "transcribe", "idle_timeout_s": 7200}, 7200},
+		{"unset", map[string]any{"task": "plain"}, 0},
+	} {
+		sc := structured(t, resultOf(t, e.callTool("create_job", tc.args)))
+		job, ok, err := e.store.Get(ctx, sc["job_id"].(string))
+		if err != nil || !ok {
+			t.Fatalf("%s: ok=%v err=%v", tc.name, ok, err)
+		}
+		if job.Spec.IdleTimeoutS != tc.want {
+			t.Errorf("%s: idle_timeout_s=%d, want %d", tc.name, job.Spec.IdleTimeoutS, tc.want)
+		}
 	}
 }
