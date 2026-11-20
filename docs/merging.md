@@ -195,9 +195,33 @@ $GHAS git fetch origin && git merge-base --is-ancestor "$MERGED" "origin/$BASE"
 If `gh pr merge` refuses (branch protection, the branch moved), **STOP**.
 Never retry with admin flags.
 
-Only `pricec/factory` has a deploy procedure. For any other repo, step 7 is
-skipped (nothing is deployed): go to step 8 and report `done` with
-`merged: true` once the merge is verified.
+Only `pricec/factory` and the repos in the **deploy hooks** table below have a
+deploy procedure. For any other repo, step 7 is skipped (nothing is deployed):
+go to step 8 and report `done` with `merged: true` once the merge is verified.
+
+### Deploy hooks (non-factory repos)
+
+| Repo | Hook (run in `$WORK` at `$MERGED`) |
+|---|---|
+| `pricec/video-chat` | `scripts/deploy.sh` |
+| `pricec/movies-chat` | `scripts/deploy.sh` (builds the Go binary, restarts `movies-chat.service`, checks `/healthz`) |
+
+The table lives in this reviewed document on purpose: a repo gets host-level
+deploy only when listed here, never because a merged PR added a script. A hook
+runs on this host (the integration foreman), from a clean checkout of the merged
+commit, and must itself keep a rollback (image tag or binary copy), verify health, and restore the
+previous version on failure (`scripts/deploy.sh` does all three and exits
+non-zero on failure):
+
+```sh
+git checkout -q --detach "$MERGED" && git rev-parse HEAD   # == $MERGED
+ROLLBACK_TAG="pre-${MERGED:0:7}" ./scripts/deploy.sh 2>&1 | tee "$EV/deploy.log"
+```
+
+Exit 0 means deployed and verified (the last log line is `DEPLOYED sha=...`);
+record the sha and rollback tag. A non-zero exit means **STOP**
+(`deploy: <last failing line>; rolled back: yes|no`). Never touch other
+containers (workers, backfill jobs) from a hook.
 
 ## 7. Deploy master
 
@@ -210,8 +234,9 @@ before the manifest) are part of this step. A deploy failure means
 
 ## 8. Verify and report
 
-For any other repo there is nothing to check beyond step 6's ancestor check;
-report. For `pricec/factory`, re-check right before reporting:
+For a repo with a deploy hook, the hook's own verification (step 7) is the
+check. For any other repo there is nothing to check beyond step 6's ancestor
+check; report. For `pricec/factory`, re-check right before reporting:
 
 ```sh
 systemctl is-active factory
@@ -227,13 +252,15 @@ report.
 Call `report_result` once, at the end:
 
 - **done**: only when the PR is merged and, for `pricec/factory`, the deploy
-  is verified healthy. For any other repo, `done` means merged, with the deploy
+  is verified healthy (and for a deploy-hook repo, the hook succeeded). For any other repo, `done` means merged, with the deploy
   skipped. `result.merged` must be `true`; the queue lands the
   request only then (a `done` without `merged:true` is `needs_attention`). Summary (240 chars max):
   `landed $MR: PR #<n> merged <MERGED:12>; deployed <build id>; exe sha ok, UI 200, journal clean`.
   `result`: `{merged: true, pr, merge_commit, deployed_commit, build_id, factory_exe_sha256, evidence_dir}`.
   For a non-factory repo the summary is `landed $MR: PR #<n> merged <MERGED:12>; no deploy (<repo>)`
   and `result` is `{merged: true, pr, merge_commit, deployed: false, evidence_dir}`.
+  For a hook repo (table above) the summary is `landed $MR: PR #<n> merged <MERGED:12>; deployed <MERGED:7> (rollback <tag>)`
+  and `result` is `{merged: true, pr, merge_commit, deployed: true, deployed_commit, rollback_tag, evidence_dir}`.
   If `cigate` reran and went green, add `ci_rerun: true` and `ci_flaked: [tests]`
   to `result` and append `; CI flake rerun: <tests>` to the summary, so flakes stay visible.
 - **failed**: anything that stopped. The summary starts with the stage, for
