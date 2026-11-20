@@ -330,6 +330,9 @@ func New(cfg Config) (*App, error) {
 		Bearer:   a.brainToken,
 		WorkDir:  filepath.Join(cfg.DataDir, "brain"),
 	}
+	if err := a.brain.Preflight(); err != nil {
+		log.Printf("foremanapp: ALERT: %v", err)
+	}
 	a.poster = &Poster{FactoryURL: cfg.FactoryURL, Bearer: a.paired.Bearer}
 	a.brain.OnUsage = func(ctx context.Context, u claudecli.Usage) {
 		ev := wire.UsageEvent{

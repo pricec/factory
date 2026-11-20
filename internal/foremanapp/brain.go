@@ -112,6 +112,25 @@ func (b *BrainRunner) Handle(ctx context.Context, env wire.MessageEnvelope) erro
 	return nil
 }
 
+// Preflight verifies the brain can reach its MCP surface: a bearer (exported
+// to the child as FOREMAN_BRAIN_TOKEN) and the MCP URL are both set. Without
+// them the child starts "successfully" but with no foreman tools and an empty
+// bearer, silently unable to ack/post/spawn. Fail loudly instead. The token
+// value is never included in the error.
+func (b *BrainRunner) Preflight() error {
+	var missing []string
+	if strings.TrimSpace(b.Bearer) == "" {
+		missing = append(missing, envBrainToken+" (brain bearer)")
+	}
+	if strings.TrimSpace(b.MCPURL) == "" {
+		missing = append(missing, "foreman MCP URL")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("brain preflight failed: missing %s; refusing to run a degraded brain session", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
 // currentModel resolves the session model: ModelFn when wired (the
 // settings pull path), else the static Model field.
 func (b *BrainRunner) currentModel() string {
@@ -142,6 +161,9 @@ func (b *BrainRunner) CurrentModel() string { return b.currentModel() }
 // semantics as the planner's claude runner (spec §9.4). Missing CLI and
 // missing auth fail the session loudly; the router surfaces the error.
 func (b *BrainRunner) runClaude(ctx context.Context, prompt string) (string, error) {
+	if err := b.Preflight(); err != nil {
+		return "", err
+	}
 	configPath, err := b.writeClaudeConfig()
 	if err != nil {
 		return "", err
@@ -187,6 +209,9 @@ func (b *BrainRunner) writeClaudeConfig() (string, error) {
 // a 30m timeout. The child discovers the config from its working directory
 // (V2 project config; the V1-era OPENCODE_CONFIG env var is ignored by V2).
 func (b *BrainRunner) runOpencode(ctx context.Context, prompt string) (string, error) {
+	if err := b.Preflight(); err != nil {
+		return "", err
+	}
 	if _, err := b.writeConfig(); err != nil {
 		return "", err
 	}
