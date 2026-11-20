@@ -2,42 +2,82 @@ package factoryapp
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/pricec/factory/internal/llmctx"
+	"github.com/pricec/factory/internal/tasks"
 	"github.com/pricec/factory/internal/wire"
 )
 
 // Standing Planner chat context bounds. The chat is permanent, so a wake
 // never replays its history: the prompt carries the planner-maintained
-// running summary of older messages plus at most standingWindow recent
-// ones, and drops the recent ones the summary already covers (keeping
-// standingKeepRecent for conversational continuity).
-const (
-	standingWindow     = 20
-	standingKeepRecent = 6
-	// standingFoldAt: when this many shown messages are not yet in the
-	// summary, the prompt asks the planner to fold the older ones in.
-	standingFoldAt = 14
-)
+// running summary of older messages plus at most N recent TURNS (N =
+// the standing-chat turn limit, tasks.DefaultStandingChatTurns unless
+// overridden; see standingTurns). A turn is an operator-visible message
+// (chat.message / brain.reply); internal rows (alerts, job news) ride along
+// with the turns they sit among but never count toward, or push out, the
+// limit. Recent turns the summary already covers are dropped (keeping
+// standingKeepRecent(N) for conversational continuity).
+
+// standingFetchCap is how many raw thread rows a standing wake reads:
+// generous enough that internal rows cannot crowd the last N turns out.
+func standingFetchCap(turns int) int { return max(40, 6*turns) }
+
+// standingKeepRecent: turns left unfolded when the planner folds the summary.
+func standingKeepRecent(turns int) int { return max(1, turns*3/10) }
+
+// standingTurns normalises a configured limit (<= 0 -> the default).
+func standingTurns(n int) int {
+	if n <= 0 {
+		return tasks.DefaultStandingChatTurns
+	}
+	return n
+}
 
 // standingView splits the fetched thread (oldest first) for the prompt:
-// shown = messages to render, foldThrough = the id the planner should
-// fold the summary up to ("" = no fold needed this wake).
-func standingView(thread []wire.MessageEnvelope, through string) (shown []wire.MessageEnvelope, foldThrough string) {
+// shown = messages to render (at most `turns` turns plus the internal rows
+// after the oldest of them), foldThrough = the id the planner should fold
+// the summary up to ("" = no fold needed this wake).
+func standingView(thread []wire.MessageEnvelope, through string, turns int) (shown []wire.MessageEnvelope, foldThrough string) {
+	turns = standingTurns(turns)
+	keep := standingKeepRecent(turns)
 	start := 0
 	for i, e := range thread {
 		if through != "" && e.ID == through {
 			start = i + 1
 		}
 	}
-	shown = thread[start:]
-	if len(shown) < standingKeepRecent {
-		shown = thread[max(0, len(thread)-standingKeepRecent):]
+	// idxs = indexes of unsummarized turns; fall back to the last `keep`
+	// turns overall when the summary covers (nearly) everything.
+	turnIdx := func(from int) []int {
+		var out []int
+		for i := from; i < len(thread); i++ {
+			if !tasks.IsInternal(thread[i].Type) {
+				out = append(out, i)
+			}
+		}
+		return out
 	}
-	if len(thread)-start >= standingFoldAt {
-		// Fold everything but the newest standingKeepRecent messages.
-		foldThrough = thread[len(thread)-standingKeepRecent-1].ID
+	idxs := turnIdx(start)
+	from := start
+	if len(idxs) < keep {
+		all := turnIdx(0)
+		if len(all) > keep {
+			from = all[len(all)-keep]
+		} else {
+			from = 0
+		}
+	} else if len(idxs) > turns {
+		from = idxs[len(idxs)-turns]
+	}
+	shown = thread[from:]
+	if len(idxs) >= turns {
+		// Fold everything but the newest `keep` turns.
+		cut := idxs[len(idxs)-keep]
+		if cut > 0 {
+			foldThrough = thread[cut-1].ID
+		}
 	}
 	return shown, foldThrough
 }
@@ -62,7 +102,7 @@ func buildStandingWakePrompt(w PlannerWake) string {
 		sb.WriteString(w.Summary + "\n")
 	}
 
-	shown, fold := standingView(w.Thread, w.SummaryThrough)
+	shown, fold := standingView(w.Thread, w.SummaryThrough, w.StandingTurns)
 	isTrigger := map[string]bool{}
 	for _, e := range w.Triggers {
 		isTrigger[e.ID] = true
@@ -89,7 +129,7 @@ func buildStandingWakePrompt(w PlannerWake) string {
 	}
 	if fold != "" {
 		fmt.Fprintf(&sb, "\nBefore you finish, fold the older messages into the summary: call update_standing_summary with a merged, compact summary "+
-			"(old summary + the messages above except the newest %d; keep decisions, task ids, open questions) and through_message_id=%s.\n", standingKeepRecent, fold)
+			"(old summary + the messages above except the newest %d turns; keep decisions, task ids, open questions) and through_message_id=%s.\n", standingKeepRecent(standingTurns(w.StandingTurns)), fold)
 	}
 	return sb.String()
 }
@@ -104,3 +144,17 @@ Rules for this chat:
 - For code and build jobs, leave timeout_s unset (the tier ceiling applies); never set timeout_s below 1800 when builds or tests run.
 - Handle the [new] messages with your tools, then finish; do not repeat work. Keep token use low: prefer targeted reads over broad ones.
 `
+
+// EnvStandingChatTurns overrides the standing-chat turn limit.
+const EnvStandingChatTurns = "FACTORY_STANDING_CHAT_TURNS"
+
+// standingTurnsFrom resolves the limit: config, then env, then the default.
+func standingTurnsFrom(cfgValue int, envValue string) int {
+	if cfgValue > 0 {
+		return cfgValue
+	}
+	if n, err := strconv.Atoi(strings.TrimSpace(envValue)); err == nil && n > 0 {
+		return n
+	}
+	return tasks.DefaultStandingChatTurns
+}

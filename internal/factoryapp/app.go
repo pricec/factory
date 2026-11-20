@@ -78,6 +78,10 @@ type Config struct {
 	// Speech configures the /v1/speech/* reverse proxy (spec §6.13); a
 	// zero URL disables it.
 	Speech SpeechConfig
+	// StandingChatTurns limits the standing Planner chat to its last N
+	// turns in the UI and the planner prompt; <= 0 -> FACTORY_STANDING_CHAT_TURNS,
+	// then tasks.DefaultStandingChatTurns (10).
+	StandingChatTurns int
 }
 
 // App is the wired factory controller.
@@ -148,6 +152,8 @@ type App struct {
 	// (mergedismiss.go); tests replace it.
 	branches     BranchInspector
 	mergeForeman string
+	// standingTurns: the resolved standing-chat turn limit (always > 0).
+	standingTurns int
 	// mergeStallAlerted dedupes the stalled-dependency alert per request
 	// (mergeowner.go); guarded by mergeMu.
 	mergeStallAlerted map[string]bool
@@ -182,6 +188,7 @@ func New(cfg Config) (*App, error) {
 		branches:           ghInspector{},
 		mergeStallAlerted:  map[string]bool{},
 		mergeForeman:       mergeForemanFrom(cfg.MergeForeman, os.Getenv(EnvMergeForeman)),
+		standingTurns:      standingTurnsFrom(cfg.StandingChatTurns, os.Getenv(EnvStandingChatTurns)),
 	}
 	if a.advertise == "" {
 		a.advertise = defaultAdvertiseURL(cfg.Addr)

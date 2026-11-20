@@ -14,3 +14,10 @@ const (
 func IsInternal(typ string) bool {
 	return typ != TypeChatMessage && typ != TypeBrainReply
 }
+
+// DefaultStandingChatTurns is THE limit on how many recent turns (operator
+// + planner messages; internal rows never count) the standing Planner chat
+// shows in the UI and replays in the planner's wake prompt. Older messages
+// are kept in storage; the planner folds them into its running summary.
+// Override with factoryapp.Config.StandingChatTurns / FACTORY_STANDING_CHAT_TURNS.
+const DefaultStandingChatTurns = 10
