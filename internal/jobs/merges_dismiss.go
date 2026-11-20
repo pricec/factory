@@ -13,8 +13,9 @@ import (
 	"strings"
 )
 
-// ErrMergeNotDismissable is returned when a request is not needs_attention.
-var ErrMergeNotDismissable = errors.New("jobs: only needs_attention merge requests can be dismissed")
+// ErrMergeNotDismissable is returned when a request is neither
+// needs_attention nor queued (a merging request has a merge job running).
+var ErrMergeNotDismissable = errors.New("jobs: only needs_attention or queued merge requests can be dismissed")
 
 // Merge audit actors.
 const (
@@ -55,7 +56,7 @@ func (s *Store) NeedsAttentionMerges(ctx context.Context) ([]MergeRequest, error
 	return s.queryMerges(ctx, `SELECT `+mergeCols+` FROM merge_requests WHERE state = ? ORDER BY id ASC`, MergeNeedsAttention)
 }
 
-// DismissMergeRequest closes a needs_attention request as cancelled with
+// DismissMergeRequest closes a needs_attention or queued request as cancelled with
 // result "dismissed (<actor>[, forced]): <reason>" and an audit row, in one
 // transaction. reason is required. ErrMergeNotFound for an unknown id;
 // ErrMergeNotDismissable when the request is not (or no longer)
@@ -72,7 +73,7 @@ func (s *Store) DismissMergeRequest(ctx context.Context, id, actor, reason strin
 	if !ok {
 		return MergeRequest{}, fmt.Errorf("%w: %s", ErrMergeNotFound, id)
 	}
-	if cur.State != MergeNeedsAttention {
+	if cur.State != MergeNeedsAttention && cur.State != MergeQueued {
 		return MergeRequest{}, fmt.Errorf("%w: %s is %s", ErrMergeNotDismissable, id, cur.State)
 	}
 	msg := "dismissed (" + actor
@@ -89,7 +90,7 @@ func (s *Store) DismissMergeRequest(ctx context.Context, id, actor, reason strin
 	defer func() { _ = tx.Rollback() }()
 	res, err := tx.ExecContext(ctx,
 		`UPDATE merge_requests SET state = ?, result = ?, updated_at = ? WHERE id = ? AND state = ?`,
-		MergeCancelled, msg, now, id, MergeNeedsAttention)
+		MergeCancelled, msg, now, id, cur.State)
 	if err != nil {
 		return MergeRequest{}, err
 	}
@@ -105,7 +106,7 @@ func (s *Store) DismissMergeRequest(ctx context.Context, id, actor, reason strin
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO merge_request_audit (request_id, action, actor, reason, forced, from_state, to_state, created_at)
 		 VALUES (?, 'dismiss', ?, ?, ?, ?, ?, ?)`,
-		id, actor, reason, f, MergeNeedsAttention, MergeCancelled, now); err != nil {
+		id, actor, reason, f, cur.State, MergeCancelled, now); err != nil {
 		return MergeRequest{}, err
 	}
 	if err := tx.Commit(); err != nil {

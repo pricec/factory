@@ -17,7 +17,7 @@ type dismissMergeArgs struct {
 	Force  bool   `json:"force,omitempty" jsonschema:"dismiss even though the branch has unmerged commits"`
 }
 
-const dismissMergeDescription = "Close a needs_attention merge request that is stale (work merged, superseded or empty); reason required, audited, its alerts are acked. " +
+const dismissMergeDescription = "Close a needs_attention merge request that is stale (work merged, superseded or empty), or cancel a queued one (not merging); reason required, audited, its alerts are acked; the branch can then be re-requested. " +
 	"Refused while the branch has commits master lacks unless force=true."
 
 func addDismissMergeTool(srv *mcp.Server, cfg Config) {

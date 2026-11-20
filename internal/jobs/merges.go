@@ -191,7 +191,7 @@ type MergeRequest struct {
 	// (job-owned merges, spec §6.11); "" for operator/planner/auditor
 	// requests. The outcome is tracked against this job's task.
 	SourceJobID string `json:"source_job_id,omitempty"`
-	// After lists branches (same repo) that must have a landed merge
+	// After lists branches (landed in any repo) that must have a landed merge
 	// request before this one dispatches (the dependency gate).
 	After []string `json:"after,omitempty"`
 	// WaitingOn is the subset of After not landed yet; computed on read
@@ -382,7 +382,7 @@ func scanMerge(row rowScanner) (MergeRequest, error) {
 }
 
 // mergeWaitingOn returns the branches of mr.After that have no landed
-// merge request in mr.Repo yet (spec §6.11 dependency gate). Only a
+// merge request in any repo yet (spec §6.11 dependency gate). Only a
 // queued request waits; every other state returns nil.
 func (s *Store) mergeWaitingOn(ctx context.Context, mr MergeRequest) ([]string, error) {
 	if mr.State != MergeQueued {
@@ -392,8 +392,8 @@ func (s *Store) mergeWaitingOn(ctx context.Context, mr MergeRequest) ([]string, 
 	for _, dep := range mr.After {
 		var one int
 		err := s.db.QueryRowContext(ctx,
-			`SELECT 1 FROM merge_requests WHERE repo = ? AND branch = ? AND state = ? LIMIT 1`,
-			mr.Repo, dep, MergeLanded).Scan(&one)
+			`SELECT 1 FROM merge_requests WHERE branch = ? AND state = ? LIMIT 1`,
+			dep, MergeLanded).Scan(&one)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 			waiting = append(waiting, dep)

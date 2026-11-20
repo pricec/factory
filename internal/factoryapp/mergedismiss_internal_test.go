@@ -125,8 +125,35 @@ func TestDismissMergeNotFoundAndWrongState(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 	q := queueMerge(t, a, "q")
+	if ok, err := a.jobs.ClaimMerge(context.Background(), q.ID, "job_q"); err != nil || !ok {
+		t.Fatalf("claim: %v %v", ok, err)
+	}
 	if _, err := a.DismissMerge(context.Background(), q.ID, "planner", "r", true); !errors.Is(err, jobs.ErrMergeNotDismissable) {
-		t.Fatalf("queued dismiss err = %v", err)
+		t.Fatalf("merging dismiss err = %v", err)
+	}
+}
+
+func TestDismissQueuedMerge(t *testing.T) {
+	ctx := context.Background()
+	a := newMergeApp(t)
+	a.branches = fakeBranches{"q": {Kind: BranchUnmerged, Ahead: 2}}
+	q := queueMerge(t, a, "q")
+	if _, err := a.DismissMerge(ctx, q.ID, "planner", "", false); err == nil {
+		t.Fatal("empty reason accepted")
+	}
+	if _, err := a.DismissMerge(ctx, q.ID, "planner", "r", false); !errors.Is(err, ErrBranchUnmerged) {
+		t.Fatalf("unforced unmerged err = %v", err)
+	}
+	got, err := a.DismissMerge(ctx, q.ID, "planner", "cancel", true)
+	if err != nil || got.State != jobs.MergeCancelled {
+		t.Fatalf("dismiss queued: %v %+v", err, got)
+	}
+	trail, _ := a.jobs.MergeAuditTrail(ctx, q.ID)
+	if len(trail) != 1 || trail[0].FromState != jobs.MergeQueued || !trail[0].Forced {
+		t.Fatalf("audit = %+v", trail)
+	}
+	if _, err := a.jobs.CreateMergeRequest(ctx, jobs.NewMergeRequest{Branch: "q", Head: mqHead, RequestedBy: "test"}); err != nil {
+		t.Fatalf("re-request: %v", err)
 	}
 }
 

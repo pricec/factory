@@ -485,10 +485,75 @@ func TestDismissMergeRequestStore(t *testing.T) {
 	if _, err := s.DismissMergeRequest(ctx, mr.ID, "planner", " ", false); !IsBadMergeRequest(err) {
 		t.Fatalf("empty reason: %v", err)
 	}
-	if _, err := s.DismissMergeRequest(ctx, mr.ID, "planner", "r", false); !errors.Is(err, ErrMergeNotDismissable) {
-		t.Fatalf("queued: %v", err)
-	}
 	if n, err := s.NeedsAttentionMerges(ctx); err != nil || len(n) != 0 {
 		t.Fatalf("needs_attention = %v %v", n, err)
+	}
+}
+
+func TestDismissQueuedMergeRequestStore(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	const head = "0123456789abcdef0123456789abcdef01234567"
+	mr, err := s.CreateMergeRequest(ctx, NewMergeRequest{Branch: "feat/q", Head: head, RequestedBy: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.DismissMergeRequest(ctx, mr.ID, "planner", "superseded", false)
+	if err != nil || got.State != MergeCancelled {
+		t.Fatalf("dismiss queued: %v %+v", err, got)
+	}
+	trail, _ := s.MergeAuditTrail(ctx, mr.ID)
+	if len(trail) != 1 || trail[0].FromState != MergeQueued || trail[0].ToState != MergeCancelled {
+		t.Fatalf("audit = %+v", trail)
+	}
+	if _, err := s.CreateMergeRequest(ctx, NewMergeRequest{Branch: "feat/q", Head: head, RequestedBy: "test"}); err != nil {
+		t.Fatalf("re-request after dismissal: %v", err)
+	}
+	// merging is not dismissable.
+	m2, _ := s.CreateMergeRequest(ctx, NewMergeRequest{Branch: "feat/m", Head: head, RequestedBy: "test"})
+	if ok, err := s.ClaimMerge(ctx, m2.ID, "job_m"); err != nil || !ok {
+		t.Fatalf("claim: %v %v", ok, err)
+	}
+	if _, err := s.DismissMergeRequest(ctx, m2.ID, "planner", "r", false); !errors.Is(err, ErrMergeNotDismissable) {
+		t.Fatalf("merging: %v", err)
+	}
+}
+
+func TestAfterSatisfiedByOtherRepo(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	const head = "0123456789abcdef0123456789abcdef01234567"
+	dep, err := s.CreateMergeRequest(ctx, NewMergeRequest{Repo: "pricec/video-chat", Branch: "ci/deploy-on-merge", Head: head, RequestedBy: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mr, err := s.CreateMergeRequest(ctx, NewMergeRequest{Branch: "feat/hooks", Head: head, RequestedBy: "test", After: []string{"ci/deploy-on-merge"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting := func() []string {
+		q, err := s.QueuedMerges(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range q {
+			if m.ID == mr.ID {
+				return m.WaitingOn
+			}
+		}
+		t.Fatalf("%s not queued", mr.ID)
+		return nil
+	}
+	if got := waiting(); len(got) != 1 {
+		t.Fatalf("waiting_on = %v, want 1 before landing", got)
+	}
+	if ok, err := s.ClaimMerge(ctx, dep.ID, "job_d"); err != nil || !ok {
+		t.Fatalf("claim: %v %v", ok, err)
+	}
+	if _, ok, err := s.TransitionMerge(ctx, dep.ID, MergeLanded, "ok"); err != nil || !ok {
+		t.Fatalf("land: %v %v", ok, err)
+	}
+	if got := waiting(); len(got) != 0 {
+		t.Fatalf("waiting_on = %v, want none after cross-repo landing", got)
 	}
 }
