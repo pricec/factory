@@ -112,7 +112,7 @@ func (a *App) inspect(ctx context.Context, mr jobs.MergeRequest) (BranchState, e
 	return a.branches.Inspect(ctx, repo, jobs.MergeBaseBranch(repo), mr.Branch)
 }
 
-// DismissMerge closes the needs_attention request id as cancelled with
+// DismissMerge closes the needs_attention or queued request id as cancelled with
 // reason (required), writes the audit row and acks its open alerts. The
 // branch must have no commits the base branch lacks (merged, empty or
 // deleted); force=true skips that check and is recorded in the audit row.
@@ -128,7 +128,7 @@ func (a *App) DismissMerge(ctx context.Context, id, actor, reason string, force 
 	if !ok {
 		return jobs.MergeRequest{}, fmt.Errorf("%w: %s", jobs.ErrMergeNotFound, id)
 	}
-	if mr.State != jobs.MergeNeedsAttention {
+	if mr.State != jobs.MergeNeedsAttention && mr.State != jobs.MergeQueued {
 		return jobs.MergeRequest{}, fmt.Errorf("%w: %s is %s", jobs.ErrMergeNotDismissable, id, mr.State)
 	}
 	forced := false

@@ -372,10 +372,14 @@ func (a *App) alertStalledDependencies(ctx context.Context) {
 			continue
 		}
 		a.mergeStallAlerted[mr.ID] = true
+		title := "Merge " + mr.ID + " (" + mr.Branch + ") is waiting on an unqueued branch"
+		if a.hasOpenAlertTitled(ctx, title) {
+			continue // an identical alert is still open; don't re-raise
+		}
 		text := fmt.Sprintf("Merge request %s (%s) has waited %s to merge after %s, and no merge request for %s is queued or merging. "+
 			"It will not dispatch until one lands. Queue the dependency, or cancel %s and re-request it without `after`.",
 			mr.ID, mr.Branch, now.Sub(created).Round(time.Minute), strings.Join(idle, ", "), strings.Join(idle, ", "), mr.ID)
-		a.raiseSystemAlertForTask(ctx, alertPriorityMerge, "Merge "+mr.ID+" ("+mr.Branch+") is waiting on an unqueued branch",
+		a.raiseSystemAlertForTask(ctx, alertPriorityMerge, title,
 			text, mergeAlertSource, a.knownTask(ctx, a.jobThread(ctx, mr.SourceJobID)))
 		a.notifyMerge(ctx, mr, mergeActionDependencyStall, text, true, "")
 	}
@@ -404,6 +408,20 @@ func (a *App) jobMergeSummaries(ctx context.Context, jobID string) []map[string]
 func containsStr(list []string, s string) bool {
 	for _, v := range list {
 		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// hasOpenAlertTitled reports whether an open alert has exactly this title.
+func (a *App) hasOpenAlertTitled(ctx context.Context, title string) bool {
+	open, err := a.tasks.ListAlerts(ctx, tasks.AlertFilter{States: []string{tasks.AlertOpen}})
+	if err != nil {
+		return false
+	}
+	for _, al := range open {
+		if al.Title == title {
 			return true
 		}
 	}

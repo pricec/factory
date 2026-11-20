@@ -214,10 +214,10 @@ func TestMergeDependencyGate(t *testing.T) {
 	if got := waiting(); len(got) != 0 {
 		t.Fatalf("waiting_on = %v, want none", got)
 	}
-	// A landed request for the same branch name in ANOTHER repo is no
-	// dependency.
+	// A landed request for the branch in ANOTHER repo satisfies the
+	// dependency (cross-repo after).
 	other, err := s.CreateMergeRequest(ctx, NewMergeRequest{Repo: "acme/other", Branch: "feat/ui", Head: testHead, After: []string{"feat/api"}})
-	if err != nil || !reflect.DeepEqual(other.WaitingOn, []string{"feat/api"}) {
+	if err != nil || len(other.WaitingOn) != 0 {
 		t.Fatalf("cross-repo dependent = %+v, %v", other, err)
 	}
 }

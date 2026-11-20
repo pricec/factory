@@ -432,6 +432,13 @@ func TestMergeDependencyStalled(t *testing.T) {
 	if len(notes) != 1 || notes[0].Action != mergeActionDependencyStall || !wakesPlanner(envs[0]) {
 		t.Fatalf("notes = %+v", notes)
 	}
+	// A restart forgets the in-memory dedupe; the still-open alert must
+	// keep a second one from being raised.
+	a.mergeStallAlerted = map[string]bool{}
+	pass(t, a)
+	if al := mergeAlerts(t, a); len(al) != 1 {
+		t.Fatalf("re-raised while identical alert open: %+v", al)
+	}
 	// A dependency that IS queued is progress, not a stall.
 	b := newMergeApp(t)
 	job2, _ := ownedJob(t, b, "depends on a queued branch")
