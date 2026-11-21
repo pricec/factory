@@ -375,7 +375,7 @@
      really resized) plus the keyboard height (--kbpad: written only when the keyboard opens/closes, never on scroll), so the
      last message always clears the fixed composer. --kb (the live visualViewport offset) only moves fixed things. */
   html.p-thread #p-body, html.p-fthread.kb-open #p-body { padding-bottom: calc(var(--composer-h) + var(--sab) + var(--kbpad) + 16px); }
-  html.p-fthread #p-body { padding-bottom: calc(var(--composer-h) + var(--fnav-h) + var(--sab) + var(--kbpad) + 16px); }
+  html.p-fthread #p-body { padding-bottom: calc(var(--tabh) + var(--composer-h) + var(--fnav-h) + var(--sab) + var(--kbpad) + 16px); }
   /* focus mode (phone): focus/list switch + "N waiting" under the top bar, prev/skip/next above the composer */
   #p-fbar { display: none; position: sticky; top: calc(52px + var(--sat) + var(--topx)); z-index: 19; align-items: center; gap: 10px;
     min-height: var(--fbar-h); padding: 4px calc(12px + var(--sar)) 4px calc(12px + var(--sal));
@@ -389,7 +389,7 @@
   #p-fseg button.on { background: #1f6feb; color: #fff; }
   #p-fnav { display: none; position: fixed; left: 0; right: 0; z-index: 29; gap: 8px; height: var(--fnav-h);
     padding: 6px calc(10px + var(--sar)) 6px calc(10px + var(--sal)); align-items: stretch;
-    bottom: calc(var(--composer-h) + var(--kb)); background: var(--bg); border-top: 1px solid var(--border); }
+    bottom: calc(var(--tabh) + var(--sab) + var(--composer-h) + var(--kb)); background: var(--bg); border-top: 1px solid var(--border); }
   html.p-fthread #p-fnav { display: flex; }
   html.kb-open #p-fnav { display: none; }
   #p-fnav button { flex: 1; min-height: 48px; border-radius: 14px; border: 1px solid var(--border);
@@ -402,8 +402,12 @@
   #p-fempty .sub { color: var(--dim); font-size: 15px; margin-bottom: 20px; }
   #p-fempty .p-btn { width: 100%; max-width: 320px; }
   html.p-focus #p-fab { display: none; }
-  html.p-fthread #p-tabs, html.p-fthread #p-fab { display: none; }
-  html.p-fthread #p-toast { bottom: calc(var(--composer-h) + var(--fnav-h) + var(--sab) + var(--kb) + 16px); }
+  /* Tasks focus thread keeps the bottom tab bar like every other page; composer and prev/skip/next stack above it
+     (all drop to the screen bottom while the keyboard is up, which hides the tab bar). */
+  html.p-fthread #p-fab { display: none; }
+  html.p-fthread #p-composer { bottom: calc(var(--tabh) + var(--sab)); }
+  html.p-fthread.kb-open #p-composer { bottom: 0; }
+  html.p-fthread #p-toast { bottom: calc(var(--tabh) + var(--composer-h) + var(--fnav-h) + var(--sab) + var(--kb) + 16px); }
   .p-chips { display: flex; gap: 8px; overflow-x: auto; padding: 8px 0 2px; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
   .p-chips::-webkit-scrollbar { display: none; }
   .p-chip { flex: none; min-height: 44px; padding: 0 16px; border-radius: 22px; border: 1px solid var(--border);
@@ -509,8 +513,8 @@
   #p-hnav { display: none; }
   html.phone.standalone #p-hnav { display: flex; position: absolute; left: 0; right: 0; bottom: 0; height: var(--topx);
     padding: 0 calc(6px + var(--sar)) 0 calc(6px + var(--sal)); border-top: 1px solid var(--border); }
-  html.phone.standalone:not(.p-thread):not(.p-fthread):not(.kb-open) { --topx: 0px; }
-  html.phone.standalone:not(.p-thread):not(.p-fthread):not(.kb-open) #p-hnav { display: none; }
+  html.phone.standalone:not(.p-thread):not(.kb-open) { --topx: 0px; }
+  html.phone.standalone:not(.p-thread):not(.kb-open) #p-hnav { display: none; }
   #p-hnav button { flex: 1; min-width: 0; background: none; border: 0; color: var(--dim); font-size: 13px; font-weight: 600;
     padding: 0 2px; position: relative; }
   #p-hnav button.active { color: var(--accent); }
