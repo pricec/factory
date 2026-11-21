@@ -557,3 +557,43 @@ func TestAfterSatisfiedByOtherRepo(t *testing.T) {
 		t.Fatalf("waiting_on = %v, want none after cross-repo landing", got)
 	}
 }
+
+// TestFinishMergeNotDeployedMarker: a landed request whose result lacks a
+// verified deploy is marked "landed, NOT deployed"; a deployed one is not.
+func TestFinishMergeNotDeployedMarker(t *testing.T) {
+	cases := []struct {
+		name, result string
+		notDeployed  bool
+	}{
+		{"deployed true", `{"merged":true,"deployed":true,"deployed_commit":"abc1234"}`, false},
+		{"deployed_commit only (factory)", `{"merged":true,"deployed_commit":"abc1234"}`, false},
+		{"deployed false", `{"merged":true,"deployed":false}`, true},
+		{"deployed false with commit", `{"merged":true,"deployed":false,"deployed_commit":"abc"}`, true},
+		{"nothing said", `{"merged":true,"merge_commit":"abc"}`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := openStore(t)
+			ctx := context.Background()
+			mr := mustMR(t, s, "feat/x")
+			spec := MergeJobSpec(mr, wire.NewJobID(), "foreman:server")
+			if ok, err := s.ClaimMerge(ctx, mr.ID, spec.ID); !ok || err != nil {
+				t.Fatal(ok, err)
+			}
+			if err := s.Create(ctx, spec); err != nil {
+				t.Fatal(err)
+			}
+			mustDispatch(t, s, spec.ID, "foreman:alpha")
+			mustApplyEvent(t, s, spec.ID, "started")
+			mustApplyResult(t, s, wire.JobResult{JobID: spec.ID, Status: wire.StatusDone, Summary: "landed", Result: json.RawMessage(tc.result)})
+			job, _, _ := s.Get(ctx, spec.ID)
+			got, applied, err := s.FinishMergeForJob(ctx, spec.ID, job.State)
+			if err != nil || !applied || got.State != MergeLanded {
+				t.Fatalf("got %+v applied=%v err=%v, want landed", got, applied, err)
+			}
+			if MergeNotDeployed(got) != tc.notDeployed {
+				t.Errorf("MergeNotDeployed = %v, want %v (result %q)", MergeNotDeployed(got), tc.notDeployed, got.Result)
+			}
+		})
+	}
+}

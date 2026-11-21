@@ -58,6 +58,14 @@ A job that changes code owns it until the merge is requested. Do not hand
    it.
 4. Report done, with the branch, head and merge request id.
 
+**Done means deployed and smoke-tested.** "Merged; no deploy" is not an end
+state. A job that changes a deployable service must include or keep that
+repo's `scripts/deploy.sh` (rollback, deploy, smoke check) and make sure the
+repo is listed in the deploy-hooks table of `docs/merging.md`. The merge job
+runs it after landing; a repo with no deploy step is reported `landed, NOT
+deployed` and raises an operator alert. Results and planner summaries must
+state the running commit, or say plainly that nothing is deployed.
+
 The factory merges one request at a time by `docs/merging.md` and tracks
 the outcome on your task. If the merge fails on red checks, a conflict or
 a moved head, it dispatches a fix job on the same branch (at most twice);

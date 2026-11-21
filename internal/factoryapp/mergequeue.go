@@ -312,6 +312,17 @@ func (a *App) alertMerge(ctx context.Context, mr jobs.MergeRequest, why string) 
 		mergeAlertSource, a.knownTask(ctx, a.jobThread(ctx, mr.SourceJobID)))
 }
 
+// alertNotDeployed raises the operator alert for a request that landed
+// without a verified deploy (needs-operator: the change is not running).
+func (a *App) alertNotDeployed(ctx context.Context, mr jobs.MergeRequest) {
+	body := fmt.Sprintf("repo %s, branch %s, head %s\nmerge job: %s\n%s\n\nThe PR is merged but nothing was deployed or smoke-tested, "+
+		"so the change is NOT running. Add or fix the repo's scripts/deploy.sh (with a smoke check) and its entry in docs/merging.md, then deploy.",
+		mr.Repo, mr.Branch, mr.Head, mr.JobID, mr.Result)
+	a.raiseSystemAlertForTask(ctx, alertPriorityMerge,
+		"Merge "+mr.ID+" ("+mr.Branch+") landed, NOT deployed", body,
+		mergeAlertSource, a.knownTask(ctx, a.jobThread(ctx, mr.SourceJobID)))
+}
+
 // escalateMerge gives a failed merge job its one retry on the hardest tier
 // (spec §6.11): when jobs.MergeEscalatable, the request is re-pointed at a
 // fresh hardest-tier job (same request, same pin) and the failed job is
