@@ -97,7 +97,7 @@ var MergeResultSchema = json.RawMessage(`{"type":"object","required":["merged"],
 	`"merged":{"type":"boolean"},"merge_commit":{"type":"string"},"reason":{"type":"string"},` +
 	`"stage":{"type":"string"},"deployed":{"type":"boolean"},"smoke":{"type":"string"},"pr":{"type":"integer"},"deployed_commit":{"type":"string"},` +
 	`"build_id":{"type":"string"},"factory_exe_sha256":{"type":"string"},"evidence_dir":{"type":"string"},` +
-	`"ci_rerun":{"type":"boolean"},"ci_flaked":{"type":"array","items":{"type":"string"}}}}`)
+	`"restart_deferred":{"type":"boolean"},"deployed_line":{"type":"string"},"ci_rerun":{"type":"boolean"},"ci_flaked":{"type":"array","items":{"type":"string"}}}}`)
 
 func mergeJobSpec(mr MergeRequest, jobID, foreman, tier string) wire.JobSpec {
 	spec := wire.NewJobSpec(MergeTask(mr), MergeJobCreatedBy)

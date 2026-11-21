@@ -256,6 +256,9 @@ func (a *App) reconcileMerging(ctx context.Context) error {
 // jobState (spec §6.11) and alerts on needs_attention. Called from the
 // terminal hook and reconciliation; a no-op for non-merge jobs.
 func (a *App) finishMerge(ctx context.Context, jobID, jobState string) {
+	if a.dispatchRemoteDeploy(ctx, jobID, jobState) {
+		return // the request stays merging: its job is now the deploy job
+	}
 	mr, applied, err := a.jobs.FinishMergeForJob(ctx, jobID, jobState)
 	if err != nil {
 		log.Printf("factoryapp: merge queue: finish for job %s: %v", jobID, err)
@@ -390,4 +393,62 @@ func mergeForemanFrom(cfgValue, envValue string) string {
 		v = DefaultMergeForeman
 	}
 	return registry.InboxID(v)
+}
+
+// dispatchRemoteDeploy is the host-aware deploy hook (docs/merging.md,
+// "Deploy hooks"): when a merge job finished done with merged:true for a
+// repo whose hook runs on another foreman, the merge job's deploy step is
+// replaced by a deploy job pinned to that foreman. The request is re-pointed
+// at it (SwapMergeJob, as for escalation), so it stays merging and the queue
+// stays held; the deploy job's terminal state then closes the request
+// through the ordinary path (landed only with deployed:true; a failure
+// carries stage deploy). Returns true when the terminal was handled here.
+func (a *App) dispatchRemoteDeploy(ctx context.Context, jobID, jobState string) bool {
+	if jobState != jobs.StateDone {
+		return false
+	}
+	mr, ok, err := a.jobs.MergeRequestForJob(ctx, jobID)
+	if err != nil || !ok || mr.State != jobs.MergeMerging {
+		return false
+	}
+	hook, remote := jobs.RemoteDeployHook(mr.Repo, a.mergeForeman)
+	if !remote {
+		return false
+	}
+	job, found, err := a.jobs.Get(ctx, jobID)
+	if err != nil || !found || jobs.IsRemoteDeployJob(job.Spec) || !jobs.MergeResultMerged(job) {
+		return false // not merged or already the deploy job: close normally
+	}
+	newID := wire.NewJobID()
+	commit := jobs.MergeResultCommit(job)
+	if !jobs.ValidMergeCommit(commit) {
+		a.deployNeedsAttention(ctx, mr.ID, "merged but result.merge_commit is not a full sha (%q); cannot dispatch the deploy to "+hook.Foreman, commit)
+		return true
+	}
+	if swapped, err := a.jobs.SwapMergeJob(ctx, mr.ID, jobID, newID); err != nil || !swapped {
+		return err == nil // lost a race: someone else closed or re-pointed it
+	}
+	spec := jobs.RemoteDeployJobSpec(mr, newID, commit, hook)
+	taskID := a.applyMergeTask(ctx, &spec, mr)
+	if err := a.createPinnedJob(a.mergeOverrideCtx(ctx, mr), spec, taskID); err != nil {
+		a.deployNeedsAttention(ctx, mr.ID, "merged %s but could not create deploy job %s: %v", commit[:12], newID, err)
+		return true
+	}
+	log.Printf("factoryapp: merge queue: %s merged %s; deploying on %s as %s", mr.ID, commit[:12], hook.Foreman, newID)
+	return true
+}
+
+// deployNeedsAttention closes a merged request whose remote deploy could
+// not even be dispatched: needs_attention, failure kind deploy.
+func (a *App) deployNeedsAttention(ctx context.Context, id, format string, args ...any) {
+	mr, applied, err := a.jobs.TransitionMerge(ctx, id, jobs.MergeNeedsAttention, "deploy: "+fmt.Sprintf(format, args...))
+	if err != nil || !applied {
+		return
+	}
+	mr.Failure = jobs.MergeFailureDeploy
+	if err := a.jobs.SetMergeFailure(ctx, mr.ID, mr.Failure); err != nil {
+		log.Printf("factoryapp: merge queue: record failure of %s: %v", mr.ID, err)
+	}
+	a.routeMergeOutcome(ctx, mr)
+	a.kickMergeQueue()
 }
