@@ -503,11 +503,14 @@
     justify-content: center; gap: 2px; background: none; border: 0; color: var(--dim); font-size: 11px; font-weight: 600; }
   #p-tabs button svg { width: 25px; height: 25px; }
   #p-tabs button.active { color: var(--accent); }
-  /* Home Screen app only: no Safari chrome, so the page nav is pinned in the header on EVERY phone route
-     (incl. task threads, focus mode and with the keyboard up, where the bottom tab bar is hidden). */
+  /* Home Screen app only: no Safari chrome, so the page nav is pinned in the header where the bottom tab bar is
+     hidden (task threads, focus mode, keyboard up). Where the bottom bar is shown it is the only page nav, so the
+     header strip and its --topx height are dropped there. */
   #p-hnav { display: none; }
   html.phone.standalone #p-hnav { display: flex; position: absolute; left: 0; right: 0; bottom: 0; height: var(--topx);
     padding: 0 calc(6px + var(--sar)) 0 calc(6px + var(--sal)); border-top: 1px solid var(--border); }
+  html.phone.standalone:not(.p-thread):not(.p-fthread):not(.kb-open) { --topx: 0px; }
+  html.phone.standalone:not(.p-thread):not(.p-fthread):not(.kb-open) #p-hnav { display: none; }
   #p-hnav button { flex: 1; min-width: 0; background: none; border: 0; color: var(--dim); font-size: 13px; font-weight: 600;
     padding: 0 2px; position: relative; }
   #p-hnav button.active { color: var(--accent); }

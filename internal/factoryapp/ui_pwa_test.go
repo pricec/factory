@@ -198,9 +198,11 @@ func TestFactoryPushClient(t *testing.T) {
 }
 
 // TestStandaloneHeaderNav pins the Home Screen app navigation: with no browser
-// chrome, a header nav (#p-hnav) links every top-level phone page on every
-// phone route (thread, focus, keyboard up), gated on html.standalone and
-// inset by the safe areas; the desktop header and the bottom tab bar stay.
+// chrome, a header nav (#p-hnav) links every top-level phone page on the phone
+// routes where the bottom tab bar is hidden (thread, focus, keyboard up), gated
+// on html.standalone and inset by the safe areas. Where the bottom bar is shown
+// it stays the only page nav, so the header strip is hidden and its height
+// dropped. The desktop header and the bottom tab bar stay.
 func TestStandaloneHeaderNav(t *testing.T) {
 	e := newEnv(t)
 	_, body := getBody(t, e.ts.URL+"/")
@@ -210,6 +212,8 @@ func TestStandaloneHeaderNav(t *testing.T) {
 		`html.phone.standalone #p-hnav { display: flex;`,
 		`#p-hnav { display: none; }`,
 		`html.phone.standalone { --topx:`,
+		`html.phone.standalone:not(.p-thread):not(.p-fthread):not(.kb-open) { --topx: 0px; }`,
+		`html.phone.standalone:not(.p-thread):not(.p-fthread):not(.kb-open) #p-hnav { display: none; }`,
 		`var(--sar)`, `var(--sal)`,
 		`top: calc(52px + var(--sat) + var(--topx))`,
 		`#p-tabs button, #p-hnav button`,
@@ -227,7 +231,25 @@ func TestStandaloneHeaderNav(t *testing.T) {
 		}
 	}
 	// the nav is only ever shown by the standalone+phone rule
-	if strings.Contains(body, "\n  #p-hnav { display: flex") || strings.Count(body, "#p-hnav { display: none; }") != 1 {
+	if strings.Contains(body, "\n  #p-hnav { display: flex") || strings.Count(body, "#p-hnav { display: none; }") != 2 {
 		t.Error("#p-hnav must be hidden by default and shown only under html.phone.standalone")
+	}
+}
+
+// TestBottomTabBarHasEverySection: the bottom tab bar (#p-tabs) is the only
+// page nav where the header strip is hidden, so it must link every top-level
+// phone page that the router knows (P_TAB keys that are tabs).
+func TestBottomTabBarHasEverySection(t *testing.T) {
+	e := newEnv(t)
+	_, body := getBody(t, e.ts.URL+"/")
+	bar := body[strings.Index(body, `<nav id="p-tabs">`):]
+	bar = bar[:strings.Index(bar, "</nav>")]
+	for _, tab := range []string{"planner", "inbox", "alerts", "jobs", "foremen", "more"} {
+		if !strings.Contains(bar, `data-tab="`+tab+`"`) {
+			t.Errorf("#p-tabs missing section %q", tab)
+		}
+	}
+	if !strings.Contains(body, `const P_TAB = { planner: "planner", alerts: "alerts", inbox: "inbox"`) {
+		t.Error("router P_TAB no longer declares the tab set this test checks")
 	}
 }
