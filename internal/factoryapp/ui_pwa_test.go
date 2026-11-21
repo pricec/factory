@@ -212,8 +212,8 @@ func TestStandaloneHeaderNav(t *testing.T) {
 		`html.phone.standalone #p-hnav { display: flex;`,
 		`#p-hnav { display: none; }`,
 		`html.phone.standalone { --topx:`,
-		`html.phone.standalone:not(.p-thread):not(.p-fthread):not(.kb-open) { --topx: 0px; }`,
-		`html.phone.standalone:not(.p-thread):not(.p-fthread):not(.kb-open) #p-hnav { display: none; }`,
+		`html.phone.standalone:not(.p-thread):not(.kb-open) { --topx: 0px; }`,
+		`html.phone.standalone:not(.p-thread):not(.kb-open) #p-hnav { display: none; }`,
 		`var(--sar)`, `var(--sal)`,
 		`top: calc(52px + var(--sat) + var(--topx))`,
 		`#p-tabs button, #p-hnav button`,
@@ -251,5 +251,28 @@ func TestBottomTabBarHasEverySection(t *testing.T) {
 	}
 	if !strings.Contains(body, `const P_TAB = { planner: "planner", alerts: "alerts", inbox: "inbox"`) {
 		t.Error("router P_TAB no longer declares the tab set this test checks")
+	}
+}
+
+// TestTasksFocusKeepsBottomNav: the Tasks focus thread (html.p-fthread) must
+// behave like the other pages on a phone: the bottom tab bar stays (it is
+// never hidden by p-fthread), the standalone header strip is hidden, and the
+// composer / prev-skip-next bar stack above the tab bar.
+func TestTasksFocusKeepsBottomNav(t *testing.T) {
+	e := newEnv(t)
+	_, body := getBody(t, e.ts.URL+"/")
+	for _, bad := range []string{`html.p-fthread #p-tabs`, `:not(.p-fthread)`} {
+		if strings.Contains(body, bad) {
+			t.Errorf("UI still special-cases p-fthread via %q: Tasks would lose the bottom nav / show the top nav", bad)
+		}
+	}
+	for _, want := range []string{
+		`html.p-fthread #p-composer { bottom: calc(var(--tabh) + var(--sab)); }`,
+		`html.p-fthread.kb-open #p-composer { bottom: 0; }`,
+		`bottom: calc(var(--tabh) + var(--sab) + var(--composer-h) + var(--kb));`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("UI missing %q", want)
+		}
 	}
 }
