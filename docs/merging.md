@@ -210,6 +210,7 @@ last line `DEPLOYED sha=...`) and get the repo listed in the table below.
 |---|---|
 | `pricec/video-chat` | `scripts/deploy.sh` |
 | `pricec/movies-chat` | `scripts/deploy.sh` (builds the Go binary, restarts `movies-chat.service`, checks `/healthz`) |
+| `pricec/media-curator` | `scripts/deploy.sh` (tests, fast-forwards `/var/lib/factory-foreman/media-curator` to the merged commit, restarts `media-curator-worker` when idle, health-checks, restores the previous commit on failure) |
 
 The table lives in this reviewed document on purpose: a repo gets host-level
 deploy only when listed here, never because a merged PR added a script. A hook
