@@ -23,6 +23,8 @@ func wantPrompt(runner, task, payload string, owns bool) string {
 			"get CI green (`make ci`), push, then call the " + prefix + "request_merge tool yourself " +
 			"(branch, head sha; after = branches of other jobs that must merge first) and put the merge request id in your report. " +
 			"The factory merges, deploys, and dispatches a fix job if the merge fails. " +
+			"A change is not done until it is deployed and smoke-tested: a code job that changes a deployable service must include or keep the repo's " +
+			"scripts/deploy.sh and a smoke check, and your report must state the running commit once the merge job has deployed it (or say plainly that it is NOT deployed). " +
 			"Decide details yourself; use " + prefix + "ask_parent or a failed report only when you need coordination with other jobs " +
 			"or a decision only the operator can make."
 	}

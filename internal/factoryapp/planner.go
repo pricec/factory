@@ -238,7 +238,8 @@ const (
 		"so do NOT call request_merge for it and do NOT dispatch a merge or fix follow-up; just say the merge is queued. " +
 		"Act only where coordination is needed: the job failed, it asks for a decision, or it finished code work without queuing a merge (then call request_merge yourself, never a prose job)"
 	reasonMerge = "planner: a job-owned merge request on this task changed state (notify.merge; its text says what happened). " +
-		"landed: tell the operator the work is merged and deployed, and close the task if nothing else is open. " +
+		"landed: tell the operator the work is merged, deployed and smoke-tested, naming the running commit, and close the task if nothing else is open; " +
+		"if the note says NOT DEPLOYED the task is not done - say so plainly and file the job that adds the deploy script + smoke check. " +
 		"escalated, dependency_failed or dependency_stalled: the automatic fix path is exhausted or branches of different jobs need sequencing - " +
 		"this is your coordination job: decide the next step (a fix or rebase job filed on THIS task, a re-request, or the operator's decision), do it, and tell the operator. " +
 		"Merge events never get a task of their own: work them here, on the task that owns the branch (it may have been reopened for this)"

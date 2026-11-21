@@ -207,9 +207,21 @@ func (a *App) routeMergeOutcome(ctx context.Context, mr jobs.MergeRequest) {
 	}
 	switch mr.State {
 	case jobs.MergeLanded:
+		if jobs.MergeNotDeployed(mr) {
+			// Operator rule: merged-but-not-deployed is not an end state.
+			// Alert even for operator-queued requests, then tell the owner.
+			a.alertNotDeployed(ctx, mr)
+			if mr.SourceJobID != "" {
+				a.notifyMerge(ctx, mr, mergeActionLanded,
+					fmt.Sprintf("Merge request %s: branch %s LANDED but is NOT DEPLOYED (%s). This is not done: the change is not running. "+
+						"An operator alert was raised. Tell the operator plainly, and file a job that adds or fixes the repo's scripts/deploy.sh + smoke check; do not close the task.",
+						mr.ID, mr.Branch, orDefault(mr.Result, "no detail")), true, "")
+			}
+			return
+		}
 		if mr.SourceJobID != "" {
 			a.notifyMerge(ctx, mr, mergeActionLanded,
-				fmt.Sprintf("Merge request %s landed: branch %s is merged and deployed (%s). Tell the operator; nothing else is needed for this merge.",
+				fmt.Sprintf("Merge request %s landed: branch %s is merged, deployed and smoke-checked (%s). Tell the operator; nothing else is needed for this merge.",
 					mr.ID, mr.Branch, orDefault(mr.Result, "merged")), true, "")
 		}
 	case jobs.MergeCancelled:

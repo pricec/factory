@@ -196,8 +196,13 @@ If `gh pr merge` refuses (branch protection, the branch moved), **STOP**.
 Never retry with admin flags.
 
 Only `pricec/factory` and the repos in the **deploy hooks** table below have a
-deploy procedure. For any other repo, step 7 is skipped (nothing is deployed):
-go to step 8 and report `done` with `merged: true` once the merge is verified.
+deploy procedure. For any other repo there is nothing to run, and that is
+**not** a clean landing: the PR is merged but the change is not running.
+Skip step 7, go to step 8 and report it as **`landed, NOT deployed`**
+(`deployed: false`); the factory then raises an operator alert. Never report
+a quiet "no deploy". Code jobs prevent this: a job that changes a deployable
+service must add or keep `scripts/deploy.sh` (rollback, deploy, smoke check,
+last line `DEPLOYED sha=...`) and get the repo listed in the table below.
 
 ### Deploy hooks (non-factory repos)
 
@@ -235,8 +240,8 @@ before the manifest) are part of this step. A deploy failure means
 ## 8. Verify and report
 
 For a repo with a deploy hook, the hook's own verification (step 7) is the
-check. For any other repo there is nothing to check beyond step 6's ancestor
-check; report. For `pricec/factory`, re-check right before reporting:
+check; it must include a smoke check of the running service. For any other
+repo there is nothing to deploy: report `landed, NOT deployed`. For `pricec/factory`, re-check right before reporting:
 
 ```sh
 systemctl is-active factory
@@ -252,15 +257,17 @@ report.
 Call `report_result` once, at the end:
 
 - **done**: only when the PR is merged and, for `pricec/factory`, the deploy
-  is verified healthy (and for a deploy-hook repo, the hook succeeded). For any other repo, `done` means merged, with the deploy
-  skipped. `result.merged` must be `true`; the queue lands the
+  is verified healthy (and for a deploy-hook repo, the hook succeeded). For any other repo, `done` means merged and **not deployed** (see below). `result.merged` must be `true`; the queue lands the
   request only then (a `done` without `merged:true` is `needs_attention`). Summary (240 chars max):
   `landed $MR: PR #<n> merged <MERGED:12>; deployed <build id>; exe sha ok, UI 200, journal clean`.
   `result`: `{merged: true, pr, merge_commit, deployed_commit, build_id, factory_exe_sha256, evidence_dir}`.
-  For a non-factory repo the summary is `landed $MR: PR #<n> merged <MERGED:12>; no deploy (<repo>)`
+  For a non-factory repo the summary is `landed, NOT deployed $MR: PR #<n> merged <MERGED:12>; no deploy step for <repo>`
   and `result` is `{merged: true, pr, merge_commit, deployed: false, evidence_dir}`.
+  The factory marks the request `landed, NOT deployed`, raises a P1 operator
+  alert and tells the owning task it is not done. `deployed:true` (or a
+  non-empty `deployed_commit`) is required for a clean landing.
   For a hook repo (table above) the summary is `landed $MR: PR #<n> merged <MERGED:12>; deployed <MERGED:7> (rollback <tag>)`
-  and `result` is `{merged: true, pr, merge_commit, deployed: true, deployed_commit, rollback_tag, evidence_dir}`.
+  and `result` is `{merged: true, pr, merge_commit, deployed: true, deployed_commit, smoke, rollback_tag, evidence_dir}`; `smoke` names the check that passed (e.g. `/healthz 200`).
   If `cigate` reran and went green, add `ci_rerun: true` and `ci_flaked: [tests]`
   to `result` and append `; CI flake rerun: <tests>` to the summary, so flakes stay visible.
 - **failed**: anything that stopped. The summary starts with the stage, for

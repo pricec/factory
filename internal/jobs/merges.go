@@ -644,7 +644,49 @@ func (s *Store) FinishMergeForJob(ctx context.Context, jobID, jobState string) (
 			outcome = "not merged (job done without result.merged=true): " + outcome
 		}
 	}
+	if to == MergeLanded {
+		if job, found, err := s.Get(ctx, jobID); err == nil && found && !MergeResultDeployed(job) {
+			// Landed is still true (master moved; never re-merge), but the
+			// outcome must say it is not running anywhere.
+			outcome = MergeNotDeployedMarker + ": " + outcome
+		}
+	}
 	return s.TransitionMerge(ctx, mr.ID, to, truncateUTF8(outcome, maxMergeResultBytes))
+}
+
+// MergeNotDeployedMarker prefixes the Result of a landed request whose
+// merge job did not report a verified deploy. The factory raises an
+// operator alert for it instead of calling the change deployed.
+const MergeNotDeployedMarker = "landed, NOT deployed"
+
+// MergeNotDeployed reports whether mr landed without a verified deploy.
+func MergeNotDeployed(mr MergeRequest) bool {
+	return strings.HasPrefix(mr.Result, MergeNotDeployedMarker)
+}
+
+// MergeResultDeployed reports whether the merge job's last result says the
+// merged commit was deployed and smoke-checked: deployed:true or a
+// non-empty deployed_commit. Missing or deployed:false is NOT deployed, so
+// a merge job that skips the deploy can never look like a clean landing.
+func MergeResultDeployed(job Job) bool {
+	var results []struct {
+		Result json.RawMessage `json:"result"`
+	}
+	if json.Unmarshal(job.Results, &results) != nil || len(results) == 0 {
+		return false
+	}
+	var body struct {
+		Deployed       *bool  `json:"deployed"`
+		DeployedCommit string `json:"deployed_commit"`
+	}
+	last := results[len(results)-1].Result
+	if len(last) == 0 || json.Unmarshal(last, &body) != nil {
+		return false
+	}
+	if body.Deployed != nil {
+		return *body.Deployed
+	}
+	return body.DeployedCommit != ""
 }
 
 // MergeResultMerged reports whether the merge job's last reported result

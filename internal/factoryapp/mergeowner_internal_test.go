@@ -327,7 +327,7 @@ func TestJobOwnedMergeLanded(t *testing.T) {
 	if al := mergeAlerts(t, a); len(al) != 0 {
 		t.Fatalf("a landed merge raised alerts: %+v", al)
 	}
-	if got := wakeReason(envs); !strings.Contains(got, "notify.merge") || !strings.Contains(got, "merged and deployed") {
+	if got := wakeReason(envs); !strings.Contains(got, "notify.merge") || !strings.Contains(got, "deployed and smoke-tested") {
 		t.Fatalf("wake reason = %q", got)
 	}
 }
@@ -607,5 +607,39 @@ func TestMergeJobReportOpensNoTask(t *testing.T) {
 	env := wire.MessageEnvelope{Type: notifyJobType, ThreadID: "task_x", Payload: json.RawMessage(`{"merge_job":true}`)}
 	if wakesPlanner(env) {
 		t.Fatal("a merge job's notify.job woke the planner")
+	}
+}
+
+// TestJobOwnedMergeLandedNotDeployed: a landed merge with no verified
+// deploy raises a P1 operator alert and tells the task it is not done.
+func TestJobOwnedMergeLandedNotDeployed(t *testing.T) {
+	a := newMergeApp(t)
+	ctx := context.Background()
+	src, task := ownedJob(t, a, "no deploy repo")
+	mr := ownMerge(t, a, src.ID, "feat/nodeploy")
+	report(t, a, src.ID, wire.StatusDone, "queued "+mr.ID, "")
+	if id := pass(t, a); id != mr.ID {
+		t.Fatalf("dispatched %q, want %s", id, mr.ID)
+	}
+	jobID := getMerge(t, a, mr.ID).JobID
+	if err := a.jobs.ApplyEvent(ctx, jobID, "started"); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(wire.JobResult{
+		JobID: jobID, Status: wire.StatusDone, Summary: "landed, NOT deployed: no deploy step",
+		Result: json.RawMessage(`{"merged":true,"merge_commit":"abc1234","deployed":false}`),
+	})
+	a.handleEnvelope(ctx, wire.MessageEnvelope{Type: "job.result", JobID: jobID, Payload: payload}, map[string]bool{})
+
+	got := getMerge(t, a, mr.ID)
+	if got.State != jobs.MergeLanded || !jobs.MergeNotDeployed(got) {
+		t.Fatalf("state=%s result=%q, want landed + NOT deployed", got.State, got.Result)
+	}
+	if al := mergeAlerts(t, a); len(al) != 1 {
+		t.Fatalf("alerts = %+v, want exactly one NOT deployed alert", al)
+	}
+	notes, _ := mergeNotes(t, a, task.ID)
+	if len(notes) != 1 || !strings.Contains(notes[0].Text, "NOT DEPLOYED") {
+		t.Fatalf("notes = %+v", notes)
 	}
 }

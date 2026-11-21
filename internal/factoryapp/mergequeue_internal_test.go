@@ -93,7 +93,7 @@ func finishJob(t *testing.T, a *App, jobID, status string) {
 	}
 	res := wire.JobResult{
 		JobID: jobID, Status: status, Summary: "merged and deployed",
-		Result: json.RawMessage(`{"merged":true,"merge_commit":"abc1234"}`),
+		Result: json.RawMessage(`{"merged":true,"merge_commit":"abc1234","deployed":true,"deployed_commit":"abc1234"}`),
 	}
 	if status == wire.StatusFailed {
 		res.Summary = "head drift: origin has 89abcdef"
