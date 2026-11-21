@@ -206,15 +206,17 @@ last line `DEPLOYED sha=...`) and get the repo listed in the table below.
 
 ### Deploy hooks (non-factory repos)
 
-| Repo | Hook (run in `$WORK` at `$MERGED`) |
-|---|---|
-| `pricec/video-chat` | `scripts/deploy.sh` |
-| `pricec/movies-chat` | `scripts/deploy.sh` (builds the Go binary, restarts `movies-chat.service`, checks `/healthz`) |
+| Repo | Foreman | Hook (run at `$MERGED`) |
+|---|---|---|
+| `pricec/video-chat` | integration (default) | `scripts/deploy.sh` |
+| `pricec/movies-chat` | integration (default) | `scripts/deploy.sh` (builds the Go binary, restarts `movies-chat.service`, checks `/healthz`) |
+| `pricec/media-curator` | `foreman:megatron` | `scripts/deploy.sh` (runs pytest, fast-forwards the live checkout, restarts the worker gracefully, health-checks, rolls back itself) |
 
 The table lives in this reviewed document on purpose: a repo gets host-level
 deploy only when listed here, never because a merged PR added a script. A hook
-runs on this host (the integration foreman), from a clean checkout of the merged
-commit, and must itself keep a rollback (image tag or binary copy), verify health, and restore the
+runs from a clean checkout of the merged commit, on the integration foreman
+(this host) unless the Foreman column names another one (see
+[Remote hooks](#remote-hooks)), and must itself keep a rollback (image tag or binary copy), verify health, and restore the
 previous version on failure (`scripts/deploy.sh` does all three and exits
 non-zero on failure):
 
@@ -228,6 +230,31 @@ record the sha and rollback tag. A non-zero exit means **STOP**
 (`deploy: <last failing line>; rolled back: yes|no`). Never touch other
 containers (workers, backfill jobs) from a hook.
 
+#### Remote hooks
+
+A row whose Foreman is not the integration foreman is a **remote hook**, and
+the merge job does **not** run it (it would deploy on the wrong host). For
+such a repo the merge job does steps 1 to 6, skips step 7, and reports
+`done` with `result.merged: true`, `merge_commit` (the full 40-char sha) and
+no `deployed`; summary `merged <MERGED:12>; deploy dispatched to <foreman>`.
+The merge queue then (code: `factoryapp.dispatchRemoteDeploy`, hook list
+`jobs.DeployHooks`, kept equal to this table by a test) re-points the request
+at a **deploy job** pinned to that foreman, granted the `github-pat` secret.
+The request stays `merging` and the queue stays held. The deploy job fetches
+`$MERGED` one-shot (the secret inline in a single `x-access-token` fetch URL;
+never written to config, remotes, files or logs), checks it out detached
+in a fresh directory, and runs the hook. Verdict from exit code and last line:
+
+| exit | last line | meaning |
+|---|---|---|
+| 0 | `DEPLOYED sha=<sha>` or `DEPLOYED <sha7> prev=<sha7>` | deployed |
+| 3 | same | code deployed, service restart deferred (e.g. a conversion in flight): still deployed, `result.restart_deferred: true` |
+| other | any | failed (the script rolls itself back) |
+
+The sha must be a prefix of `$MERGED`. The request lands as deployed only on
+the deploy job's `deployed: true`; a failure reports `stage: deploy`, the same
+escalation as an in-host deploy failure (P1 alert, no auto-fix, no retry).
+
 ## 7. Deploy master
 
 Run [docs/operator-runbook.md § Deploying master](operator-runbook.md#deploying-master)
@@ -239,7 +266,7 @@ before the manifest) are part of this step. A deploy failure means
 
 ## 8. Verify and report
 
-For a repo with a deploy hook, the hook's own verification (step 7) is the
+For a repo with a deploy hook, the hook's own verification (step 7; for a remote hook, the deploy job the queue dispatches) is the
 check; it must include a smoke check of the running service. For any other
 repo there is nothing to deploy: report `landed, NOT deployed`. For `pricec/factory`, re-check right before reporting:
 

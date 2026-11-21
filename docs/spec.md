@@ -1047,6 +1047,18 @@ planner did not come back to it.)
   `text` says what happened and what, if anything, is left to do.
 - The merge job, its procedure (docs/merging.md), the head pin, the one
   CI rerun and the deploy check are the same for every requester.
+- **Host-aware deploy hooks (2026-11-21 amendment).** The deploy-hooks
+  table in docs/merging.md has a Foreman column (default: the integration
+  foreman). For a hook on another foreman the merge job only merges and
+  reports `merged:true` with the full `merge_commit`; on that job's `done`
+  the queue (`dispatchRemoteDeploy`) re-points the still-`merging` request
+  at a deploy job (`jobs.RemoteDeployJobSpec`) pinned to the hook's foreman
+  and granted secret `github-pat` for a one-shot fetch of the merged commit.
+  The request lands deployed only on that job's `deployed:true` (exit 0, or
+  exit 3 = deployed with the restart deferred, plus a `DEPLOYED sha=<sha>` or
+  `DEPLOYED <sha7> prev=<sha7>` last line); failure is `stage: deploy`, the
+  same routing as an in-host deploy failure. The hook list in code
+  (`jobs.DeployHooks`) must equal the table (tested).
 
 ### 6.12 Factory auditor (2026-11-17 amendment)
 
